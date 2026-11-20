@@ -112,13 +112,6 @@ def test_runtime_builds_candidate_entry_plan_without_authorizing_or_submitting(m
         fee_bps=Decimal("10"), slippage_bps=Decimal("10"),
     )
     runtime, state = _runtime(tmp_path, FakePublicClient(), entry_plan_policy=policy)
-    monkeypatch.setattr(
-        "nebula.runtime.trend_signal",
-        lambda candles, fast, slow: SimpleNamespace(
-            action="buy", reason="test_buy_signal",
-            candle_ts=int(candles[0][0]) - 79 * 3_600_000,
-        ),
-    )
     # Use the latest confirmed candle timestamp from the exact feed.
     original = FakePublicClient().get_candles("AAA-USDT", "1H", 100)
     latest_ts = int(original[0][0])
