@@ -94,6 +94,10 @@ def test_spot_oco_contract_has_cash_mode_market_exit_prices_and_demo_header():
         "data": [{"algoId": "123456789", "algoClOrdId": "NBP123", "sCode": "0", "sMsg": ""}],
     }))
     client = OkxDemoClient(enabled_settings(), session=session)
+    client.get_spot_instrument = lambda inst_id: {
+        "instType": "SPOT", "instId": inst_id, "baseCcy": "BTC", "quoteCcy": "USDT",
+        "tickSz": "0.1", "lotSz": "0.0001", "minSz": "0.0001", "state": "live",
+    }
 
     result = client.place_spot_oco_exit(
         inst_id="BTC-USDT",
@@ -132,6 +136,10 @@ def test_oco_rejection_from_exchange_is_not_reported_as_success():
         "data": [{"algoId": "", "sCode": "51000", "sMsg": "Parameter error"}],
     }))
     client = OkxDemoClient(enabled_settings(), session=session)
+    client.get_spot_instrument = lambda inst_id: {
+        "instType": "SPOT", "instId": inst_id, "baseCcy": "BTC", "quoteCcy": "USDT",
+        "tickSz": "0.1", "lotSz": "0.0001", "minSz": "0.0001", "state": "live",
+    }
 
     from nebula.exchange import OkxError
     import pytest
