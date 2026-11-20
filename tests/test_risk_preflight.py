@@ -154,7 +154,7 @@ def test_candidate_preflight_rejects_price_that_moved_beyond_slippage_budget(tmp
     result = preflight.evaluate(candidate())
 
     assert result["status"] == "rejected"
-    assert "risk authorization failed closed" in result["reason"].lower()
+    assert "planned_entry_invalid" in result["reason"].lower()
     assert "tickers" in client.read_calls
 
 
