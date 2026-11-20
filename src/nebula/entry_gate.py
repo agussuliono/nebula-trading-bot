@@ -40,8 +40,9 @@ class StartupEntryPermit:
         self._state_digest = _state_fingerprint(state)
         self._consumed = False
         self._write_started = False
+        self._order_binding = None
 
-    def consume(self, client, state):
+    def consume(self, client, state, *, instrument, size, price, client_order_id):
         if self._consumed:
             raise StartupPermitError("Startup permit has already been consumed")
         if client is not self._client or state is not self._state or os.getpid() != self._pid:
@@ -53,6 +54,12 @@ class StartupEntryPermit:
             raise StartupPermitError("Startup permit API identity mismatch")
         if _state_fingerprint(state) != self._state_digest:
             raise StartupPermitError("Local state changed after recovery; run recovery again")
+        if (not instrument or not size or not price or not client_order_id):
+            raise StartupPermitError("A specific normalized entry order must be bound to the permit")
+        self._order_binding = {
+            "instId": str(instrument), "sz": str(size), "px": str(price),
+            "clOrdId": str(client_order_id),
+        }
         self._consumed = True
 
     def authorize_request(self, client, payload):
@@ -66,6 +73,9 @@ class StartupEntryPermit:
             raise StartupPermitError("Startup permit identity or order payload mismatch")
         if payload.get("side") != "buy" or payload.get("tdMode") != "cash":
             raise StartupPermitError("Permit only authorizes a Spot cash buy")
+        if any(str(payload.get(field, "")) != value
+               for field, value in self._order_binding.items()):
+            raise StartupPermitError("Spot buy does not match the exact order bound to startup permit")
         self._write_started = True
 
 
