@@ -213,19 +213,49 @@ class OkxDemoClient:
             raise OkxError(f"OKX order cancel rejected {result[0].get('sCode')}: {result[0].get('sMsg', '')}")
         return result
 
+    def _get_all_pending_pages(self, path: str, params: dict, cursor_field: str):
+        """Read every pending-order page; fail closed on malformed or looping cursors."""
+        rows_all = []
+        seen_ids = set()
+        cursor = None
+        for _page in range(100):
+            page_params = {**params, "limit": "100"}
+            if cursor is not None:
+                page_params["after"] = cursor
+            page = self.request("GET", path, page_params, private=True)
+            if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+                raise OkxError("OKX pending-order page is malformed")
+            for row in page:
+                record_id = str(row.get(cursor_field) or "")
+                if not record_id or record_id in seen_ids:
+                    raise OkxError("OKX pending-order pagination has a missing or duplicate cursor")
+                seen_ids.add(record_id)
+                rows_all.append(row)
+            if len(page) < 100:
+                return rows_all
+            next_cursor = str(page[-1].get(cursor_field) or "")
+            if not next_cursor or next_cursor == cursor:
+                raise OkxError("OKX pending-order pagination cursor did not advance")
+            cursor = next_cursor
+        raise OkxError("OKX pending-order pagination exceeded the safety page limit")
+
     def get_pending_orders(self, inst_type: str = "SPOT"):
         if inst_type != "SPOT":
             raise ValueError("NEBULA V1 supports Spot only")
-        return self.request("GET", "/api/v5/trade/orders-pending", {"instType": "SPOT"}, private=True)
+        return self._get_all_pending_pages(
+            "/api/v5/trade/orders-pending",
+            {"instType": "SPOT"},
+            "ordId",
+        )
 
     def get_pending_algo_orders(self, ord_type: str = "oco"):
         if ord_type not in {"oco", "conditional"}:
             raise ValueError("NEBULA V1 supports OCO/conditional protective orders only")
-        # OKX documents ordType as the required filter for this endpoint.
-        # Unlike /trade/orders-pending, orders-algo-pending does not accept
-        # instType; sending it can cause parameter-validation failures.
-        return self.request("GET", "/api/v5/trade/orders-algo-pending",
-                            {"ordType": ord_type}, private=True)
+        return self._get_all_pending_pages(
+            "/api/v5/trade/orders-algo-pending",
+            {"ordType": ord_type, "instType": "SPOT"},
+            "algoId",
+        )
 
     def get_algo_order(self, algo_client_order_id: str):
         if not algo_client_order_id or len(algo_client_order_id) > 32 or not algo_client_order_id.isalnum():
@@ -236,9 +266,8 @@ class OkxDemoClient:
     def get_algo_order_history(self, ord_type: str = "oco", state: str = "effective"):
         if ord_type not in {"oco", "conditional"} or state not in {"effective", "canceled", "order_failed"}:
             raise ValueError("Unsupported algo history filter")
-        # The algo-history endpoint is filtered by ordType/state, not instType.
         return self.request("GET", "/api/v5/trade/orders-algo-history",
-                            {"ordType": ord_type, "state": state}, private=True)
+                            {"ordType": ord_type, "state": state, "instType": "SPOT"}, private=True)
 
     def cancel_algo_order(self, *, inst_id: str, algo_id: str):
         self.settings.validate_order_permission()
