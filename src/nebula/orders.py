@@ -1,0 +1,158 @@
+"""Fail-closed order lifecycle coordinator for OKX Spot Demo."""
+from .config import SafetyError
+from .exchange import OkxError
+from .instruments import SpotInstrument
+
+
+TERMINAL_STATES = {"filled", "canceled", "rejected", "mmp_canceled"}
+TRACKED_STATES = {"live", "partially_filled", "filled", "canceled", "mmp_canceled"}
+
+
+class OrderManagerError(RuntimeError):
+    pass
+
+
+class DemoOrderManager:
+    """Coordinates durable intent reservation, submission, and reconciliation.
+
+    A client order ID is never resubmitted by this manager. If the response is
+    ambiguous or the order cannot be found, the intent remains blocked until a
+    human resolves it; absence from the pending list is not proof of rejection.
+    """
+    def __init__(self, client, state_store, circuit_breaker=None):
+        self.client = client
+        self.state = state_store
+        if circuit_breaker is None and hasattr(client, "settings"):
+            from .risk_controls import CircuitBreaker
+            circuit_breaker = CircuitBreaker(state_store, client.settings.max_daily_loss_quote)
+        self.circuit_breaker = circuit_breaker
+
+    def submit_limit(self, *, inst_id: str, side: str, size: str, price: str,
+                     client_order_id: str, candle_ts: int,
+                     position_client_order_id: str | None = None) -> dict:
+        # The exchange adapter independently enforces the immutable Demo header
+        # and the Settings order gate. This manager adds durable idempotency.
+        if side not in {"buy", "sell"}:
+            raise ValueError("side must be buy or sell")
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.check_order_allowed(side)
+        # Always use current exchange precision rules. No implicit rounding without
+        # the exchange's current tickSz/lotSz/minSz metadata.
+        raw_spec = self.client.get_spot_instrument(inst_id)
+        spec = SpotInstrument.from_okx(raw_spec)
+        if spec.inst_id != inst_id or spec.quote_ccy != "USDT":
+            raise OrderManagerError("V1 only permits the requested USDT-quoted Spot instrument")
+        size, price = spec.normalize_order(side, size, price)
+        try:
+            if side == "buy":
+                reserved = self.state.reserve_entry_intent(client_order_id, inst_id, candle_ts, side)
+            else:
+                if not position_client_order_id:
+                    raise OrderManagerError("Spot sell requires the active position_client_order_id")
+                reserved = self.state.reserve_exit_intent(client_order_id, inst_id, candle_ts, side,
+                                                          position_client_order_id)
+        except RuntimeError as exc:
+            raise OrderManagerError(str(exc)) from exc
+        if not reserved:
+            existing = self.state.get_intent(client_order_id)
+            raise OrderManagerError(
+                f"Duplicate or previously attempted client_order_id; not resubmitted (status={existing['status'] if existing else 'unknown'})"
+            )
+        self.state.record_event("order_intent_reserved", client_order_id,
+                                {"inst_id": inst_id, "side": side, "candle_ts": candle_ts})
+        self.state.update_intent(client_order_id, "submitting")
+        try:
+            response = self.client.place_spot_limit(
+                inst_id=inst_id, side=side, size=size, price=price,
+                client_order_id=client_order_id,
+            )
+        except (ValueError, SafetyError) as exc:
+            # Local validation and the explicit order gate fail before HTTP.
+            self.state.update_intent(client_order_id, "rejected")
+            if side == "buy":
+                self.state.release_rejected_entry_lock(client_order_id)
+            self.state.record_event("order_submission_blocked", client_order_id,
+                                    {"error_type": type(exc).__name__})
+            raise
+        except OkxError as exc:
+            message = str(exc)
+            # Only adapter's explicit per-order sCode rejection is definitive.
+            status = "rejected" if message.startswith("OKX order rejected") else "submission_unknown"
+            self.state.update_intent(client_order_id, status)
+            if side == "buy" and status == "rejected":
+                self.state.release_rejected_entry_lock(client_order_id)
+            self.state.record_event("order_submission_error", client_order_id,
+                                    {"classification": status, "error_type": type(exc).__name__})
+            raise
+        except Exception as exc:
+            self.state.update_intent(client_order_id, "submission_unknown")
+            self.state.record_event("order_submission_error", client_order_id,
+                                    {"classification": "submission_unknown", "error_type": type(exc).__name__})
+            raise
+
+        if not response or not response[0].get("ordId"):
+            self.state.update_intent(client_order_id, "submission_unknown")
+            self.state.record_event("order_ack_missing_id", client_order_id)
+            raise OrderManagerError("Order response lacked ordId; reconcile by clOrdId; do not retry")
+        ord_id = str(response[0]["ordId"])
+        self.state.update_intent(client_order_id, "acknowledged", ord_id)
+        self.state.record_event("order_acknowledged", client_order_id, {"ord_id": ord_id})
+        return {"client_order_id": client_order_id, "exchange_order_id": ord_id, "status": "acknowledged"}
+
+    def reconcile(self, client_order_id: str) -> dict:
+        intent = self.state.get_intent(client_order_id)
+        if not intent:
+            raise OrderManagerError("Unknown client_order_id")
+        if intent["status"] in TERMINAL_STATES:
+            return intent
+        try:
+            result = self.client.get_order(intent["instrument"], client_order_id)
+        except Exception as exc:
+            self.state.record_event("reconcile_error", client_order_id,
+                                    {"error_type": type(exc).__name__})
+            raise OrderManagerError("Order reconciliation failed; intent remains blocked") from exc
+
+        order = result[0] if result else None
+        if order is None:
+            # Pending list is a useful secondary lookup, but absence from it is
+            # not enough to infer rejection: the order may already be terminal.
+            try:
+                pending = self.client.get_pending_orders("SPOT")
+            except Exception as exc:
+                self.state.record_event("pending_lookup_error", client_order_id,
+                                        {"error_type": type(exc).__name__})
+                raise OrderManagerError("Pending-order lookup failed; intent remains blocked") from exc
+            order = next((item for item in pending if item.get("clOrdId") == client_order_id), None)
+
+        if order is None:
+            self.state.update_intent(client_order_id, "submission_unknown")
+            self.state.record_event("order_not_found_still_blocked", client_order_id)
+            return self.state.get_intent(client_order_id)
+
+        status = order.get("state")
+        try:
+            snapshot = self.state.save_order_snapshot(client_order_id, order)
+        except (ValueError, TypeError) as exc:
+            self.state.record_event("order_snapshot_invalid", client_order_id,
+                                    {"error_type": type(exc).__name__})
+            raise OrderManagerError("Exchange fill snapshot failed validation; order remains blocked") from exc
+        if status not in TRACKED_STATES:
+            self.state.update_intent(client_order_id, "submission_unknown", order.get("ordId"))
+            self.state.record_event("order_state_unrecognized", client_order_id,
+                                    {"exchange_state": status})
+            return self.state.get_intent(client_order_id)
+
+        self.state.update_intent(client_order_id, status, order.get("ordId"))
+        if intent["side"] == "buy" and status == "canceled" and snapshot["cumulative_fill_size"] == "0":
+            self.state.release_rejected_entry_lock(client_order_id)
+        self.state.record_event("order_reconciled", client_order_id,
+                                {"state": status, "acc_fill_sz": snapshot["cumulative_fill_size"],
+                                 "avg_px": snapshot["average_fill_price"], "fee": snapshot["fee"],
+                                 "fee_currency": snapshot["fee_currency"]})
+        return self.state.get_intent(client_order_id)
+
+    def reconcile_all(self) -> list[dict]:
+        outcomes = []
+        for intent in self.state.list_unresolved_intents():
+            outcomes.append(self.reconcile(intent["client_order_id"]))
+        return outcomes
