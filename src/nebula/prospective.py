@@ -65,7 +65,7 @@ def append_prospective_candles(
     if any(c.ts <= cutoff_ts for c in new_candles):
         raise BacktestError("New candle overlaps the frozen historical sample")
 
-    additions = validate_candles(new_candles)
+    additions = list(new_candles)
     interval = BAR_MS[bar]
     expected = existing[-1].ts + interval
     for candle in additions:
@@ -74,7 +74,7 @@ def append_prospective_candles(
         expected += interval
 
     combined = existing + additions
-    # validate_candles also checks OHLCV integrity and strict chronology.
+    # Validate the full series; the new batch itself may be a single candle.
     combined = validate_candles(combined)
     import io
     buffer = io.StringIO(newline="")
