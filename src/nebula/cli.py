@@ -12,7 +12,7 @@ from .portfolio import PortfolioPolicy, PortfolioRiskEngine
 
 def main():
     parser = argparse.ArgumentParser(prog="nebula")
-    parser.add_argument("command", choices=["check-demo-public", "analyze-once", "preflight-once", "portfolio-once", "recover-once", "orchestrate-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
+    parser.add_argument("command", choices=["check-demo-public", "verify-demo-once", "analyze-once", "preflight-once", "portfolio-once", "recover-once", "orchestrate-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
     parser.add_argument("--db", default=os.getenv("NEBULA_DB_PATH", "nebula.sqlite3"))
     parser.add_argument("--bar", default="1H")
     parser.add_argument("--data", help="Local ascending OHLCV CSV for offline backtest or dataset audit")
@@ -148,6 +148,11 @@ def main():
         instruments = client.get_instruments()
         tickers = client.get_tickers()
         emit_result(f"OK: {len(instruments)} spot instruments; {len(tickers)} tickers (public market data). No orders sent.")
+        return
+    if args.command == "verify-demo-once":
+        from .demo_verification import verify_demo_read_only
+        report = verify_demo_read_only(client, settings)
+        emit_result(json.dumps(report, indent=2, sort_keys=True))
         return
     if args.command == "orchestrate-once":
         from .orchestrator import ExecutionOrchestrator
