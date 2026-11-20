@@ -103,7 +103,11 @@ class StartupRecovery:
                 continue
             snap = snapshots.get(cid)
             if snap:
-                filled = self._positive(snap["cumulative_fill_size"], "local cumulative fill")
+                try:
+                    filled = self._positive(snap["cumulative_fill_size"], "local cumulative fill")
+                except StartupRecoveryError:
+                    errors.append("invalid_local_cumulative_fill:" + cid)
+                    continue
                 if filled > 0 and (not lock or lock["owner_client_order_id"] != cid):
                     released = db.execute(
                         "SELECT 1 FROM audit_events WHERE client_order_id=? "
@@ -166,6 +170,18 @@ class StartupRecovery:
             "open_regular_orders": len(regular),
             "open_algo_orders": len(algos),
         }
+
+    def _reject_untracked_other_assets(self, base_currency):
+        balances = self.client.get_balance()
+        if len(balances) != 1 or not isinstance(balances[0].get("details"), list):
+            raise StartupRecoveryError("Account balance snapshot is malformed")
+        for row in balances[0]["details"]:
+            if not isinstance(row, dict) or not row.get("ccy"):
+                raise StartupRecoveryError("Account balance row is malformed")
+            total = (self._positive(row.get("availBal"), "available balance")
+                     + self._positive(row.get("frozenBal"), "frozen balance"))
+            if row["ccy"] not in {"USDT", base_currency} and total > 0:
+                raise StartupRecoveryError("Untracked non-position asset balance exists")
 
     def run(self):
         """Reconcile local intents and account state without exchange writes."""
@@ -238,8 +254,16 @@ class StartupRecovery:
                     row for row in account.open_algo_orders
                     if row.get("algoClOrdId") == expected_algo
                 ]
-                if len(matching_algos) != 1 or account.open_orders:
-                    raise StartupRecoveryError("Active OCO does not match the fresh open-order snapshot")
+                all_regular = self.client.get_pending_orders("SPOT")
+                all_algos = [
+                    *self.client.get_pending_algo_orders("oco"),
+                    *self.client.get_pending_algo_orders("conditional"),
+                ]
+                if (len(matching_algos) != 1 or account.open_orders or all_regular
+                        or len(all_algos) != 1
+                        or all_algos[0].get("algoClOrdId") != expected_algo):
+                    raise StartupRecoveryError("Active OCO does not match the fresh account-wide open-order snapshot")
+                self._reject_untracked_other_assets(account.base_currency)
                 if account.available_base + account.frozen_base <= 0:
                     raise StartupRecoveryError("Active OCO exists but base inventory is zero")
                 return {
@@ -263,6 +287,21 @@ class StartupRecovery:
                 actual = account.available_base + account.frozen_base
                 if expected != actual:
                     raise StartupRecoveryError("Local fill ledger and fresh base balance disagree")
+                child_ids = {
+                    row["exchange_order_id"]
+                    for row in self.state.list_exit_child_orders(owner)
+                }
+                all_regular = self.client.get_pending_orders("SPOT")
+                all_algos = [
+                    *self.client.get_pending_algo_orders("oco"),
+                    *self.client.get_pending_algo_orders("conditional"),
+                ]
+                if any(str(row.get("ordId")) not in child_ids for row in all_regular):
+                    raise StartupRecoveryError("Untracked regular exchange order exists during OCO exit recovery")
+                if any(row.get("algoClOrdId") != protection_intent["algo_client_order_id"]
+                       for row in all_algos):
+                    raise StartupRecoveryError("Untracked algo order exists during OCO exit recovery")
+                self._reject_untracked_other_assets(account.base_currency)
                 return {
                     "status": "position_reconciled_exit_in_progress",
                     "entry_authorized": False,
