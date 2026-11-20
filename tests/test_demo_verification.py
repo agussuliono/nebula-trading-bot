@@ -65,7 +65,7 @@ def test_read_only_demo_verification_checks_public_private_and_spot_safety():
     assert result["public_api"] == "ok"
     assert result["private_api"] == "ok"
     assert result["account_mode"] == "spot"
-    assert result["api_permissions"] == "present"
+    assert result["api_permissions"] == "compliant"
     assert result["open_orders"] == "clear"
     assert result["exchange_writes"] == 0
     assert result["orders_enabled"] is False
