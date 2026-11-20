@@ -34,9 +34,11 @@ def test_permit_is_one_shot_and_bound_to_exact_state_and_client(tmp_path):
 
     assert result["entry_permit_issued"] is True
     permit = recovery.entry_permit
-    permit.consume(client, state)
+    bound = {"instrument": "BTC-USDT", "size": "0.01", "price": "50000",
+             "client_order_id": "NBONESHOT"}
+    permit.consume(client, state, **bound)
     with pytest.raises(StartupPermitError, match="already been consumed"):
-        permit.consume(client, state)
+        permit.consume(client, state, **bound)
 
 
 def test_permit_is_invalidated_when_local_state_changes_after_recovery(tmp_path):
@@ -47,7 +49,9 @@ def test_permit_is_invalidated_when_local_state_changes_after_recovery(tmp_path)
 
     state.record_event("state_changed_after_recovery", None, {"test": True})
     with pytest.raises(StartupPermitError, match="state changed"):
-        recovery.entry_permit.consume(client, state)
+        recovery.entry_permit.consume(client, state, instrument="BTC-USDT",
+                                       size="0.01", price="50000",
+                                       client_order_id="NBSTALE")
 
 
 def test_permit_cannot_be_used_with_another_state_store(tmp_path):
@@ -58,7 +62,9 @@ def test_permit_cannot_be_used_with_another_state_store(tmp_path):
     assert recovery.run()["entry_permit_issued"] is True
 
     with pytest.raises(StartupPermitError, match="binding mismatch"):
-        recovery.entry_permit.consume(client, other)
+        recovery.entry_permit.consume(client, other, instrument="BTC-USDT",
+                                       size="0.01", price="50000",
+                                       client_order_id="NBOTHER")
 
 
 def test_non_spot_or_withdraw_enabled_account_never_gets_permit(tmp_path):
