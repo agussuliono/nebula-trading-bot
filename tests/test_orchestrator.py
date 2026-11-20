@@ -108,6 +108,14 @@ class FakeProtection:
         self.calls.append(("submit_oco", entry_client_order_id))
         return {"status": "active", "exchange_algo_id": "12345"}
 
+    def reconcile(self, entry_client_order_id):
+        self.calls.append(("reconcile_oco", entry_client_order_id))
+        return {"status": "triggered", "accounting": {"accounting_complete": True}}
+
+    def finalize_position_if_flat(self, entry_client_order_id, *, accounting):
+        self.calls.append(("finalize", entry_client_order_id))
+        return {"released": True, "reason": "verified_flat"}
+
 
 def enabled_settings(**overrides):
     values = dict(
@@ -160,7 +168,7 @@ def test_execution_requires_explicit_demo_account_attestation(tmp_path):
     assert runtime.calls == 0
 
 
-def test_no_candidate_does_not_run_private_recovery_or_create_order_manager(tmp_path):
+def test_no_candidate_still_runs_startup_recovery_but_never_creates_order_manager(tmp_path):
     FakeOrders.instances.clear()
     report = candidate_report()
     report["signals"][0]["signal"] = "hold"
@@ -245,3 +253,73 @@ def test_entry_exception_is_fail_closed_and_never_blindly_retried(tmp_path):
     assert result["entry_submission_may_have_occurred"] is True
     assert result["do_not_retry"] is True
     assert result["oco_submission_may_have_occurred"] is False
+
+
+class ActivePositionRecovery(FakeRecovery):
+    def __init__(self, client, state):
+        self.entry_permit = None
+
+    def run(self):
+        return {
+            "status": "position_reconciled_protection_active",
+            "entry_authorized": False,
+            "position_client_order_id": "NBEACTIVE",
+            "exchange_writes": 0,
+        }
+
+
+class ExitInProgressRecovery(FakeRecovery):
+    def __init__(self, client, state):
+        self.entry_permit = None
+
+    def run(self):
+        return {
+            "status": "position_reconciled_exit_in_progress",
+            "entry_authorized": False,
+            "position_client_order_id": "NBEEXIT",
+            "exchange_writes": 0,
+        }
+
+
+def test_existing_active_oco_position_is_reconciled_and_blocks_new_entry(tmp_path):
+    FakeOrders.instances.clear()
+    report = candidate_report()
+    report["signals"][0]["signal"] = "hold"
+    orchestrator, _, _ = make_orchestrator(
+        tmp_path, settings=enabled_settings(), runtime=FakeRuntime(report),
+        recovery=ActivePositionRecovery,
+    )
+    result = orchestrator.run_once(execute=True)
+
+    assert result["status"] == "existing_position_protected"
+    assert result["execution"] == "no_new_entry"
+    assert FakeOrders.instances == []
+
+
+def test_flat_triggered_exit_releases_position_but_waits_until_next_cycle(tmp_path):
+    FakeOrders.instances.clear()
+    orchestrator, _, _ = make_orchestrator(
+        tmp_path, settings=enabled_settings(), recovery=ExitInProgressRecovery,
+    )
+    result = orchestrator.run_once(execute=True)
+
+    assert result["status"] == "existing_position_closed_next_cycle"
+    assert result["execution"] == "no_new_entry_this_cycle"
+    assert FakeOrders.instances == []
+    assert ("finalize", "NBEEXIT") in FakeProtection.instances[-1].calls
+
+
+def test_triggered_exit_that_is_not_flat_keeps_position_locked(tmp_path):
+    class NotFlatProtection(FakeProtection):
+        def finalize_position_if_flat(self, entry_client_order_id, *, accounting):
+            return {"released": False, "reason": "account_not_flat"}
+
+    orchestrator, _, _ = make_orchestrator(
+        tmp_path, settings=enabled_settings(), recovery=ExitInProgressRecovery,
+    )
+    orchestrator.protection_manager_cls = NotFlatProtection
+    result = orchestrator.run_once(execute=True)
+
+    assert result["status"] == "existing_position_not_yet_flat"
+    assert result["position_lock_retained"] is True
+    assert result["order_submission_attempts"] == 0
