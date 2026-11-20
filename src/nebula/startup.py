@@ -158,9 +158,18 @@ class StartupRecovery:
             raise StartupRecoveryError("OKX account is not in Spot account mode")
         if config.get("autoLoan") is not False or config.get("enableSpotBorrow") is not False:
             raise StartupRecoveryError("Borrowing or auto-loan is enabled or its state is unknown")
-        permissions = {part.strip().lower() for part in str(config.get("perm", "")).split(",") if part.strip()}
-        if not {"read_only", "trade"}.issubset(permissions) or "withdraw" in permissions:
-            raise StartupRecoveryError("API key must have read_only and trade permissions and no withdrawal permission")
+        raw_permissions = config.get("perm")
+        permission_parts = raw_permissions.split(",") if isinstance(raw_permissions, str) else []
+        permissions = {part.strip().lower() for part in permission_parts if part.strip()}
+        malformed_permissions = (
+            not isinstance(raw_permissions, str)
+            or not raw_permissions.strip()
+            or any(not part.strip() for part in permission_parts)
+        )
+        if malformed_permissions or permissions != {"read_only", "trade"}:
+            raise StartupRecoveryError(
+                "API key must have exactly read_only and trade permissions, with no additional or malformed scopes"
+            )
         balances = self.client.get_balance()
         regular = self.client.get_pending_orders("SPOT")
         algos = [
