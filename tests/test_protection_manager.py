@@ -194,11 +194,6 @@ def test_exchange_backed_oco_requires_fresh_unreserved_base_balance(
 ):
     class ExchangeBacked(PublicDemoStub):
         def __init__(self):
-            self.settings = Settings(
-                api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-                demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
-                max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
-            )
             self.place_calls = 0
 
         def get_balance(self):
