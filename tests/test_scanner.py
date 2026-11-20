@@ -36,16 +36,16 @@ def test_candle_volatility_ignores_unconfirmed():
 
 def test_rank_uses_volatility_listing_age_and_data_quality_tiebreakers():
     items = [
-        MarketCandidate("A-USDT", 1000, .1, .2, 100, 80),
-        MarketCandidate("B-USDT", 1000, .1, 1.0, 200, 90),
-        MarketCandidate("C-USDT", 1000, .1, 1.0, 100, 90),
+        MarketCandidate("AA-USDT", 1000, .1, .2, 100, 80),
+        MarketCandidate("BB-USDT", 1000, .1, 1.0, 200, 90),
+        MarketCandidate("CC-USDT", 1000, .1, 1.0, 100, 90),
     ]
     got = rank_candidates(items, min_quote_volume=100, max_spread_pct=.5,
                           min_volatility_pct=.2, max_volatility_pct=1.8,
                           min_listing_age_days=30, min_data_points=50)
     # Midpoint volatility is 1.0%; among equally liquid/tight candidates,
     # B wins on listing age, then data completeness is the next tie-break.
-    assert [x.inst_id for x in got] == ["B-USDT", "C-USDT", "A-USDT"]
+    assert [x.inst_id for x in got] == ["BB-USDT", "CC-USDT", "AA-USDT"]
 
 
 def test_volatility_uses_true_range_and_ignores_zero_volume_and_unconfirmed():
@@ -69,7 +69,7 @@ def test_volatility_rejects_invalid_window():
 
 
 def test_build_candidates_rejects_stale_future_and_duplicate_tickers():
-    now = 10_000_000
+    now = 10_000_000_000
     instrument = {"instId":"BTC-USDT", "instType":"SPOT", "state":"live",
                   "quoteCcy":"USDT", "listTime":str(now - 90 * 86_400_000)}
     base = {"instId":"BTC-USDT", "bidPx":"99", "askPx":"100",
@@ -83,7 +83,7 @@ def test_build_candidates_rejects_stale_future_and_duplicate_tickers():
 
 
 def test_build_candidates_rejects_future_listing_and_nonfinite_market_fields():
-    now = 10_000_000
+    now = 10_000_000_000
     future_listing = {"instId":"BTC-USDT", "instType":"SPOT", "state":"live",
                       "quoteCcy":"USDT", "listTime":str(now + 1)}
     ticker = {"instId":"BTC-USDT", "bidPx":"99", "askPx":"100",
