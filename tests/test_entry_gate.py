@@ -10,7 +10,7 @@ from nebula.state import StateStore
 
 class CleanAccount:
     settings = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-                       demo_account_exclusive=True)
+                       demo_account_exclusive=True, max_daily_loss_quote=20)
 
     def get_account_config(self):
         return [{"uid": "demo-uid", "acctLv": "1", "autoLoan": False,
