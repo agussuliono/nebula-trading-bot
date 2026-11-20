@@ -17,9 +17,6 @@ jobs:
     timeout-minutes: 5
     environment: okx-demo-readonly
     env:
-      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-      OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
-      OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
       NEBULA_ENABLE_DEMO_ORDERS: 'false'
       NEBULA_KILL_SWITCH: 'true'
       PYTHONDONTWRITEBYTECODE: '1'
@@ -36,15 +33,17 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Validate secret presence without displaying values
+      - name: Install NEBULA
+        run: python -m pip install --disable-pip-version-check -e .
+
+      - name: Run read-only Demo verification
+        env:
+          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+          OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
+          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         shell: bash
         run: |
           test -n "$OKX_API_KEY"
           test -n "$OKX_SECRET_KEY"
           test -n "$OKX_PASSPHRASE"
-
-      - name: Install NEBULA
-        run: python -m pip install --disable-pip-version-check -e .
-
-      - name: Run read-only Demo verification
-        run: nebula verify-demo-once
+          nebula verify-demo-once
