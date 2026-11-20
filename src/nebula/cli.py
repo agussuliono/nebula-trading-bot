@@ -153,6 +153,8 @@ def main():
         from .demo_verification import verify_demo_read_only
         report = verify_demo_read_only(client, settings)
         emit_result(json.dumps(report, indent=2, sort_keys=True))
+        if report.get("status") != "read_only_demo_connection_verified":
+            raise SystemExit(1)
         return
     if args.command == "orchestrate-once":
         from .orchestrator import ExecutionOrchestrator
