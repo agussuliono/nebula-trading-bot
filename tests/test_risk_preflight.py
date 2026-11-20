@@ -288,3 +288,24 @@ def test_candidate_preflight_rejects_widened_current_spread(tmp_path):
     assert result["status"] == "rejected"
     assert "planned_entry_invalid" in result["reason"].lower()
     assert "tickers" in client.read_calls
+
+
+
+def test_preflight_refuses_unconfirmed_demo_account_exclusivity_before_reads(tmp_path):
+    from dataclasses import replace
+
+    client = SnapshotClient()
+    state = StateStore(str(tmp_path / "non-exclusive.sqlite3"))
+    settings = replace(read_only_settings(), demo_account_exclusive=False)
+    authorizer = PortfolioRiskAuthorizer(
+        client,
+        state,
+        settings,
+        plan_provider=lambda **kwargs: pytest.fail("plan_provider must not replace candidate"),
+        clock_ms=lambda: NOW_MS,
+    )
+    result = CandidateRiskPreflight(authorizer, state).evaluate(candidate())
+
+    assert result["status"] == "rejected"
+    assert "exclusivity" in result["reason"].lower()
+    assert client.read_calls == []
