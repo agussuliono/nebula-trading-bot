@@ -19,10 +19,14 @@ class DemoOrderManager:
     ambiguous or the order cannot be found, the intent remains blocked until a
     human resolves it; absence from the pending list is not proof of rejection.
     """
-    def __init__(self, client, state_store, circuit_breaker=None, risk_authorizer=None):
+    def __init__(self, client, state_store, circuit_breaker=None, risk_authorizer=None,
+                 startup_permit=None):
         self.client = client
         self.state = state_store
         self.risk_authorizer = risk_authorizer
+        self.startup_permit = startup_permit
+        if hasattr(client, "install_startup_entry_permit") and startup_permit is not None:
+            client.install_startup_entry_permit(startup_permit, state_store)
         if circuit_breaker is None and hasattr(client, "settings"):
             from .risk_controls import CircuitBreaker
             circuit_breaker = CircuitBreaker(state_store, client.settings.max_daily_loss_quote)
@@ -93,6 +97,17 @@ class DemoOrderManager:
                 }
             except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
                 raise OrderManagerError("Approved risk amount or protective levels are invalid") from exc
+        # Production exchange-backed buys require a fresh permit from a
+        # clean, read-only StartupRecovery run. It is consumed before local
+        # reservation, so even a crash cannot reuse it for a second entry.
+        if side == "buy" and hasattr(self.client, "install_startup_entry_permit"):
+            if self.startup_permit is None:
+                raise OrderManagerError("No clean StartupRecovery permit; refusing Spot entry")
+            try:
+                self.startup_permit.consume(self.client, self.state)
+            except Exception as exc:
+                raise OrderManagerError("Startup recovery permit is invalid or stale") from exc
+
         try:
             if side == "buy":
                 reserved = self.state.reserve_entry_intent(
