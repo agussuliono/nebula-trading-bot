@@ -73,11 +73,9 @@ class Settings:
             market_data_max_age_ms=_positive_int("NEBULA_MARKET_DATA_MAX_AGE_MS", "30000"),
         )
 
-    def validate_order_permission(self) -> None:
+    def _validate_demo_write_base(self) -> None:
         if not self.enable_demo_orders:
             raise SafetyError("Demo order submission is disabled")
-        if self.kill_switch:
-            raise SafetyError("Emergency stop is active")
         if not all((self.api_key, self.secret_key, self.passphrase)):
             raise SafetyError("Demo API credentials are incomplete")
         limits = (self.max_daily_loss_quote, self.max_risk_quote, self.max_position_quote)
@@ -85,3 +83,12 @@ class Settings:
             raise SafetyError("All risk limits must be finite and explicitly configured above zero")
         if self.max_risk_quote > self.max_daily_loss_quote:
             raise SafetyError("Per-trade risk cannot exceed the daily loss limit")
+
+    def validate_order_permission(self) -> None:
+        self._validate_demo_write_base()
+        if self.kill_switch:
+            raise SafetyError("Emergency stop is active")
+
+    def validate_cancel_permission(self) -> None:
+        """Allow canceling a regular order during emergency stop; never allows new exposure."""
+        self._validate_demo_write_base()
