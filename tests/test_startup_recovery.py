@@ -10,7 +10,7 @@ from nebula.state import StateStore
 
 
 class CleanAccount:
-    settings = SimpleNamespace(demo_account_exclusive=True)
+    settings = SimpleNamespace(demo_account_exclusive=True, max_daily_loss_quote=20)
 
     def get_balance(self):
         return [{"details": [{"ccy": "USDT", "availBal": "1000", "frozenBal": "0"}]}]
