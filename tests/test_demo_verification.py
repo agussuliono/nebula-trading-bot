@@ -125,6 +125,34 @@ def test_non_read_permissions_are_rejected(permission):
     assert "api_key_has_" + permission + "_permission" in result["blockers"]
     assert result["exchange_writes"] == 0
 
+@pytest.mark.parametrize("permission", ["custom_scope", "unknown", ""])
+def test_unknown_or_malformed_permissions_are_rejected(permission):
+    raw = "read_only," + permission if permission else "read_only,"
+    client = ReadOnlyDemoStub(config={
+        "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+        "perm": raw,
+    })
+    result = verify_demo_read_only(client, credentials())
+
+    assert result["status"] == "connected_but_not_ready"
+    assert result["api_permissions"] == "not_compliant"
+    assert (
+        "api_key_permissions_malformed" in result["blockers"]
+        or "api_key_unrecognized_or_unapproved_permission" in result["blockers"]
+    )
+    assert result["exchange_writes"] == 0
+
+
+def test_non_string_permissions_are_rejected():
+    client = ReadOnlyDemoStub(config={
+        "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+        "perm": None,
+    })
+    result = verify_demo_read_only(client, credentials())
+    assert result["api_permissions"] == "not_compliant"
+    assert "api_key_permissions_malformed" in result["blockers"]
+
+
 def test_withdraw_permission_is_a_blocker_and_no_write_is_possible():
     client = ReadOnlyDemoStub(config={
         "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
