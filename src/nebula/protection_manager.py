@@ -129,11 +129,15 @@ class DemoProtectionManager:
                 approved_entry = Decimal(str(approved_plan["entry_price"]))
                 approved_tp = Decimal(str(approved_plan["take_profit"]))
                 approved_sl = Decimal(str(approved_plan["stop_loss"]))
+                average_fill = Decimal(str(snapshot["average_fill_price"]))
+                filled_quantity = Decimal(str(filled))
                 if (approved_plan.get("instrument") != entry["instrument"]
                         or not all(value.is_finite() and value > 0 for value in
-                                   (approved_size, approved_entry, approved_tp, approved_sl))
-                        or not approved_sl < approved_entry < approved_tp):
-                    raise ValueError("invalid persisted plan")
+                                   (approved_size, approved_entry, approved_tp, approved_sl,
+                                    average_fill, filled_quantity))
+                        or filled_quantity > approved_size
+                        or not approved_sl < average_fill < approved_tp):
+                    raise ValueError("approved plan does not safely cover actual entry fills")
                 if ((take_profit is not None and Decimal(str(take_profit)) != approved_tp)
                         or (stop_loss is not None and Decimal(str(stop_loss)) != approved_sl)):
                     raise ProtectionManagerError(
