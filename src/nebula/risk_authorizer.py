@@ -105,6 +105,19 @@ class PortfolioRiskAuthorizer:
                     raise
                 raise RiskAuthorizationError("Entry plan price/size fields are invalid") from exc
 
+            # Re-read current Spot rules at preflight time. A previously valid
+            # candidate must not pass if tickSz/lotSz/minSz or listing state changed.
+            from .instruments import SpotInstrument
+            spec = SpotInstrument.from_okx(self.client.get_spot_instrument(instrument))
+            if spec.inst_id != instrument or spec.quote_ccy != "USDT":
+                raise RiskAuthorizationError("Current instrument metadata is not the requested USDT Spot market")
+            normalized_size, normalized_price = spec.normalize_order(
+                "buy", requested_size, requested_price
+            )
+            if (Decimal(normalized_size) != Decimal(str(requested_size))
+                    or Decimal(normalized_price) != Decimal(str(requested_price))):
+                raise RiskAuthorizationError("Candidate size or price no longer matches current Spot precision rules")
+
             now_ms = int(self.clock_ms())
             candle_close_ts = plan_candle_ts + self.bar_ms
             if (candle_close_ts > now_ms
