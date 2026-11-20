@@ -57,6 +57,10 @@ def test_order_request_is_guarded_and_marked_demo(tmp_path):
     client.install_startup_entry_permit(permit, state)
     permit.consume(client, state, instrument="BTC-USDT", size="0.001",
                     price="50000", client_order_id="NB123")
+    client.get_spot_instrument = lambda inst_id: {
+        "instType": "SPOT", "instId": inst_id, "baseCcy": "BTC", "quoteCcy": "USDT",
+        "tickSz": "0.1", "lotSz": "0.001", "minSz": "0.001", "state": "live",
+    }
     result = client.place_spot_limit(inst_id="BTC-USDT", side="buy", size="0.001",
                                      price="50000", client_order_id="NB123")
     assert result[0]["sCode"] == "0"
@@ -231,6 +235,38 @@ def test_history_candles_uses_public_endpoint_and_validates_cursor():
         client.get_history_candles("BTC-USDT", after="not-a-timestamp")
 
 
+@pytest.mark.parametrize(
+    "size,price,state,error",
+    [
+        ("0.0015", "50000", "live", "lotSz"),
+        ("0.001", "50000.05", "live", "tickSz"),
+        ("0.0005", "50000", "live", "minSz"),
+        ("0.001", "50000", "suspend", "tradable"),
+    ],
+)
+def test_limit_adapter_rejects_instrument_rule_violations_before_post(size, price, state, error):
+    settings = Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True,
+                        kill_switch=False, max_daily_loss_quote=20, max_risk_quote=2,
+                        max_position_quote=100)
+    class NeverPostSession:
+        def __init__(self): self.calls = []
+        def request(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            raise AssertionError("invalid order must be rejected before HTTP")
+    session = NeverPostSession()
+    client = OkxDemoClient(settings, session=session)
+    client.get_spot_instrument = lambda inst_id: {
+        "instType": "SPOT", "instId": inst_id, "baseCcy": "BTC", "quoteCcy": "USDT",
+        "tickSz": "0.1", "lotSz": "0.001", "minSz": "0.001", "state": state,
+    }
+    with pytest.raises(ValueError, match=error):
+        client.place_spot_limit(inst_id="BTC-USDT", side="buy", size=size, price=price,
+                                 client_order_id="NB123")
+    assert session.calls == []
+
+
+
+
 
 def test_unreviewed_endpoint_is_blocked_before_network_io():
     from nebula.config import SafetyError
@@ -326,3 +362,34 @@ def test_http_redirects_are_rejected_without_following_or_replaying_private_head
     assert kwargs["allow_redirects"] is False
     assert kwargs["headers"]["OK-ACCESS-KEY"] == "demo-key"
     assert kwargs["headers"]["x-simulated-trading"] == "1"
+
+@pytest.mark.parametrize(
+    "size,price,state,error",
+    [
+        ("0.0015", "50000", "live", "lotSz"),
+        ("0.001", "50000.05", "live", "tickSz"),
+        ("0.0005", "50000", "live", "minSz"),
+        ("0.001", "50000", "suspend", "tradable"),
+    ],
+)
+def test_limit_adapter_rejects_instrument_rule_violations_before_post(size, price, state, error):
+    settings = Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True,
+                        kill_switch=False, max_daily_loss_quote=20, max_risk_quote=2,
+                        max_position_quote=100)
+    class NeverPostSession:
+        def __init__(self): self.calls = []
+        def request(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            raise AssertionError("invalid order must be rejected before HTTP")
+    session = NeverPostSession()
+    client = OkxDemoClient(settings, session=session)
+    client.get_spot_instrument = lambda inst_id: {
+        "instType": "SPOT", "instId": inst_id, "baseCcy": "BTC", "quoteCcy": "USDT",
+        "tickSz": "0.1", "lotSz": "0.001", "minSz": "0.001", "state": state,
+    }
+    with pytest.raises(ValueError, match=error):
+        client.place_spot_limit(inst_id="BTC-USDT", side="buy", size=size, price=price,
+                                 client_order_id="NB123")
+    assert session.calls == []
+
+
