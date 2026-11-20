@@ -55,8 +55,9 @@ inconsistent database block execution.
 
 1. Scan eligible live USDT Spot instruments using fresh tickers and confirmed
    closed candles.
-2. If a buy candidate exists, run read-only startup recovery and account-wide
-   reconciliation. Existing protected positions are monitored; triggered OCO
+2. Run read-only startup recovery and account-wide reconciliation on every
+   explicit Demo-execution cycle, including cycles with no new buy candidate.
+   Existing protected positions are monitored; triggered OCO
    exits are reconciled and the position lock is released only after complete
    fill accounting and a fresh account snapshot prove the account flat.
 3. Require a fresh one-shot StartupEntryPermit.
