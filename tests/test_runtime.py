@@ -22,7 +22,7 @@ class FakePublicClient:
     def get_tickers(self):
         self.calls.append("tickers")
         return [{"instId": "AAA-USDT", "bidPx": "99", "askPx": "99.1",
-                 "volCcy24h": "5000000", "last": "99.05"}]
+                 "volCcy24h": "5000000", "bidSz": "100", "askSz": "100", "ts": "1799999999000", "last": "99.05"}]
 
     def get_candles(self, inst_id, bar, limit):
         self.calls.append(("candles", inst_id, bar, limit))
