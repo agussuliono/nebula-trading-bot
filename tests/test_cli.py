@@ -134,6 +134,24 @@ def test_orchestrate_cli_passes_explicit_demo_execution_choice(
 
 
 
+def test_verify_demo_cli_exits_nonzero_when_account_is_not_ready(monkeypatch, capsys):
+    from nebula.config import Settings
+
+    monkeypatch.setattr("sys.argv", ["nebula", "verify-demo-once"])
+    monkeypatch.setattr("nebula.cli.Settings.from_env", lambda: Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass"
+    ))
+    monkeypatch.setattr("nebula.cli.OkxDemoClient", lambda settings: object())
+    monkeypatch.setattr("nebula.demo_verification.verify_demo_read_only", lambda client, settings: {
+        "status": "connected_but_not_ready", "blockers": ["api_key_has_trade_permission"],
+    })
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    assert "api_key_has_trade_permission" in capsys.readouterr().out
+
 def test_execute_demo_flag_is_rejected_for_read_only_demo_verification(monkeypatch):
     monkeypatch.setattr("sys.argv", ["nebula", "verify-demo-once", "--execute-demo"])
     with pytest.raises(SystemExit) as exc:
