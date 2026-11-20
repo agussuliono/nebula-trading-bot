@@ -221,8 +221,11 @@ class OkxDemoClient:
     def get_pending_algo_orders(self, ord_type: str = "oco"):
         if ord_type not in {"oco", "conditional"}:
             raise ValueError("NEBULA V1 supports OCO/conditional protective orders only")
+        # OKX documents ordType as the required filter for this endpoint.
+        # Unlike /trade/orders-pending, orders-algo-pending does not accept
+        # instType; sending it can cause parameter-validation failures.
         return self.request("GET", "/api/v5/trade/orders-algo-pending",
-                            {"ordType": ord_type, "instType": "SPOT"}, private=True)
+                            {"ordType": ord_type}, private=True)
 
     def get_algo_order(self, algo_client_order_id: str):
         if not algo_client_order_id or len(algo_client_order_id) > 32 or not algo_client_order_id.isalnum():
@@ -233,8 +236,9 @@ class OkxDemoClient:
     def get_algo_order_history(self, ord_type: str = "oco", state: str = "effective"):
         if ord_type not in {"oco", "conditional"} or state not in {"effective", "canceled", "order_failed"}:
             raise ValueError("Unsupported algo history filter")
+        # The algo-history endpoint is filtered by ordType/state, not instType.
         return self.request("GET", "/api/v5/trade/orders-algo-history",
-                            {"ordType": ord_type, "state": state, "instType": "SPOT"}, private=True)
+                            {"ordType": ord_type, "state": state}, private=True)
 
     def cancel_algo_order(self, *, inst_id: str, algo_id: str):
         self.settings.validate_order_permission()
