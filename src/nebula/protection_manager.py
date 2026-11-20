@@ -121,22 +121,51 @@ class DemoProtectionManager:
             approved_plan = self.state.get_entry_risk_plan(entry_client_order_id)
         except ValueError as exc:
             raise ProtectionManagerError("Persisted entry risk plan is corrupt; protection is blocked") from exc
-        if approved_plan is None and hasattr(self.client, "settings"):
+        exchange_backed = hasattr(self.client, "settings")
+        if approved_plan is None and exchange_backed:
             raise ProtectionManagerError("No persisted portfolio-approved stop/target for this entry")
+
+        # OKX cumulative fill size is gross execution size. If the fee is charged
+        # in base currency, the spendable Spot inventory is smaller. Reconcile
+        # every entry trade and size OCO from the net base inventory, not accFillSz.
+        effective_average_fill = Decimal(str(snapshot["average_fill_price"]))
+        gross_filled_quantity = Decimal(str(filled))
+        if exchange_backed:
+            try:
+                self.sync_entry_fills(entry_client_order_id)
+                order_id = snapshot.get("exchange_order_id") or entry.get("exchange_order_id")
+                fills = self.state.list_fills(entry["instrument"], [str(order_id)])
+                if not fills or any(row.get("side") != "buy" for row in fills):
+                    raise ValueError("entry fill ledger is empty or contains a non-buy execution")
+                ledger_gross = sum(
+                    (Decimal(str(row["fill_size"])) for row in fills), Decimal("0")
+                )
+                if ledger_gross != gross_filled_quantity:
+                    raise ValueError("trade-level fills do not reconcile to cumulative order fill")
+                from .portfolio import calculate_inventory_basis
+                inventory = calculate_inventory_basis(fills, entry["instrument"])
+                net_base_quantity = inventory["quantity"]
+                effective_average_fill = inventory["average_entry_price"]
+                if not net_base_quantity.is_finite() or net_base_quantity <= 0:
+                    raise ValueError("net base inventory after fees is not positive")
+                filled = format(net_base_quantity, "f")
+            except Exception as exc:
+                raise ProtectionManagerError(
+                    "Entry fills/fees could not be reconciled to net Spot inventory; OCO is blocked"
+                ) from exc
+
         if approved_plan is not None:
             try:
                 approved_size = Decimal(str(approved_plan["size"]))
                 approved_entry = Decimal(str(approved_plan["entry_price"]))
                 approved_tp = Decimal(str(approved_plan["take_profit"]))
                 approved_sl = Decimal(str(approved_plan["stop_loss"]))
-                average_fill = Decimal(str(snapshot["average_fill_price"]))
-                filled_quantity = Decimal(str(filled))
                 if (approved_plan.get("instrument") != entry["instrument"]
                         or not all(value.is_finite() and value > 0 for value in
                                    (approved_size, approved_entry, approved_tp, approved_sl,
-                                    average_fill, filled_quantity))
-                        or filled_quantity > approved_size
-                        or not approved_sl < average_fill < approved_tp):
+                                    effective_average_fill, gross_filled_quantity))
+                        or gross_filled_quantity > approved_size
+                        or not approved_sl < effective_average_fill < approved_tp):
                     raise ValueError("approved plan does not safely cover actual entry fills")
                 if ((take_profit is not None and Decimal(str(take_profit)) != approved_tp)
                         or (stop_loss is not None and Decimal(str(stop_loss)) != approved_sl)):
