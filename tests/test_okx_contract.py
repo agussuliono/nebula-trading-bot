@@ -207,3 +207,34 @@ def test_pending_order_pagination_rejects_non_advancing_or_duplicate_cursor():
     import pytest
     with pytest.raises(OkxError, match="missing or duplicate cursor"):
         client.get_pending_orders("SPOT")
+
+
+
+def test_read_only_demo_verification_uses_only_demo_marked_get_requests():
+    from nebula.demo_verification import verify_demo_read_only
+
+    session = RecordingSession(
+        Response({"code": "0", "msg": "", "data": [{"instId": "BTC-USDT"}]}),
+        Response({"code": "0", "msg": "", "data": [{"instId": "BTC-USDT"}]}),
+        Response({"code": "0", "msg": "", "data": [{
+            "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+            "perm": "read_only,trade",
+        }]}),
+        Response({"code": "0", "msg": "", "data": [{
+            "details": [{"ccy": "USDT", "availBal": "100", "frozenBal": "0"}],
+        }]}),
+        Response({"code": "0", "msg": "", "data": []}),
+        Response({"code": "0", "msg": "", "data": []}),
+        Response({"code": "0", "msg": "", "data": []}),
+    )
+    settings = enabled_settings()
+    client = OkxDemoClient(settings, session=session)
+
+    report = verify_demo_read_only(client, settings)
+
+    assert report["status"] == "read_only_demo_connection_verified"
+    assert report["exchange_writes"] == 0
+    assert len(session.calls) == 7
+    assert all(call[0][0] == "GET" for call in session.calls)
+    assert all(call[1]["headers"]["x-simulated-trading"] == "1" for call in session.calls)
+    assert all(call[1]["allow_redirects"] is False for call in session.calls)
