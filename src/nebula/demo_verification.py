@@ -7,8 +7,9 @@ from .config import DEMO_FLAG, DEMO_REST_URL, SafetyError
 def verify_demo_read_only(client, settings) -> dict:
     """Probe public and private Demo REST reads; never call an exchange write.
 
-    This validates the account/key setup needed for later Demo testing, but it
-    deliberately does not create orders, alter account settings, or adjust funds.
+    This check intentionally accepts a Read-only API key. Trade permission is
+    not required for connectivity verification and should not be exposed to a
+    GitHub Actions read-only job.
     """
     report = {
         "mode": "okx_spot_demo_read_only_verification",
@@ -19,6 +20,7 @@ def verify_demo_read_only(client, settings) -> dict:
         "private_api": "not_checked",
         "account_mode": "not_checked",
         "api_permissions": "not_checked",
+        "trade_permission": "not_checked",
         "account_snapshot": "not_checked",
         "open_orders": "not_checked",
         "non_quote_holdings": [],
@@ -77,12 +79,13 @@ def verify_demo_read_only(client, settings) -> dict:
         if config.get("enableSpotBorrow") is not False:
             report["blockers"].append("spot_borrow_enabled_or_unknown")
         permission_blocked = False
-        if not {"read_only", "trade"}.issubset(permissions):
-            report["blockers"].append("api_key_missing_read_or_trade_permission")
+        if "read_only" not in permissions:
+            report["blockers"].append("api_key_missing_read_permission")
             permission_blocked = True
         if "withdraw" in permissions:
             report["blockers"].append("api_key_has_withdraw_permission")
             permission_blocked = True
+        report["trade_permission"] = "present" if "trade" in permissions else "absent_read_only"
         report["api_permissions"] = "not_compliant" if permission_blocked else "compliant"
 
         balances = client.get_balance()
