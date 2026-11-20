@@ -100,3 +100,13 @@ The CLI preflight is still an evaluation only. It does not call the order manage
 - Fixed a lifecycle mismatch in `DemoOrderManager.reconcile`: after an exchange-confirmed `canceled`/ `mmp_canceled` order with zero cumulative fill, the manager previously called the local-rejection lock-release method. That method correctly refuses non-`rejected` intents, so the single-position lock remained stuck.
 - Reconciliation now calls `release_terminal_zero_fill_entry_lock`, which independently checks the persisted terminal exchange state and exact zero fill before releasing the lock. Local rejection handling remains separate.
 - Regression coverage checks both canceled terminal states release a zero-fill slot and that a canceled partial fill retains the slot. No order was submitted; tests use local fake clients and SQLite.
+
+## Immutable risk-approved protection handoff
+
+- Found a lifecycle gap: the portfolio authorizer approved a stop/target, but the durable entry intent did not retain those exact levels. The later OCO preparation API accepted fresh caller-supplied prices, so an operator or caller could accidentally protect the fill with levels different from the approved risk plan.
+- Added an additive SQLite migration for `intents.risk_plan_json`. The approved instrument, requested size/entry price, stop, target, and fee/slippage-adjusted risk are stored atomically with the single-position lock and entry intent reservation.
+- Real exchange-backed Spot buys now reject incomplete protective plans before the order POST. The manager requires the exact concrete `PortfolioRiskAuthorizer` class (not a subclass that can override approval behavior), and persists the immutable risk plan before submitting.
+- OCO preparation for exchange-backed clients now requires that persisted plan. It uses the stored stop/target, rejects caller overrides, and verifies that the actual cumulative fill quantity does not exceed the approved size and that the actual average fill remains strictly between stop and target.
+- Legacy fake-client tests may still seed entries without a risk plan; this is only a unit-test compatibility path. Real exchange-backed protection fails closed if the plan is absent.
+- Added tests for persistence across restart, legacy schema migration, invalid plan rejection before position reservation, exact approved OCO levels, override rejection, missing plan rejection, adverse fill price, overfilled quantity, and fabricated authorizer subclasses.
+- This is still code-level/fake-backed validation only. No Demo or live order was submitted. CI verification for the current commit is pending.
