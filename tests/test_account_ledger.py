@@ -32,6 +32,17 @@ def test_account_bill_validation_rejects_missing_and_nonfinite_values(tmp_path):
         ledger.save_bills([_bill(balChg="NaN")])
 
 
+def test_duplicate_bill_id_metadata_conflict_is_rejected(tmp_path):
+    ledger = AccountLedger(StateStore(str(tmp_path / "ledger.db")))
+    original = _bill(instType="SPOT")
+    ledger.save_bills([original])
+    # Identical balance arithmetic must not hide a changed instrument class.
+    with pytest.raises(AccountLedgerError, match="Conflicting duplicate"):
+        ledger.save_bills([_bill(instType="MARGIN")])
+    with pytest.raises(AccountLedgerError, match="Conflicting duplicate"):
+        ledger.save_bills([_bill(instId="BTC-USDC", instType="SPOT")])
+
+
 def test_daily_equity_baseline_is_immutable_and_survives_restart(tmp_path):
     path = str(tmp_path / "equity.db")
     ledger = AccountLedger(StateStore(path))
