@@ -93,6 +93,36 @@ def test_clean_empty_account_is_reported_but_never_authorizes_entries(tmp_path):
     assert recovery.entry_permit is not None
 
 
+@pytest.mark.parametrize("permissions", [
+    "read_only,trade,transfer",
+    "read_only,trade,loan",
+    "read_only,trade,earn",
+    "read_only,trade,onchain",
+    "read_only,trade,custom_scope",
+    "read_only,trade,",
+    None,
+])
+def test_extra_unknown_or_malformed_permissions_never_issue_startup_permit(
+    tmp_path, permissions
+):
+    class PermissionAccount(CleanAccount):
+        def get_account_config(self):
+            return [{
+                "uid": "demo-account-1", "acctLv": "1",
+                "autoLoan": False, "enableSpotBorrow": False,
+                "perm": permissions,
+            }]
+
+    state = StateStore(str(tmp_path / "permission-blocked.db"))
+    recovery = StartupRecovery(PermissionAccount(), state)
+    result = recovery.run()
+
+    assert result["status"] == "blocked_reconciliation_failure"
+    assert result["entry_authorized"] is False
+    assert result["exchange_writes"] == 0
+    assert recovery.entry_permit is None
+
+
 def test_untracked_exchange_order_blocks_empty_local_state(tmp_path):
     class OrphanOrderAccount(CleanAccount):
         def get_pending_orders(self, inst_type="SPOT"):
