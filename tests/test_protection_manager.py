@@ -275,6 +275,10 @@ def test_local_oco_gate_block_remains_retryable_without_network_io(tmp_path):
     )
     session = Session()
     manager_client.demo = OkxDemoClient(settings, session=session)
+    manager_client.demo.get_spot_instrument = lambda inst_id: {
+        "instType": "SPOT", "instId": inst_id, "baseCcy": "BTC", "quoteCcy": "USDT",
+        "tickSz": "0.1", "lotSz": "0.0001", "minSz": "0.0001", "state": "live",
+    }
     result = manager.submit_reserved('NBENTRY1')
 
     assert result['status'] == 'active'
