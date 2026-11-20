@@ -309,7 +309,7 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
             return [{"uTime": "1800000000000", "details": [
                 {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]}]
         def get_tickers(self):
-            return [{"instId": "AAA-USDT", "bidPx": "99", "askPx": "100",
+            return [{"instId": "AAA-USDT", "bidPx": "99.95", "askPx": "100",
                      "bidSz": "100", "askSz": "100", "ts": "1800000000000"}]
         def get_pending_orders(self, inst_type):
             return []
