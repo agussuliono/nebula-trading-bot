@@ -314,6 +314,8 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
     authorizer = PortfolioRiskAuthorizer(
         SnapshotClient(), StateStore(str(tmp_path / "auth.db")), settings,
         plan_provider=lambda **kwargs: {
+            "instrument": kwargs["instrument"], "size": kwargs["size"],
+            "entry_price": kwargs["entry_price"],
             "signal_action": "buy", "candle_closed": True, "candle_ts": 1799996400000,
             "stop_loss": "90", "take_profit": "120",
         },
