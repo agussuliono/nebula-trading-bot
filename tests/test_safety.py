@@ -47,6 +47,15 @@ def test_order_request_is_guarded_and_marked_demo():
                  max_risk_quote=2, max_position_quote=100)
     session = Session()
     client = OkxDemoClient(s, session=session)
+    # The adapter requires the one-shot startup permit even when the Demo
+    # write gate is explicitly enabled. This unit test uses the internal issuer;
+    # production permits are issued only by a successful StartupRecovery run.
+    from nebula.entry_gate import issue_startup_entry_permit
+    from nebula.state import StateStore
+    state = StateStore(":memory:")
+    permit = issue_startup_entry_permit(client, state, "demo-test-uid")
+    client.install_startup_entry_permit(permit, state)
+    permit.consume(client, state)
     result = client.place_spot_limit(inst_id="BTC-USDT", side="buy", size="0.001",
                                      price="50000", client_order_id="NB123")
     assert result[0]["sCode"] == "0"
