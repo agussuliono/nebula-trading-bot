@@ -211,11 +211,14 @@ class CandidateRiskPreflight:
             raise RiskAuthorizationError("Candidate stop/entry/target ordering is invalid")
         return {
             "instrument": instrument,
+            "signal_action": "buy",
+            "candle_closed": True,
             "size": str(candidate["size"]),
             "entry_price": str(candidate["entry_price"]),
             "stop_loss": str(candidate["stop_loss"]),
             "take_profit": str(candidate["take_profit"]),
             "candle_ts": candle_ts,
+            "orders_submitted": 0,
         }
 
     def evaluate(self, candidate_plan: dict) -> dict:
@@ -225,12 +228,7 @@ class CandidateRiskPreflight:
         try:
             candidate = self._validate_candidate(candidate_plan)
             instrument, candle_ts = candidate["instrument"], candidate["candle_ts"]
-            authorization = self.authorizer(
-                instrument=instrument,
-                requested_size=candidate["size"],
-                requested_price=candidate["entry_price"],
-                candle_ts=candle_ts,
-            )
+            authorization = self.authorizer.preflight_candidate(candidate_plan)
             if not isinstance(authorization, dict) or authorization.get("entry_allowed") is not True:
                 raise RiskAuthorizationError("Portfolio authorizer did not approve the candidate")
             approved = authorization.get("planned_entry")
