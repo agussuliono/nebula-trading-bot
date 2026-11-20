@@ -141,7 +141,7 @@ def test_flat_or_missing_position_inventory_fails_closed():
 
 
 def test_planned_entry_risk_includes_entry_exit_fee_and_slippage():
-    data = _snapshot()
+    data = _snapshot(bid="100")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
@@ -163,7 +163,7 @@ def test_planned_entry_risk_includes_entry_exit_fee_and_slippage():
 
 
 def test_planned_entry_risk_over_limit_blocks_entry():
-    data = _snapshot()
+    data = _snapshot(bid="100")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
@@ -182,7 +182,7 @@ def test_planned_entry_risk_over_limit_blocks_entry():
 
 
 def test_planned_entry_must_have_stop_below_entry_and_target_above():
-    data = _snapshot()
+    data = _snapshot(bid="100")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
@@ -241,7 +241,7 @@ def test_missing_read_permission_blocks_entry():
 
 
 def test_planned_entry_requires_available_quote_balance():
-    data = _snapshot()
+    data = _snapshot(bid="100")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
