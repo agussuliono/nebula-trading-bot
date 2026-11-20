@@ -218,7 +218,7 @@ def test_read_only_demo_verification_uses_only_demo_marked_get_requests():
         Response({"code": "0", "msg": "", "data": [{"instId": "BTC-USDT"}]}),
         Response({"code": "0", "msg": "", "data": [{
             "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
-            "perm": "read_only,trade",
+            "perm": "read_only",
         }]}),
         Response({"code": "0", "msg": "", "data": [{
             "details": [{"ccy": "USDT", "availBal": "100", "frozenBal": "0"}],
