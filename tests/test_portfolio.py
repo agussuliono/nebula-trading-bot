@@ -363,3 +363,13 @@ def test_per_position_risk_cannot_exceed_daily_loss_limit():
         PortfolioPolicy(max_daily_loss_quote=Decimal("5"),
                         max_position_risk_quote=Decimal("10"),
                         max_position_notional_quote=Decimal("100"))
+
+
+
+def test_valuation_can_be_complete_while_entry_is_blocked_by_policy():
+    data = _snapshot()
+    report = _engine().evaluate(**data, now_ms=NOW)
+    assert report["valuation_complete"] is True
+    assert report["entry_allowed"] is False
+    assert "position_already_active" in report["blockers"]
+    assert "planned_entry_not_provided" in report["blockers"]
