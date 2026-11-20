@@ -19,9 +19,10 @@ class DemoOrderManager:
     ambiguous or the order cannot be found, the intent remains blocked until a
     human resolves it; absence from the pending list is not proof of rejection.
     """
-    def __init__(self, client, state_store, circuit_breaker=None):
+    def __init__(self, client, state_store, circuit_breaker=None, risk_authorizer=None):
         self.client = client
         self.state = state_store
+        self.risk_authorizer = risk_authorizer
         if circuit_breaker is None and hasattr(client, "settings"):
             from .risk_controls import CircuitBreaker
             circuit_breaker = CircuitBreaker(state_store, client.settings.max_daily_loss_quote)
@@ -34,6 +35,41 @@ class DemoOrderManager:
         # and the Settings order gate. This manager adds durable idempotency.
         if side not in {"buy", "sell"}:
             raise ValueError("side must be buy or sell")
+        # A real OKX client must be paired with a portfolio/risk authorization
+        # callback before any new long exposure can be reserved or submitted.
+        # Fake clients used by offline unit tests intentionally have no settings.
+        if side == "buy" and hasattr(self.client, "settings"):
+            if not callable(self.risk_authorizer):
+                raise OrderManagerError(
+                    "No integrated portfolio risk authorization; refusing Spot entry"
+                )
+            try:
+                approval = self.risk_authorizer(
+                    instrument=inst_id, requested_size=size, requested_price=price,
+                    candle_ts=candle_ts,
+                )
+            except Exception as exc:
+                raise OrderManagerError(
+                    "Portfolio risk authorization failed; refusing Spot entry"
+                ) from exc
+            if not isinstance(approval, dict) or approval.get("entry_allowed") is not True:
+                raise OrderManagerError("Portfolio risk authorization denied Spot entry")
+            approved_plan = approval.get("planned_entry")
+            if not isinstance(approved_plan, dict):
+                raise OrderManagerError("Risk authorization has no approved entry plan")
+            if (str(approved_plan.get("instrument")) != str(inst_id)
+                    or str(approved_plan.get("size")) != str(size)
+                    or str(approved_plan.get("entry_price")) != str(price)):
+                raise OrderManagerError("Approved risk plan does not match requested order")
+            try:
+                from decimal import Decimal, InvalidOperation
+                approved_risk = Decimal(str(approved_plan["risk_to_stop_quote"]))
+                settings = self.client.settings
+                if (not approved_risk.is_finite() or approved_risk <= 0
+                        or approved_risk > Decimal(str(settings.max_risk_quote))):
+                    raise ValueError("approved risk exceeds configured per-position limit")
+            except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+                raise OrderManagerError("Approved risk amount is invalid or exceeds configured limit") from exc
         if self.circuit_breaker is not None:
             self.circuit_breaker.check_order_allowed(side)
         # Always use current exchange precision rules. No implicit rounding without
