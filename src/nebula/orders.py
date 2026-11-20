@@ -48,9 +48,13 @@ class DemoOrderManager:
         # callback before any new long exposure can be reserved or submitted.
         # Fake clients used by offline unit tests intentionally have no settings.
         if side == "buy" and hasattr(self.client, "settings"):
-            if not callable(self.risk_authorizer):
+            # A generic callback can fabricate an approval and bypass portfolio
+            # controls. Real exchange clients must use the concrete fail-closed
+            # authorizer that owns the private snapshot and risk-evaluation path.
+            from .risk_authorizer import PortfolioRiskAuthorizer
+            if not isinstance(self.risk_authorizer, PortfolioRiskAuthorizer):
                 raise OrderManagerError(
-                    "No integrated portfolio risk authorization; refusing Spot entry"
+                    "No integrated PortfolioRiskAuthorizer; refusing Spot entry"
                 )
             try:
                 approval = self.risk_authorizer(
