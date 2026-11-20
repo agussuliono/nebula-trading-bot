@@ -44,3 +44,16 @@ New tests cover API key permission requirements and risk authorizer allow/deny b
 - The EMA signal component now validates the exact nine-field OKX candle shape, strictly newest-first unique timestamps, finite positive OHLC values, internally consistent high/low ranges, and confirmation flags limited to 0/1.
 - EMA inputs must be finite positive prices; periods must be integer values satisfying 0 < fast < slow <= 500.
 - This is input-integrity hardening only. It does not improve or establish strategy profitability, and the EMA strategy remains research-only and not approved for automated orders.
+
+## Repeated efficiency and safety audit — 2026-11-20
+
+A subsequent review of the authenticated HTTP boundary, persistent OCO state transitions, precision-sensitive position-lock release, and CI workflow found and addressed these additional issues:
+
+- Disable automatic HTTP redirects in the OKX adapter. Any 3xx response is rejected before normal response parsing. This prevents private authentication headers or a signed order POST from being forwarded/replayed to a redirect target.
+- Keep a protective OCO intent in the retryable `reserved` state when the adapter rejects it locally before network I/O (for example, the Demo gate is still closed). The transition is allowed only from `submitting`; a network-ambiguous `submission_unknown` intent cannot be reset or resubmitted.
+- Replace float-based rejected-entry fill checks with exact finite Decimal comparison. A tiny non-zero fill can no longer round down to zero and release the one-position lock.
+- Cache pip dependencies in GitHub Actions using `pyproject.toml` as the cache key input. This reduces repeat dependency downloads without changing test or bot runtime behavior.
+
+Added regression tests cover 302/307 redirects on private GET/POST, retry of a locally blocked OCO after explicit safety-gate correction, refusal to reset an ambiguous OCO, and exact tiny-fill lock retention. All exchange interactions in these tests use local fakes; no API credential or exchange write request is used.
+
+The latest commit's CI status and test count must be verified from its own workflow run before this audit batch is considered verified.
