@@ -12,7 +12,7 @@ from .portfolio import PortfolioPolicy, PortfolioRiskEngine
 
 def main():
     parser = argparse.ArgumentParser(prog="nebula")
-    parser.add_argument("command", choices=["check-demo-public", "analyze-once", "preflight-once", "portfolio-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
+    parser.add_argument("command", choices=["check-demo-public", "analyze-once", "preflight-once", "portfolio-once", "recover-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
     parser.add_argument("--db", default=os.getenv("NEBULA_DB_PATH", "nebula.sqlite3"))
     parser.add_argument("--bar", default="1H")
     parser.add_argument("--data", help="Local ascending OHLCV CSV for offline backtest or dataset audit")
@@ -162,6 +162,15 @@ def main():
             client, state, settings, bar=args.bar,
             entry_plan_policy=plan_policy,
         )
+        emit_result(json.dumps(report, indent=2, sort_keys=True))
+        return
+    if args.command == "recover-once":
+        # Authenticated read-only startup recovery. This path never creates an
+        # order manager with submission authority and never calls write endpoints.
+        settings.validate_private_read_permission()
+        from .startup import StartupRecovery
+        state = StateStore(args.db)
+        report = StartupRecovery(client, state).run()
         emit_result(json.dumps(report, indent=2, sort_keys=True))
         return
     if args.command == "portfolio-once":
