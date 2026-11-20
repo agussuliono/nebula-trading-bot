@@ -47,7 +47,9 @@ class Settings:
     secret_key: str = ""
     passphrase: str = ""
     enable_demo_orders: bool = False
-    kill_switch: bool = False
+    # Fail closed: even if the Demo order gate is explicitly enabled, the
+    # emergency stop remains active until the operator explicitly clears it.
+    kill_switch: bool = True
     max_daily_loss_quote: float = 0.0
     max_risk_quote: float = 0.0
     max_position_quote: float = 0.0
@@ -62,7 +64,7 @@ class Settings:
             secret_key=os.getenv("OKX_SECRET_KEY", ""),
             passphrase=os.getenv("OKX_PASSPHRASE", ""),
             enable_demo_orders=_bool("NEBULA_ENABLE_DEMO_ORDERS"),
-            kill_switch=_bool("NEBULA_KILL_SWITCH"),
+            kill_switch=_bool("NEBULA_KILL_SWITCH", default=True),
             max_daily_loss_quote=_finite_float("NEBULA_MAX_DAILY_LOSS_QUOTE", "0"),
             max_risk_quote=_finite_float("NEBULA_MAX_RISK_QUOTE", "0"),
             max_position_quote=_finite_float("NEBULA_MAX_POSITION_QUOTE", "0"),
