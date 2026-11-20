@@ -39,3 +39,22 @@ Quantity is floored to the current `lotSz`; a result below `minSz` is rejected. 
 ## Verification
 
 Automated tests cover closed-candle identity, freshness, ATR calculation, fee/slippage-aware sizing, tick/lot/minimum-size rules, non-buy signals, and invalid policy values. The GitHub Actions result for the new branch head is the source of truth for CI status; no local execution is claimed.
+
+
+## Read-only runtime integration
+
+The `analyze-once` runtime can now optionally connect the public scanner, confirmed-candle EMA signal, current public Spot instrument rules, fresh ticker ask, and candidate planner in one cycle.
+
+Candidate planning is disabled unless the operator explicitly supplies both:
+- `--plan-risk-quote`
+- `--plan-max-notional-quote`
+
+Example (illustrative values only; not a trading recommendation):
+
+```bash
+nebula analyze-once --bar 1H --plan-risk-quote 5 --plan-max-notional-quote 100
+```
+
+The runtime only uses public endpoints for this path. It rejects a candidate plan when there is an active local position lock, the circuit breaker is halted, the instrument metadata is incomplete, the fresh ticker ask is missing, or the planner's candle/price/size checks fail. A successful candidate is explicitly labeled `candidate_only_not_authorized`; it does not call the portfolio risk authorizer or any order manager. Output always declares `orders_enabled=false` and `order_submission_attempts=0`.
+
+This integration is intentionally a read-only orchestration milestone, not the automated trading loop. A later integration must pass the exact candidate through fresh portfolio authorization and then through the durable order/protection/reconciliation lifecycle. It must also prove crash recovery and partial-fill behavior before any Demo order gate is considered.
