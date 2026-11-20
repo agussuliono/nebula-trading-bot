@@ -92,12 +92,15 @@ class AccountLedger:
             ts = int(_decimal(bill["ts"], "ts", positive=True))
             raw = json.dumps(bill, sort_keys=True, separators=(",", ":"))
             with self.state._connect() as db:
-                old = db.execute("SELECT currency,balance_change,balance_after,bill_type,bill_subtype,timestamp_ms FROM account_bills WHERE bill_id=?",
+                old = db.execute("SELECT raw_json FROM account_bills WHERE bill_id=?",
                                  (bill_id,)).fetchone()
-                economic = (str(bill["ccy"]), str(change), str(balance), str(bill["type"]),
-                            str(bill["subType"]), ts)
                 if old:
-                    if tuple(old) != economic:
+                    # The bill's classification and linkage fields (instType,
+                    # instId, ordId, tradeId, subtype, etc.) are part of the
+                    # reconciliation evidence, not just its balance arithmetic.
+                    # Compare the canonical full payload so metadata drift or
+                    # conflicting duplicate IDs cannot be silently accepted.
+                    if old["raw_json"] != raw:
                         raise AccountLedgerError("Conflicting duplicate account billId")
                     continue
                 db.execute("""INSERT INTO account_bills(
