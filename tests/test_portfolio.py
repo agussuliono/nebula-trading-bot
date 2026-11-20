@@ -93,9 +93,27 @@ def test_balance_ledger_mismatch_blocks_entry():
 
 def test_unrealized_loss_counts_toward_daily_limit():
     data = _snapshot(bid="40", stop="90", realized="-10")
-    report = _engine().evaluate(**data, now_ms=NOW)
+    report = _engine().evaluate(**data, now_ms=NOW, daily_unrealized_pnl_quote="-60")
     assert Decimal(report["daily_combined_pnl_quote"]) < Decimal("-50")
     assert "daily_loss_including_unrealized_limit_reached" in report["blockers"]
+
+
+def test_open_position_without_utc_daily_mark_fails_closed_instead_of_using_lifetime_unrealized():
+    data = _snapshot(bid="90", stop="80", realized="0")
+    report = _engine().evaluate(**data, now_ms=NOW)
+    assert report["daily_unrealized_pnl_quote"] is None
+    assert report["daily_unrealized_pnl_baseline_available"] is False
+    assert report["daily_combined_pnl_quote"] == "0"
+    assert "daily_unrealized_pnl_baseline_missing" in report["blockers"]
+    assert report["valuation_complete"] is False
+    assert report["entry_allowed"] is False
+
+
+def test_daily_pnl_uses_daily_mark_delta_not_lifetime_inventory_unrealized():
+    data = _snapshot(bid="90", stop="80", realized="-2")
+    report = _engine().evaluate(**data, now_ms=NOW, daily_unrealized_pnl_quote="10")
+    assert Decimal(report["daily_combined_pnl_quote"]) == Decimal("8")
+    assert Decimal(report["position"]["unrealized_pnl_net_quote"]) < Decimal("0")
 
 
 def test_non_spot_or_auto_borrow_blocks_entry():
