@@ -100,3 +100,35 @@ def test_save_dataset_refuses_overwrite_without_explicit_flag(tmp_path):
 def test_candle_from_okx_accepts_both_documented_row_shapes():
     assert Candle.from_okx(row(1_700_000_000_000, fields=8)).volume == 20
     assert Candle.from_okx(row(1_700_000_000_000, fields=9)).volume == 20
+
+
+def test_save_manifest_canonical_fields_cannot_be_overridden_by_fetch_metadata(tmp_path):
+    candles = [Candle(1_700_000_000_000 + i * 3_600_000, 10, 11, 9, 10, 20, True)
+               for i in range(60)]
+    path = tmp_path / "BTC.csv"
+    manifest = save_dataset(path, "btc-usdt", "1H", candles, {
+        "symbol": "FAKE-USDT", "bar": "1m", "source": "untrusted",
+        "csv_sha256": "0" * 64, "candle_count": 1, "first_ts": 1,
+        "last_ts": 2, "schema_version": 999, "pages_fetched": 1,
+    })
+    assert manifest["symbol"] == "BTC-USDT"
+    assert manifest["bar"] == "1H"
+    assert manifest["source"] == "OKX V5 GET /api/v5/market/history-candles"
+    assert manifest["csv_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert manifest["candle_count"] == 60
+    assert manifest["first_ts"] == candles[0].ts
+    assert manifest["last_ts"] == candles[-1].ts
+    assert manifest["schema_version"] == 1
+    assert manifest["pages_fetched"] == 1
+
+
+def test_save_dataset_rejects_invalid_symbol_and_empty_candles_before_writing(tmp_path):
+    path = tmp_path / "bad.csv"
+    candles = [Candle(1_700_000_000_000 + i * 3_600_000, 10, 11, 9, 10, 20, True)
+               for i in range(60)]
+    with pytest.raises(BacktestError):
+        save_dataset(path, "BTC-USDC", "1H", candles, {})
+    with pytest.raises(BacktestError):
+        save_dataset(path, "BTC-USDT", "1H", [], {})
+    assert not path.exists()
+    assert not (tmp_path / "bad.csv.manifest.json").exists()
