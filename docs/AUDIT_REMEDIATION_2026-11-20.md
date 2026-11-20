@@ -112,3 +112,10 @@ The CLI preflight is still an evaluation only. It does not call the order manage
 - This is still code-level/fake-backed validation only. No Demo or live order was submitted. CI verification for the current commit is pending.
 
 - GitHub Actions run #208 on `6ab90f0cf43cd0ab0d66fa386eed046abeb9a3d1` completed successfully: **293 tests passed in 2.27s**. Compileall, explicit Demo-off/emergency-stop-on checks, and fail-closed defaults passed. No exchange writes or credentials were used.
+
+## Net Spot inventory protection sizing
+
+- Further lifecycle review found that OKX cumulative order fill size is a gross execution quantity. When trading fees are charged in the base currency, the actual available Spot inventory is smaller; sizing OCO from gross `accFillSz` can cause an exit order to exceed available base balance.
+- Exchange-backed OCO preparation now synchronizes all entry trade-level fills, requires their gross sum to reconcile exactly with the order snapshot, and calculates net base inventory after base-currency fees. The OCO quantity is based on that net inventory.
+- The protection gate also validates the fee-adjusted average inventory cost against the approved stop/target. Missing, incomplete, conflicting, unsupported-fee-currency, or non-reconciling fill ledgers block OCO preparation.
+- Added fake-backed regression tests for base-fee net quantity and incomplete fill-history blocking. No exchange writes were used.
