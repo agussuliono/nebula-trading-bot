@@ -161,6 +161,7 @@ def test_execution_requires_explicit_demo_account_attestation(tmp_path):
 
 
 def test_no_candidate_does_not_run_private_recovery_or_create_order_manager(tmp_path):
+    FakeOrders.instances.clear()
     report = candidate_report()
     report["signals"][0]["signal"] = "hold"
     orchestrator, _, runtime = make_orchestrator(
@@ -208,11 +209,7 @@ def test_live_entry_must_be_canceled_and_finalized_before_oco(tmp_path):
     FakeOrders.instances.clear()
     FakeProtection.instances.clear()
     orchestrator, _, _ = make_orchestrator(tmp_path, settings=enabled_settings())
-    result = orchestrator.run_once(execute=True)
-    manager = FakeOrders.instances[-1]
-    manager.reconcile_state = "live"
-
-    # A fresh run uses a fresh manager; configure its returned state via subclass.
+    # Configure a live entry state through a deterministic fake manager.
     class LiveOrders(FakeOrders):
         def reconcile(self, client_order_id):
             self.calls.append(("reconcile", client_order_id))
