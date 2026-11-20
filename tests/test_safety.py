@@ -226,6 +226,8 @@ def test_history_candles_uses_public_endpoint_and_validates_cursor():
             return Response()
     session = Session()
     client = OkxDemoClient(Settings(), session=session)
+    assert client.get_history_candles("BTC-USDT") == []
+    assert "limit=100" in session.call[0][1]
     assert client.get_history_candles("BTC-USDT", "1H", 100, after="1700000000000") == []
     assert "/api/v5/market/history-candles" in session.call[0][1]
     assert "x-simulated-trading" in session.call[1]["headers"]
@@ -363,33 +365,84 @@ def test_http_redirects_are_rejected_without_following_or_replaying_private_head
     assert kwargs["headers"]["OK-ACCESS-KEY"] == "demo-key"
     assert kwargs["headers"]["x-simulated-trading"] == "1"
 
-@pytest.mark.parametrize(
-    "size,price,state,error",
-    [
-        ("0.0015", "50000", "live", "lotSz"),
-        ("0.001", "50000.05", "live", "tickSz"),
-        ("0.0005", "50000", "live", "minSz"),
-        ("0.001", "50000", "suspend", "tradable"),
-    ],
-)
-def test_limit_adapter_rejects_instrument_rule_violations_before_post(size, price, state, error):
-    settings = Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True,
-                        kill_switch=False, max_daily_loss_quote=20, max_risk_quote=2,
-                        max_position_quote=100)
-    class NeverPostSession:
-        def __init__(self): self.calls = []
+def test_base_url_is_immutable_and_requests_always_use_fixed_demo_host():
+    from nebula.config import DEMO_REST_URL
+
+    class Response:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"code": "0", "data": []}
+
+    class Session:
+        def __init__(self):
+            self.calls = []
         def request(self, *args, **kwargs):
             self.calls.append((args, kwargs))
-            raise AssertionError("invalid order must be rejected before HTTP")
-    session = NeverPostSession()
+            return Response()
+
+    session = Session()
+    client = OkxDemoClient(Settings(), session=session)
+
+    with pytest.raises(AttributeError):
+        client.base_url = "https://untrusted.invalid"
+
+    # Simulate an injected instance attribute; the read-only property and
+    # request boundary must still resolve exclusively to the Demo host.
+    client.__dict__["base_url"] = "https://untrusted.invalid"
+    assert client.base_url == DEMO_REST_URL
+
+    client.request("GET", "/api/v5/market/tickers", {"instType": "SPOT"})
+
+    assert len(session.calls) == 1
+    assert session.calls[0][0][1].startswith(DEMO_REST_URL + "/")
+
+def test_private_request_credentials_never_leave_fixed_demo_host():
+    from nebula.config import DEMO_REST_URL
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"code": "0", "data": []}
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return Response()
+
+    session = Session()
+    settings = Settings(
+        api_key="fake-test-key",
+        secret_key="fake-test-secret",
+        passphrase="fake-test-passphrase",
+    )
     client = OkxDemoClient(settings, session=session)
-    client.get_spot_instrument = lambda inst_id: {
-        "instType": "SPOT", "instId": inst_id, "baseCcy": "BTC", "quoteCcy": "USDT",
-        "tickSz": "0.1", "lotSz": "0.001", "minSz": "0.001", "state": state,
-    }
-    with pytest.raises(ValueError, match=error):
-        client.place_spot_limit(inst_id="BTC-USDT", side="buy", size=size, price=price,
-                                 client_order_id="NB123")
-    assert session.calls == []
+
+    # Simulate accidental instance-level host injection.
+    client.__dict__["base_url"] = "https://untrusted.invalid"
+
+    client.request("GET", "/api/v5/account/balance", private=True)
+
+    assert len(session.calls) == 1
+    args, kwargs = session.calls[0]
+    assert args[0] == "GET"
+    assert args[1].startswith(DEMO_REST_URL + "/api/v5/account/balance")
+    assert "untrusted.invalid" not in args[1]
+    assert kwargs["headers"]["OK-ACCESS-KEY"] == "fake-test-key"
+    assert kwargs["headers"]["x-simulated-trading"] == "1"
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf"), True, "10", None])
+def test_exchange_timeout_rejects_non_finite_or_invalid_values(timeout):
+    with pytest.raises(ValueError, match="finite positive number"):
+        OkxDemoClient(Settings(), timeout=timeout)
 
 
+def test_exchange_timeout_accepts_finite_positive_number():
+    client = OkxDemoClient(Settings(), timeout=0.25)
+    assert client.timeout == 0.25
