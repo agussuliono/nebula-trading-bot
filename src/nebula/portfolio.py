@@ -420,7 +420,7 @@ class PortfolioRiskEngine:
             "unresolved_oco", "local_unresolved_order_intents",
             "exchange_open_regular_orders", "exchange_oco_pending",
             "exchange_open_algo_orders", "untracked_non_usdt",
-            "position_fill_sync_failed", "daily_unrealized_pnl_baseline_missing",
+            "position_fill_sync_failed",
         )
         complete = not any(
             blocker.startswith(valuation_incomplete_prefixes) for blocker in blockers
