@@ -115,3 +115,26 @@ def test_legacy_intents_schema_migrates_risk_plan_column(tmp_path):
         },
     )
     assert store.get_entry_risk_plan("NBENTRY1")["stop_loss"] == "48000"
+
+
+
+def test_partially_failed_protection_state_cannot_be_resubmitted_or_regressed(tmp_path):
+    import pytest
+
+    store = StateStore(str(tmp_path / "partial-oco.db"))
+    store.reserve_entry_intent("NBENTRY1", "BTC-USDT", 123, "buy")
+    store.reserve_protection_intent(
+        entry_client_order_id="NBENTRY1",
+        instrument="BTC-USDT",
+        algo_client_order_id="NBPTEST1",
+        filled_size="0.004",
+        take_profit="52000",
+        stop_loss="48000",
+    )
+    store.update_protection_intent("NBENTRY1", "partially_failed", exchange_algo_id="9988")
+
+    with pytest.raises(ValueError, match="terminal OCO state"):
+        store.update_protection_intent("NBENTRY1", "active", exchange_algo_id="9988")
+    with pytest.raises(ValueError, match="terminal OCO state"):
+        store.update_protection_intent("NBENTRY1", "triggered", exchange_algo_id="9988")
+    assert store.get_protection_intent("NBENTRY1")["status"] == "partially_failed"
