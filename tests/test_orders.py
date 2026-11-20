@@ -374,3 +374,47 @@ def test_portfolio_authorizer_rejects_unconfirmed_candle_before_private_snapshot
     with pytest.raises(RiskAuthorizationError, match="closed-candle"):
         authorizer(instrument="AAA-USDT", requested_size="0.1",
                    requested_price="100", candle_ts=123)
+
+
+
+@pytest.mark.parametrize("terminal_state", ["canceled", "mmp_canceled"])
+def test_reconcile_releases_position_lock_after_terminal_zero_fill(terminal_state, tmp_path):
+    client = FakeClient(order=[{
+        "ordId": "123",
+        "clOrdId": "NBZERO",
+        "state": terminal_state,
+        "sz": "0.010",
+        "accFillSz": "0",
+        "avgPx": "",
+        "fee": "0",
+        "feeCcy": "USDT",
+    }])
+    manager = setup(tmp_path, client)
+
+    submit(manager, "NBZERO")
+    result = manager.reconcile("NBZERO")
+
+    assert result["status"] == terminal_state
+    assert manager.state.get_order_snapshot("NBZERO")["cumulative_fill_size"] == "0"
+    assert manager.state.get_position_lock() is None
+
+
+def test_reconcile_keeps_position_lock_after_canceled_partial_fill(tmp_path):
+    client = FakeClient(order=[{
+        "ordId": "123",
+        "clOrdId": "NBPARTIAL",
+        "state": "canceled",
+        "sz": "0.010",
+        "accFillSz": "0.002",
+        "avgPx": "49900",
+        "fee": "-0.01",
+        "feeCcy": "USDT",
+    }])
+    manager = setup(tmp_path, client)
+
+    submit(manager, "NBPARTIAL")
+    result = manager.reconcile("NBPARTIAL")
+
+    assert result["status"] == "canceled"
+    assert manager.state.get_order_snapshot("NBPARTIAL")["cumulative_fill_size"] == "0.002"
+    assert manager.state.get_position_lock()["owner_client_order_id"] == "NBPARTIAL"
