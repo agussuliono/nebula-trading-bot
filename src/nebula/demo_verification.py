@@ -1,4 +1,6 @@
 """Read-only OKX Demo connectivity and account-safety verification."""
+from decimal import Decimal, InvalidOperation
+
 from .config import DEMO_FLAG, DEMO_REST_URL, SafetyError
 
 
@@ -87,6 +89,13 @@ def verify_demo_read_only(client, settings) -> dict:
         regular = client.get_pending_orders("SPOT")
         pending_oco = client.get_pending_algo_orders("oco")
         pending_conditional = client.get_pending_algo_orders("conditional")
+        for label, rows in (
+            ("regular_orders", regular),
+            ("oco_orders", pending_oco),
+            ("conditional_orders", pending_conditional),
+        ):
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise ValueError("malformed_" + label)
         if not isinstance(balances, list) or len(balances) != 1:
             raise ValueError("balance_snapshot_missing_or_ambiguous")
         details = balances[0].get("details")
@@ -97,12 +106,12 @@ def verify_demo_read_only(client, settings) -> dict:
             if not isinstance(row, dict) or not row.get("ccy"):
                 raise ValueError("malformed_balance_detail")
             try:
-                available = float(row.get("availBal", "0"))
-                frozen = float(row.get("frozenBal", "0"))
-            except (TypeError, ValueError) as exc:
+                available = Decimal(str(row.get("availBal", "0")))
+                frozen = Decimal(str(row.get("frozenBal", "0")))
+            except (InvalidOperation, TypeError, ValueError) as exc:
                 raise ValueError("malformed_balance_amount") from exc
-            import math
-            if not math.isfinite(available) or not math.isfinite(frozen) or available < 0 or frozen < 0:
+            if (not available.is_finite() or not frozen.is_finite()
+                    or available < 0 or frozen < 0):
                 raise ValueError("invalid_balance_amount")
             if row["ccy"] != "USDT" and available + frozen > 0:
                 non_quote.append(row["ccy"])
