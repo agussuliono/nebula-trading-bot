@@ -264,9 +264,10 @@ def test_real_okx_client_accepts_only_concrete_portfolio_authorizer(tmp_path):
         market_data_max_age_ms=30_000,
     )
     client.settings = settings
+    state = StateStore(str(tmp_path / "authorized.db"))
     authorizer = PortfolioRiskAuthorizer(
         client,
-        StateStore(str(tmp_path / "authorizer-state.db")),
+        state,
         settings,
         plan_provider=lambda **kwargs: {
             "instrument": kwargs["instrument"],
@@ -280,11 +281,7 @@ def test_real_okx_client_accepts_only_concrete_portfolio_authorizer(tmp_path):
         },
         clock_ms=lambda: 1_800_000_000_000,
     )
-    manager = DemoOrderManager(
-        client,
-        StateStore(str(tmp_path / "authorized.db")),
-        risk_authorizer=authorizer,
-    )
+    manager = DemoOrderManager(client, state, risk_authorizer=authorizer)
     result = submit(manager, "NBRISK_OK", candle_ts=1_799_996_400_000)
 
     assert result["status"] == "acknowledged"
