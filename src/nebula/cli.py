@@ -12,7 +12,7 @@ from .portfolio import PortfolioPolicy, PortfolioRiskEngine
 
 def main():
     parser = argparse.ArgumentParser(prog="nebula")
-    parser.add_argument("command", choices=["check-demo-public", "analyze-once", "portfolio-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
+    parser.add_argument("command", choices=["check-demo-public", "analyze-once", "preflight-once", "portfolio-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
     parser.add_argument("--db", default=os.getenv("NEBULA_DB_PATH", "nebula.sqlite3"))
     parser.add_argument("--bar", default="1H")
     parser.add_argument("--data", help="Local ascending OHLCV CSV for offline backtest or dataset audit")
@@ -44,8 +44,10 @@ def main():
     args = parser.parse_args()
     if (args.plan_risk_quote is None) != (args.plan_max_notional_quote is None):
         parser.error("--plan-risk-quote and --plan-max-notional-quote must be supplied together")
-    if args.command != "analyze-once" and (args.plan_risk_quote is not None or args.plan_max_notional_quote is not None):
-        parser.error("candidate-plan sizing options are only valid with analyze-once")
+    if args.command not in {"analyze-once", "preflight-once"} and (args.plan_risk_quote is not None or args.plan_max_notional_quote is not None):
+        parser.error("candidate-plan sizing options are only valid with analyze-once or preflight-once")
+    if args.command == "preflight-once" and args.plan_risk_quote is None:
+        parser.error("preflight-once requires --plan-risk-quote and --plan-max-notional-quote")
     if args.command == "download-history":
         if not args.symbol:
             parser.error("download-history requires --symbol BTC-USDT")
@@ -142,6 +144,25 @@ def main():
         instruments = client.get_instruments()
         tickers = client.get_tickers()
         emit_result(f"OK: {len(instruments)} spot instruments; {len(tickers)} tickers (public market data). No orders sent.")
+        return
+    if args.command == "preflight-once":
+        from .entry_plan import EntryPlanPolicy
+        from .preflight import run_read_only_preflight
+        try:
+            plan_policy = EntryPlanPolicy(
+                risk_budget_quote=args.plan_risk_quote,
+                max_notional_quote=args.plan_max_notional_quote,
+                fee_bps=settings.fee_bps,
+                slippage_bps=settings.slippage_bps,
+            )
+        except ValueError as exc:
+            parser.error(f"invalid candidate-plan sizing policy: {exc}")
+        state = StateStore(args.db)
+        report = run_read_only_preflight(
+            client, state, settings, bar=args.bar,
+            entry_plan_policy=plan_policy,
+        )
+        emit_result(json.dumps(report, indent=2, sort_keys=True))
         return
     if args.command == "portfolio-once":
         # Read-only private account endpoints plus public tickers. No order manager
