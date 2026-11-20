@@ -150,3 +150,35 @@ def test_preflight_orchestrator_approves_candidate_without_exchange_writes(
     ]
     assert not hasattr(client, "place_spot_limit")
     assert not hasattr(client, "place_spot_oco_exit")
+
+
+
+def test_preflight_orchestrator_uses_selected_four_hour_candle_interval(
+    monkeypatch, tmp_path
+):
+    class FourHourRuntime(FakeRuntime):
+        def run_once(self):
+            candidate = plan()
+            candidate["candle_ts"] = NOW_MS - 14_400_000
+            return {
+                "mode": "read_only_analysis",
+                "orders_enabled": False,
+                "order_submission_attempts": 0,
+                "signals": [{
+                    "instrument": "AAA-USDT",
+                    "signal": "buy",
+                    "candidate_entry_plan": candidate,
+                }],
+            }
+
+    monkeypatch.setattr("nebula.preflight.ReadOnlyRuntime", FourHourRuntime)
+    client = ReadOnlySnapshotClient()
+    state = StateStore(str(tmp_path / "four-hour.sqlite3"))
+
+    report = run_read_only_preflight(
+        client, state, settings_read_only(),
+        bar="4H", entry_plan_policy=policy(),
+    )
+
+    assert report["status"] == "approved"
+    assert report["order_submission_attempts"] == 0
