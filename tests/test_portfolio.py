@@ -13,7 +13,7 @@ def _snapshot(*, bid="110", balance_qty="1", balance_ts=None, ticker_ts=None,
               acct_lv="1", auto_loan=False, stop="90", realized="0"):
     return {
         "account_config": [{"acctLv": acct_lv, "autoLoan": auto_loan,
-                            "enableSpotBorrow": False, "perm": "read_only"}],
+                            "enableSpotBorrow": False, "perm": "read_only,trade"}],
         "balance": [{"uTime": str(balance_ts or NOW), "details": [
             {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"},
             {"ccy": "AAA", "eq": balance_qty, "availBal": balance_qty, "frozenBal": "0"},
