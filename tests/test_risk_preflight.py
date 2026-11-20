@@ -141,7 +141,7 @@ def test_candidate_preflight_uses_private_reads_without_enabling_writes(tmp_path
     assert Decimal(result["authorization"]["planned_entry"]["risk_to_stop_quote"]) <= Decimal("2")
     assert client.read_calls == [
         "instrument_rules", "account_config", "balance", "tickers",
-        "pending_regular", "pending_oco", "pending_conditional",
+        "pending_regular", "pending_oco", "pending_conditional", "account_bills",
     ]
     assert any(
         event["event_type"] == "entry_risk_preflight_approved"

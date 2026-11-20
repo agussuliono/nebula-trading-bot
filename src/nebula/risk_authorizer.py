@@ -60,7 +60,7 @@ class PortfolioRiskAuthorizer:
         )
 
     def _daily_account_pnl(self, *, account_config, balance, tickers,
-                           regular, oco, conditional, lock, unresolved, now_ms):
+                           regular, oco, conditional, lock, unresolved, now_ms, daily_realized):
         """Reconcile durable UTC equity baseline and every account bill since it."""
         if getattr(self.settings, "demo_account_exclusive", False) is not True:
             raise RiskAuthorizationError("Dedicated Demo account attestation is required")
@@ -97,11 +97,29 @@ class PortfolioRiskAuthorizer:
                 raise RiskAuthorizationError(
                     "Daily baseline missing while account has existing exposure or unresolved state"
                 )
+            if Decimal(str(daily_realized)) != 0:
+                raise RiskAuthorizationError(
+                    "Daily baseline missing after a realized trade; daily loss history cannot be reconstructed"
+                )
+            day_start_ms = now_ms - (now_ms % 86_400_000)
+            opening_bills = self.client.get_account_bills(
+                begin=str(day_start_ms), end=str(now_ms)
+            )
+            ledger.save_bills(opening_bills)
+            if opening_bills:
+                raise RiskAuthorizationError(
+                    "Daily baseline missing after account activity; wait for next clean UTC day"
+                )
+            bills = []
             ledger.establish_daily_baseline(
                 equity_quote=equity, timestamp_ms=now_ms,
                 account_fingerprint=fingerprint,
             )
             baseline = ledger.get_daily_baseline(now_ms)
+        else:
+            bills = self.client.get_account_bills(
+                begin=str(baseline["opening_timestamp_ms"]), end=str(now_ms)
+            )
         if baseline["account_fingerprint"] != fingerprint:
             raise RiskAuthorizationError("Daily baseline belongs to a different OKX account")
         age_ms = now_ms - int(baseline["opening_timestamp_ms"])
@@ -109,9 +127,6 @@ class PortfolioRiskAuthorizer:
             raise RiskAuthorizationError("Daily baseline is outside the current UTC day")
         # OKX /account/bills covers the last 7 days. A daily baseline is never older
         # than 24h. Any non-Spot-trade bill is treated as an unreconciled cash flow.
-        bills = self.client.get_account_bills(
-            begin=str(baseline["opening_timestamp_ms"]), end=str(now_ms)
-        )
         ledger.save_bills(bills)
         for bill in bills:
             inst_id = str(bill.get("instId") or "")
@@ -223,6 +238,7 @@ class PortfolioRiskAuthorizer:
                 account_config=account_config, balance=balance, tickers=tickers,
                 regular=regular, oco=oco, conditional=conditional,
                 lock=lock, unresolved=unresolved, now_ms=now_ms,
+                daily_realized=daily_realized,
             )
             policy = PortfolioPolicy(
                 max_snapshot_age_ms=self.settings.market_data_max_age_ms,
