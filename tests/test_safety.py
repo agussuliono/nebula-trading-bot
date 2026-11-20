@@ -28,7 +28,7 @@ def test_header_is_demo_only():
     assert "OK-ACCESS-SIGN" in headers
 
 
-def test_order_request_is_guarded_and_marked_demo():
+def test_order_request_is_guarded_and_marked_demo(tmp_path):
     class Response:
         def raise_for_status(self):
             pass
@@ -52,7 +52,7 @@ def test_order_request_is_guarded_and_marked_demo():
     # production permits are issued only by a successful StartupRecovery run.
     from nebula.entry_gate import issue_startup_entry_permit
     from nebula.state import StateStore
-    state = StateStore(":memory:")
+    state = StateStore(str(tmp_path / "startup-permit.db"))
     permit = issue_startup_entry_permit(client, state, "demo-test-uid")
     client.install_startup_entry_permit(permit, state)
     permit.consume(client, state)
