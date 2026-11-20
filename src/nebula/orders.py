@@ -105,7 +105,10 @@ class DemoOrderManager:
             if self.startup_permit is None:
                 raise OrderManagerError("No clean StartupRecovery permit; refusing Spot entry")
             try:
-                self.startup_permit.consume(self.client, self.state)
+                self.startup_permit.consume(
+                    self.client, self.state, instrument=inst_id, size=size,
+                    price=price, client_order_id=client_order_id,
+                )
             except Exception as exc:
                 raise OrderManagerError("Startup recovery permit is invalid or stale") from exc
 
