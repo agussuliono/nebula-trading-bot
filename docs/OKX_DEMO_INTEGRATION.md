@@ -51,8 +51,13 @@ print API keys, secrets, passphrases, account UIDs, or balance amounts.
    `OKX_API_KEY`, `OKX_SECRET_KEY`, and `OKX_PASSPHRASE` in the
    `okx-demo-readonly` environment. Never put them in workflow YAML,
    repository files, issues, pull-request comments, or ChatGPT.
-6. Keep the environment restricted to this manually triggered verification
-   workflow. Review workflow changes before adding or updating secrets.
+6. In the GitHub Environment settings, set deployment branches to
+   **Selected branches only** and allow only `main`. This is an independent
+   protection: a workflow-level branch condition alone is not a security
+   boundary because workflow code can be changed on another branch.
+7. Optionally require a trusted reviewer before deployments if the account
+   or repository has additional writers. Review workflow changes before
+   adding or updating secrets.
 
 GitHub-hosted runner IP addresses are not fixed by default. Do not assume a
 single IP allowlist will work for GitHub-hosted runners. OKX recommends IP
