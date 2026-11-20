@@ -7,7 +7,8 @@ from .runtime import ReadOnlyRuntime, RuntimePolicy
 
 def run_read_only_preflight(client, state_store, settings, *,
                             bar: str = "1H",
-                            entry_plan_policy: EntryPlanPolicy) -> dict:
+                            entry_plan_policy: EntryPlanPolicy,
+                            clock_ms=None) -> dict:
     """Run one market scan and preflight only the highest-ranked buy candidate.
 
     This orchestration has no order manager and never invokes exchange writes.
@@ -53,6 +54,7 @@ def run_read_only_preflight(client, state_store, settings, *,
         settings,
         plan_provider=lambda **kwargs: None,
         bar_ms=bar_ms,
+        clock_ms=clock_ms,
     )
     decision = CandidateRiskPreflight(authorizer, state_store).evaluate(
         candidate_signal["candidate_entry_plan"]
