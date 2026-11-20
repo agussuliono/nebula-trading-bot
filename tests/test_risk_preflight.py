@@ -32,9 +32,23 @@ def candidate(**overrides):
 
 
 class SnapshotClient:
-    def __init__(self, ask="100"):
+    def __init__(self, ask="100", min_size="0.001"):
         self.ask = ask
+        self.min_size = min_size
         self.read_calls = []
+
+    def get_spot_instrument(self, inst_id):
+        self.read_calls.append("instrument_rules")
+        return {
+            "instType": "SPOT",
+            "instId": inst_id,
+            "baseCcy": "AAA",
+            "quoteCcy": "USDT",
+            "tickSz": "0.1",
+            "lotSz": "0.001",
+            "minSz": self.min_size,
+            "state": "live",
+        }
 
     def get_account_config(self):
         self.read_calls.append("account_config")
@@ -118,7 +132,7 @@ def test_candidate_preflight_uses_private_reads_without_enabling_writes(tmp_path
     assert result["authorization"]["planned_entry"]["instrument"] == "AAA-USDT"
     assert Decimal(result["authorization"]["planned_entry"]["risk_to_stop_quote"]) <= Decimal("2")
     assert client.read_calls == [
-        "account_config", "balance", "tickers",
+        "instrument_rules", "account_config", "balance", "tickers",
         "pending_regular", "pending_oco", "pending_conditional",
     ]
     assert any(
@@ -236,3 +250,20 @@ def test_order_authorizer_rejects_mismatched_plan_identity_before_reads(
             candle_ts=CANDLE_TS,
         )
     assert client.read_calls == []
+
+
+def test_candidate_preflight_rechecks_current_minimum_size_before_private_reads(tmp_path):
+    client = SnapshotClient(min_size="0.2")
+    state = StateStore(str(tmp_path / "changed-rules.sqlite3"))
+    authorizer = PortfolioRiskAuthorizer(
+        client,
+        state,
+        read_only_settings(),
+        plan_provider=lambda **kwargs: pytest.fail("plan_provider must not replace candidate"),
+        clock_ms=lambda: NOW_MS,
+    )
+    result = CandidateRiskPreflight(authorizer, state).evaluate(candidate())
+
+    assert result["status"] == "rejected"
+    assert "instrument_rules" in client.read_calls
+    assert "account_config" not in client.read_calls
