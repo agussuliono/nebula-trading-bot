@@ -373,3 +373,14 @@ def test_valuation_can_be_complete_while_entry_is_blocked_by_policy():
     assert report["entry_allowed"] is False
     assert "position_already_active" in report["blockers"]
     assert "planned_entry_not_provided" in report["blockers"]
+
+
+
+def test_entry_fill_sync_failure_marks_valuation_incomplete_and_blocks_entry():
+    data = _snapshot()
+    report = _engine().evaluate(
+        **data, now_ms=NOW, position_fill_sync_error="Timeout"
+    )
+    assert "position_fill_sync_failed:Timeout" in report["blockers"]
+    assert report["valuation_complete"] is False
+    assert report["entry_allowed"] is False
