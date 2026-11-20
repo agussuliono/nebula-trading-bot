@@ -54,6 +54,32 @@ class PortfolioRiskAuthorizer:
                     or plan_candle_ts <= 0
                     or plan_candle_ts != int(candle_ts)):
                 raise RiskAuthorizationError("Entry requires a matching confirmed closed-candle buy signal")
+
+            # The plan provider must describe this exact normalized order. Do not
+            # combine a stop/target from another symbol, size, or price with the
+            # caller's requested order parameters.
+            if str(plan.get("instrument") or "") != str(instrument):
+                raise RiskAuthorizationError("Entry plan instrument does not match requested instrument")
+            try:
+                for field, requested in (("size", requested_size), ("entry_price", requested_price)):
+                    planned_value = Decimal(str(plan[field]))
+                    requested_value = Decimal(str(requested))
+                    if (not planned_value.is_finite() or not requested_value.is_finite()
+                            or planned_value <= 0 or planned_value != requested_value):
+                        raise RiskAuthorizationError(
+                            f"Entry plan {field} does not match requested order"
+                        )
+                stop_value = Decimal(str(plan["stop_loss"]))
+                target_value = Decimal(str(plan["take_profit"]))
+                entry_value = Decimal(str(requested_price))
+                if (not stop_value.is_finite() or not target_value.is_finite()
+                        or not (Decimal("0") < stop_value < entry_value < target_value)):
+                    raise RiskAuthorizationError("Entry plan stop/target levels are invalid")
+            except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+                if isinstance(exc, RiskAuthorizationError):
+                    raise
+                raise RiskAuthorizationError("Entry plan price/size fields are invalid") from exc
+
             now_ms = int(self.clock_ms())
             candle_close_ts = plan_candle_ts + self.bar_ms
             if (candle_close_ts > now_ms
@@ -119,3 +145,109 @@ class PortfolioRiskAuthorizer:
             raise
         except Exception as exc:
             raise RiskAuthorizationError("Portfolio risk authorization failed closed") from exc
+
+class CandidateRiskPreflight:
+    """Evaluate a read-only runtime candidate against live portfolio risk controls.
+
+    This boundary can only call PortfolioRiskAuthorizer (private GET snapshots).
+    It has no order manager and never submits, cancels, or modifies exchange orders.
+    """
+
+    def __init__(self, authorizer: PortfolioRiskAuthorizer, state_store):
+        if not isinstance(authorizer, PortfolioRiskAuthorizer):
+            raise TypeError("authorizer must be a PortfolioRiskAuthorizer")
+        self.authorizer = authorizer
+        self.state = state_store
+
+    @staticmethod
+    def _validate_candidate(candidate: dict) -> dict:
+        if not isinstance(candidate, dict):
+            raise RiskAuthorizationError("Candidate entry plan is missing")
+        if candidate.get("signal_action") != "buy" or candidate.get("candle_closed") is not True:
+            raise RiskAuthorizationError("Candidate must be a confirmed closed-candle buy plan")
+        candle_ts = candidate.get("candle_ts")
+        if isinstance(candle_ts, bool) or not isinstance(candle_ts, int) or candle_ts <= 0:
+            raise RiskAuthorizationError("Candidate candle timestamp is invalid")
+        if candidate.get("orders_submitted") != 0:
+            raise RiskAuthorizationError("Candidate plan must be read-only and have zero submitted orders")
+        instrument = str(candidate.get("instrument") or "")
+        if not instrument or not instrument.endswith("-USDT"):
+            raise RiskAuthorizationError("Candidate instrument must be a USDT Spot market")
+        try:
+            values = {}
+            for field in ("size", "entry_price", "stop_loss", "take_profit"):
+                value = Decimal(str(candidate[field]))
+                if not value.is_finite() or value <= 0:
+                    raise ValueError(field)
+                values[field] = value
+        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+            raise RiskAuthorizationError("Candidate plan contains invalid price or size values") from exc
+        if not (values["stop_loss"] < values["entry_price"] < values["take_profit"]):
+            raise RiskAuthorizationError("Candidate stop/entry/target ordering is invalid")
+        return {
+            "instrument": instrument,
+            "size": str(candidate["size"]),
+            "entry_price": str(candidate["entry_price"]),
+            "stop_loss": str(candidate["stop_loss"]),
+            "take_profit": str(candidate["take_profit"]),
+            "candle_ts": candle_ts,
+        }
+
+    def evaluate(self, candidate_plan: dict) -> dict:
+        """Return an auditable approve/reject preflight result; never place an order."""
+        instrument = None
+        candle_ts = None
+        try:
+            candidate = self._validate_candidate(candidate_plan)
+            instrument, candle_ts = candidate["instrument"], candidate["candle_ts"]
+            authorization = self.authorizer(
+                instrument=instrument,
+                requested_size=candidate["size"],
+                requested_price=candidate["entry_price"],
+                candle_ts=candle_ts,
+            )
+            if not isinstance(authorization, dict) or authorization.get("entry_allowed") is not True:
+                raise RiskAuthorizationError("Portfolio authorizer did not approve the candidate")
+            approved = authorization.get("planned_entry")
+            if not isinstance(approved, dict):
+                raise RiskAuthorizationError("Portfolio authorizer returned no approved plan")
+            for field in ("instrument", "size", "entry_price", "stop_loss", "take_profit"):
+                if field == "instrument":
+                    matches = str(approved.get(field)) == candidate[field]
+                else:
+                    try:
+                        matches = Decimal(str(approved.get(field))) == Decimal(candidate[field])
+                    except (TypeError, ValueError, ArithmeticError):
+                        matches = False
+                if not matches:
+                    raise RiskAuthorizationError(
+                        f"Approved {field} does not match the candidate plan"
+                    )
+            status = "approved"
+            reason = None
+            result = {
+                "status": status,
+                "entry_allowed": True,
+                "candidate": candidate,
+                "authorization": authorization,
+                "execution": "not_submitted_preflight_only",
+                "order_submission_attempts": 0,
+            }
+        except Exception as exc:
+            status = "rejected"
+            reason = str(exc)[:240] or type(exc).__name__
+            result = {
+                "status": status,
+                "entry_allowed": False,
+                "reason": reason,
+                "authorization": "not_approved",
+                "execution": "not_submitted_preflight_only",
+                "order_submission_attempts": 0,
+            }
+        self.state.record_event(
+            "entry_risk_preflight_" + status,
+            None,
+            {"instrument": instrument, "candle_ts": candle_ts,
+             "reason": reason, "order_submission_attempts": 0},
+        )
+        return result
