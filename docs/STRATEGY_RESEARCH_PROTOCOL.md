@@ -29,22 +29,33 @@ Establish a genuinely unseen, timestamp-disjoint evaluation set after the previo
 
 ## Data collection commands
 
-Run on the user's laptop using the installed project CLI. These commands use public market-data endpoints only; they do not need API credentials and do not submit orders.
+The incremental collector is implemented as `nebula collect-prospective`. It uses only the public `GET /api/v5/market/candles` endpoint, needs no API credentials, and cannot submit or cancel orders.
+
+Before using it, copy each exact frozen baseline CSV **and its matching manifest** into a separate prospective directory. Do not point the collector at the original evidence files. The collector verifies the original CSV SHA-256 against the three hashes recorded in `src/nebula/prospective.py`, checks the manifest, and refuses any symbol outside BTC/ETH/SOL, any non-1H bar, or any changed cutoff. Keep the original source files untouched.
+
+Example (replace the source paths with the exact original files on the laptop):
 
 ```bash
 mkdir -p ~/NEBULA/research/prospective
-cd ~/NEBULA/nebula-trading-bot-v0.16.6
-source ../nebula-trading-bot-v0.16.3/.venv/bin/activate
-
-nebula download-history --symbol BTC-USDT --bar 1H --candles 2160 \
-  --output ~/NEBULA/research/prospective/BTC-USDT-1H.csv
-nebula download-history --symbol ETH-USDT --bar 1H --candles 2160 \
-  --output ~/NEBULA/research/prospective/ETH-USDT-1H.csv
-nebula download-history --symbol SOL-USDT --bar 1H --candles 2160 \
-  --output ~/NEBULA/research/prospective/SOL-USDT-1H.csv
+cp /path/to/frozen/BTC-USDT-1H.csv ~/NEBULA/research/prospective/BTC-USDT-1H.csv
+cp /path/to/frozen/BTC-USDT-1H.csv.manifest.json ~/NEBULA/research/prospective/BTC-USDT-1H.csv.manifest.json
+cp /path/to/frozen/ETH-USDT-1H.csv ~/NEBULA/research/prospective/ETH-USDT-1H.csv
+cp /path/to/frozen/ETH-USDT-1H.csv.manifest.json ~/NEBULA/research/prospective/ETH-USDT-1H.csv.manifest.json
+cp /path/to/frozen/SOL-USDT-1H.csv ~/NEBULA/research/prospective/SOL-USDT-1H.csv
+cp /path/to/frozen/SOL-USDT-1H.csv.manifest.json ~/NEBULA/research/prospective/SOL-USDT-1H.csv.manifest.json
 ```
 
-Important: a download made immediately after the old sample will overlap the old sample because OKX's rolling history window returns recent data. Do not call it independent. The prospective collection should be appended only as new candles close, and the cutoff must be enforced in the research dataset. A complete 90-day prospective sample takes approximately 90 days to accumulate at 1H resolution.
+Run the collector once per symbol, then repeat at least daily:
+
+```bash
+nebula collect-prospective --symbol BTC-USDT --bar 1H --output ~/NEBULA/research/prospective/BTC-USDT-1H.csv
+nebula collect-prospective --symbol ETH-USDT --bar 1H --output ~/NEBULA/research/prospective/ETH-USDT-1H.csv
+nebula collect-prospective --symbol SOL-USDT --bar 1H --output ~/NEBULA/research/prospective/SOL-USDT-1H.csv
+```
+
+The collector appends only confirmed candles strictly after the frozen cutoff and after the last stored candle. It rejects duplicates, overlap, conflicting history, gaps, unconfirmed rows, altered CSV/manifest pairs, and a baseline that does not match the frozen SHA-256. It records the baseline hash, appended count, cutoff, latest timestamp, and updated CSV hash. It never fills missing candles. Because the public candles endpoint returns at most 300 rows per call, collect regularly; if the local dataset falls more than the available window behind, the strict continuity check stops rather than silently skipping bars. The CSV and manifest are staged before replacement, but the two-file replacement is not a single filesystem transaction if the process or OS fails between replacements.
+
+If the command reports `no_new_confirmed_candles`, no file is changed. The collector has not run on this user's laptop yet, so no new prospective observations are claimed at this stage.
 
 Audit each CSV:
 
@@ -54,7 +65,7 @@ nebula audit-data --bar 1H --data ~/NEBULA/research/prospective/ETH-USDT-1H.csv
 nebula audit-data --bar 1H --data ~/NEBULA/research/prospective/SOL-USDT-1H.csv
 ```
 
-Do not run strategy tuning until all three files cover the same prospective timestamps, the post-cutoff sample is large enough, and gaps/zero-volume bars have been reviewed. The exact collection mechanism for incremental forward updates remains to be implemented; do not repeatedly overwrite a dataset that is being preserved as evidence. The CLI command shown downloads a rolling historical window and does not by itself maintain a future-only dataset.
+Do not run strategy tuning until all three files cover the same prospective timestamps, the post-cutoff sample is large enough, and gaps/zero-volume bars have been reviewed. A 90-day prospective sample takes approximately 90 days to accumulate at 1H resolution.
 
 ## Current exit criteria
 
