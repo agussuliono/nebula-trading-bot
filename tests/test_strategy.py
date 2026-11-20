@@ -10,14 +10,14 @@ def test_ema_seed_and_length():
 
 
 def test_only_confirmed_candles_are_used():
-    rows = [["3", "", "", "", "3", "", "", "", "0"],
-            ["2", "", "", "", "2", "", "", "", "1"],
-            ["1", "", "", "", "1", "", "", "", "1"]]
+    rows = [["3", "3", "3.5", "2.5", "3", "1", "1", "1", "0"],
+            ["2", "2", "2.5", "1.5", "2", "1", "1", "1", "1"],
+            ["1", "1", "1.5", "0.5", "1", "1", "1", "1", "1"]]
     assert [r[0] for r in closed_candles(rows)] == ["1", "2"]
 
 
 def test_unconfirmed_newest_candle_is_excluded():
-    rows = [[str(i), "", "", "", str(i + 1), "", "", "", "1"] for i in range(1, 5)]
+    rows = [[str(i), str(i + 1), str(i + 1.5), str(i + 0.5), str(i + 1), "1", "1", "1", "1"] for i in range(1, 5)]
     rows[0][8] = "0"
     # Function sorts oldest-to-newest after OKX newest-first input and drops unconfirmed row.
     assert [r[0] for r in closed_candles(list(reversed(rows)))] == ["2", "3", "4"]
