@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: okx-demo-readonly
+    if: github.ref == 'refs/heads/main'
     env:
       NEBULA_ENABLE_DEMO_ORDERS: 'false'
       NEBULA_KILL_SWITCH: 'true'
