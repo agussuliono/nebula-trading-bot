@@ -110,3 +110,5 @@ The CLI preflight is still an evaluation only. It does not call the order manage
 - Legacy fake-client tests may still seed entries without a risk plan; this is only a unit-test compatibility path. Real exchange-backed protection fails closed if the plan is absent.
 - Added tests for persistence across restart, legacy schema migration, invalid plan rejection before position reservation, exact approved OCO levels, override rejection, missing plan rejection, adverse fill price, overfilled quantity, and fabricated authorizer subclasses.
 - This is still code-level/fake-backed validation only. No Demo or live order was submitted. CI verification for the current commit is pending.
+
+- GitHub Actions run #208 on `6ab90f0cf43cd0ab0d66fa386eed046abeb9a3d1` completed successfully: **293 tests passed in 2.27s**. Compileall, explicit Demo-off/emergency-stop-on checks, and fail-closed defaults passed. No exchange writes or credentials were used.
