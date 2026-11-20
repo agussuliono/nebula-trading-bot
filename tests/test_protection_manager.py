@@ -284,6 +284,69 @@ def test_reconcile_marks_triggered_algo_without_releasing_position_lock(tmp_path
     assert store.get_position_lock()['owner_client_order_id'] == 'NBENTRY1'
 
 
+def test_partially_effective_oco_is_not_misclassified_as_live(tmp_path):
+    class Lookup(PublicDemoStub):
+        def get_algo_order(self, algo_client_order_id):
+            return [{
+                'algoClOrdId': algo_client_order_id,
+                'algoId': '9991',
+                'state': 'partially_effective',
+                'ordIdList': [],
+            }]
+
+    store = seeded(tmp_path)
+    manager = DemoProtectionManager(Lookup(), store)
+    manager.prepare(
+        entry_client_order_id='NBENTRY1',
+        take_profit='52000',
+        stop_loss='48000',
+    )
+    store.update_protection_intent('NBENTRY1', 'submission_unknown')
+
+    result = manager.reconcile('NBENTRY1')
+
+    assert result['status'] == 'triggered'
+    assert result['position_lock_retained'] is True
+    assert result['child_orders_reconciled'] is False
+    assert store.get_position_lock()['owner_client_order_id'] == 'NBENTRY1'
+
+
+def test_partially_failed_oco_remains_blocked_and_reconcilable(tmp_path):
+    class Lookup(PublicDemoStub):
+        def __init__(self):
+            self.calls = 0
+
+        def get_algo_order(self, algo_client_order_id):
+            self.calls += 1
+            return [{
+                'algoClOrdId': algo_client_order_id,
+                'algoId': '9992',
+                'state': 'partially_failed',
+                'ordIdList': [],
+            }]
+
+    store = seeded(tmp_path)
+    client = Lookup()
+    manager = DemoProtectionManager(client, store)
+    manager.prepare(
+        entry_client_order_id='NBENTRY1',
+        take_profit='52000',
+        stop_loss='48000',
+    )
+    store.update_protection_intent('NBENTRY1', 'submission_unknown')
+
+    first = manager.reconcile('NBENTRY1')
+    second = manager.reconcile('NBENTRY1')
+
+    assert first['status'] == 'partially_failed'
+    assert first['position_lock_retained'] is True
+    assert second['status'] == 'partially_failed'
+    assert client.calls == 2
+    assert store.get_position_lock()['owner_client_order_id'] == 'NBENTRY1'
+    with pytest.raises(ProtectionManagerError, match='never resubmit'):
+        manager.submit_reserved('NBENTRY1')
+
+
 def test_reconcile_missing_algo_remains_ambiguous(tmp_path):
     class Lookup(PublicDemoStub):
         def get_algo_order(self, algo_client_order_id): return []
