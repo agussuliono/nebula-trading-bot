@@ -24,9 +24,11 @@ The command performs only these reads:
 
 It checks that the fixed REST host and Demo header are in use, the account is
 in Spot mode, auto-loan and Spot borrowing are disabled, and the API key has
-both Read and Trade permissions but no Withdraw permission. It reports
-non-USDT balances and outstanding orders as blockers for a clean initial
-integration.
+Read permission without Withdraw permission. Trade permission is neither
+required nor used by this read-only verification. It reports whether Trade
+permission is present so operators can identify an over-privileged key.
+It also reports open orders and non-USDT holdings as blockers for a clean
+initial integration.
 
 Pending regular and algo order lists are read with the documented 100-record
 page size and `after` cursors until the complete snapshot is obtained.
@@ -37,45 +39,46 @@ with exact decimal arithmetic.
 It never submits, cancels, amends, transfers, or adjusts funds. It does not
 print API keys, secrets, passphrases, account UIDs, or balance amounts.
 
-## Prepare a Demo API key locally
+## Prepare a dedicated read-only Demo API key for GitHub Actions
 
-1. Log in to OKX and open Trade → Demo Trading → Personal Center → Demo Trading
-   API. Create a Demo Trading API key.
-2. Grant Read and Trade only. Do not grant Withdraw.
-3. Store the credentials locally as environment variables. Do not paste them
-   into ChatGPT, commit them to Git, or put them in a config file.
+1. Log in to OKX Demo Trading and open Personal Center → Demo Trading API.
+2. Create a separate key for NEBULA connectivity checks.
+3. Grant **Read only**. Do not grant Trade, Withdraw, Transfer, Loan, Earn,
+   or Onchain permissions.
+4. Do not reuse a key that has Trade permission for this GitHub Actions
+   verification job.
+5. Store the three credentials as GitHub Environment secrets named
+   `OKX_API_KEY`, `OKX_SECRET_KEY`, and `OKX_PASSPHRASE` in the
+   `okx-demo-readonly` environment. Never put them in workflow YAML,
+   repository files, issues, pull-request comments, or ChatGPT.
+6. Keep the environment restricted to this manually triggered verification
+   workflow. Review workflow changes before adding or updating secrets.
 
-Linux/macOS shell example:
+GitHub-hosted runner IP addresses are not fixed by default. Do not assume a
+single IP allowlist will work for GitHub-hosted runners. OKX recommends IP
+binding where a stable runner IP is available; do not weaken the workflow or
+reuse a more privileged key merely to work around IP restrictions.
 
-```bash
-export OKX_API_KEY='YOUR_DEMO_API_KEY'
-export OKX_SECRET_KEY='YOUR_DEMO_SECRET'
-export OKX_PASSPHRASE='YOUR_DEMO_PASSPHRASE'
-nebula verify-demo-once
-```
+## Run the GitHub Actions verification
 
-PowerShell example:
+The workflow is `.github/workflows/okx-demo-verify.yml`. It is manually
+triggered, has read-only repository permissions, uses the named GitHub
+Environment, and explicitly sets order submission off and the emergency stop
+on. It runs only `nebula verify-demo-once`; it does not run the orchestrator.
 
-```powershell
-$env:OKX_API_KEY = 'YOUR_DEMO_API_KEY'
-$env:OKX_SECRET_KEY = 'YOUR_DEMO_SECRET'
-$env:OKX_PASSPHRASE = 'YOUR_DEMO_PASSPHRASE'
-nebula verify-demo-once
-```
-
-The command does not need `NEBULA_ENABLE_DEMO_ORDERS=true` and does not need
-the emergency stop disabled. Keep the write gate disabled and the kill switch
-enabled during this read-only verification.
+After this workflow file is present on the repository's default branch,
+open GitHub → Actions → **OKX Demo read-only verification** → Run workflow.
+Choose the default branch and start the run. A `workflow_dispatch` workflow
+must exist on the default branch to be manually triggerable.
 
 ## Interpreting the result
 
-- `read_only_demo_connection_verified`: the API connection and the checked
-  account properties passed. This is not approval to trade; the dedicated
-  Demo-account attestation and all other risk gates remain separate.
+- `read_only_demo_connection_verified`: public and authenticated reads passed
+  and the checked account properties passed. This is not approval to trade.
 - `connected_but_not_ready`: the API connected, but one or more account
   conditions need manual review. Do not enable order submission.
-- `blocked`: required credentials, endpoint checks, or API reads failed.
-  No order write is attempted.
+- `blocked`: credentials, endpoint checks, or API reads failed. No order
+  write is attempted.
 
 If the report shows existing orders or non-USDT holdings, do not delete or
 convert them just to clear the check. First identify whether they belong to
@@ -84,14 +87,13 @@ requires separate explicit approval.
 
 ## Automated contract tests
 
-CI uses a recording HTTP session with deterministic OKX-shaped responses.
-It verifies the Demo header, REST host, authentication signature, documented
-query parameters, Spot cash OCO payload, error handling, and zero write calls
-in the verification workflow. These are offline protocol tests, not proof of
-a successful connection to OKX.
+CI uses deterministic fake responses. It verifies the Demo header, REST host,
+authentication signature, documented query parameters, Spot cash OCO payload,
+error handling, and zero write calls in the verification workflow. These are
+offline protocol tests, not proof of a successful connection to OKX.
 
 ## Not yet performed
 
-No real Demo API key has been supplied or accessed by this development task.
-The read-only command has not been run against the user's account. No live or
-Demo order has been submitted. The 14-day forward test has not started.
+No real Demo API key has been supplied to or accessed by this development
+task. The read-only command has not been run against the user's account. No
+live or Demo order has been submitted. The 14-day forward test has not started.
