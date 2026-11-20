@@ -118,8 +118,11 @@ class PortfolioRiskEngine:
                  open_algo_orders: list[dict] | None = None,
                  local_unresolved_intents: list[dict] | None = None,
                  planned_entry: dict | None = None,
+                 position_fill_sync_error: str | None = None,
                  now_ms: int, daily_realized_pnl_quote="0") -> dict:
         blockers = []
+        if position_fill_sync_error:
+            blockers.append("position_fill_sync_failed:" + str(position_fill_sync_error))
         open_regular_orders = open_regular_orders or []
         open_algo_orders = open_algo_orders or []
         local_unresolved_intents = local_unresolved_intents or []
@@ -383,6 +386,7 @@ class PortfolioRiskEngine:
             "unresolved_oco", "local_unresolved_order_intents",
             "exchange_open_regular_orders", "exchange_oco_pending",
             "exchange_open_algo_orders", "untracked_non_usdt",
+            "position_fill_sync_failed",
         )
         complete = not any(
             blocker.startswith(valuation_incomplete_prefixes) for blocker in blockers
