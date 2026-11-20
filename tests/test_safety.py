@@ -55,7 +55,8 @@ def test_order_request_is_guarded_and_marked_demo(tmp_path):
     state = StateStore(str(tmp_path / "startup-permit.db"))
     permit = issue_startup_entry_permit(client, state, "demo-test-uid")
     client.install_startup_entry_permit(permit, state)
-    permit.consume(client, state)
+    permit.consume(client, state, instrument="BTC-USDT", size="0.001",
+                    price="50000", client_order_id="NB123")
     result = client.place_spot_limit(inst_id="BTC-USDT", side="buy", size="0.001",
                                      price="50000", client_order_id="NB123")
     assert result[0]["sCode"] == "0"
