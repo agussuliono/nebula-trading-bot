@@ -124,16 +124,28 @@ class DemoProtectionManager:
         if approved_plan is None and hasattr(self.client, "settings"):
             raise ProtectionManagerError("No persisted portfolio-approved stop/target for this entry")
         if approved_plan is not None:
-            if (approved_plan.get("instrument") != entry["instrument"]
-                    or Decimal(str(approved_plan.get("size"))) <= 0
-                    or Decimal(str(approved_plan.get("entry_price"))) <= 0):
-                raise ProtectionManagerError("Persisted approved entry plan does not match the position")
-            approved_tp = str(approved_plan.get("take_profit") or "")
-            approved_sl = str(approved_plan.get("stop_loss") or "")
-            if ((take_profit is not None and Decimal(str(take_profit)) != Decimal(approved_tp))
-                    or (stop_loss is not None and Decimal(str(stop_loss)) != Decimal(approved_sl))):
-                raise ProtectionManagerError("Requested OCO levels differ from the portfolio-approved entry plan")
-            take_profit, stop_loss = approved_tp, approved_sl
+            try:
+                approved_size = Decimal(str(approved_plan["size"]))
+                approved_entry = Decimal(str(approved_plan["entry_price"]))
+                approved_tp = Decimal(str(approved_plan["take_profit"]))
+                approved_sl = Decimal(str(approved_plan["stop_loss"]))
+                if (approved_plan.get("instrument") != entry["instrument"]
+                        or not all(value.is_finite() and value > 0 for value in
+                                   (approved_size, approved_entry, approved_tp, approved_sl))
+                        or not approved_sl < approved_entry < approved_tp):
+                    raise ValueError("invalid persisted plan")
+                if ((take_profit is not None and Decimal(str(take_profit)) != approved_tp)
+                        or (stop_loss is not None and Decimal(str(stop_loss)) != approved_sl)):
+                    raise ProtectionManagerError(
+                        "Requested OCO levels differ from the portfolio-approved entry plan"
+                    )
+            except ProtectionManagerError:
+                raise
+            except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+                raise ProtectionManagerError(
+                    "Persisted approved entry plan is invalid; protection is blocked"
+                ) from exc
+            take_profit, stop_loss = str(approved_tp), str(approved_sl)
         if take_profit is None or stop_loss is None:
             raise ProtectionManagerError("Approved take-profit and stop-loss are required")
         try:
