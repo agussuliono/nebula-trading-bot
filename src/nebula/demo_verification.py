@@ -68,18 +68,23 @@ def verify_demo_read_only(client, settings) -> dict:
         report["account_mode"] = (
             "spot" if str(config.get("acctLv")) == "1" else "not_spot_or_unknown"
         )
-        permissions = {
-            value.strip().lower()
-            for value in str(config.get("perm", "")).split(",")
-            if value.strip()
-        }
+        raw_permissions = config.get("perm")
+        permission_parts = raw_permissions.split(",") if isinstance(raw_permissions, str) else []
+        permissions = {value.strip().lower() for value in permission_parts if value.strip()}
+        malformed_permissions = (
+            not isinstance(raw_permissions, str)
+            or not raw_permissions.strip()
+            or any(not value.strip() for value in permission_parts)
+        )
         if str(config.get("acctLv")) != "1":
             report["blockers"].append("account_not_in_spot_mode")
         if config.get("autoLoan") is not False:
             report["blockers"].append("auto_loan_enabled_or_unknown")
         if config.get("enableSpotBorrow") is not False:
             report["blockers"].append("spot_borrow_enabled_or_unknown")
-        permission_blocked = False
+        permission_blocked = malformed_permissions
+        if malformed_permissions:
+            report["blockers"].append("api_key_permissions_malformed")
         if "read_only" not in permissions:
             report["blockers"].append("api_key_missing_read_permission")
             permission_blocked = True
@@ -95,6 +100,9 @@ def verify_demo_read_only(client, settings) -> dict:
             if permission in permissions:
                 report["blockers"].append(blocker)
                 permission_blocked = True
+        if permissions - {"read_only"} - set(restricted_permissions):
+            report["blockers"].append("api_key_unrecognized_or_unapproved_permission")
+            permission_blocked = True
         report["trade_permission"] = "present" if "trade" in permissions else "absent_read_only"
         report["api_permissions"] = "not_compliant" if permission_blocked else "compliant"
 
