@@ -35,13 +35,16 @@ class PortfolioPolicy:
     max_daily_loss_quote: Decimal = Decimal("0")
     max_position_risk_quote: Decimal = Decimal("0")
     max_position_notional_quote: Decimal = Decimal("0")
+    max_spread_pct: Decimal = Decimal("0.25")
     balance_tolerance: Decimal = Decimal("0.00000001")
 
     def __post_init__(self):
         if isinstance(self.max_snapshot_age_ms, bool) or not isinstance(self.max_snapshot_age_ms, int) or self.max_snapshot_age_ms <= 0:
             raise ValueError("max_snapshot_age_ms must be a positive integer")
-        for name in ("fee_bps", "slippage_bps", "max_daily_loss_quote", "max_position_risk_quote", "max_position_notional_quote", "balance_tolerance"):
+        for name in ("fee_bps", "slippage_bps", "max_daily_loss_quote", "max_position_risk_quote", "max_position_notional_quote", "max_spread_pct", "balance_tolerance"):
             object.__setattr__(self, name, _d(getattr(self, name), name))
+        if self.max_spread_pct <= 0:
+            raise ValueError("max_spread_pct must be positive")
         if self.fee_bps + self.slippage_bps >= Decimal("10000"):
             raise ValueError("combined fee and slippage assumptions must be below 10000 bps")
         if (self.max_daily_loss_quote > 0 and self.max_position_risk_quote > 0
@@ -352,6 +355,9 @@ class PortfolioRiskEngine:
                 ticker_ts = int(_d(planned_ticker.get("ts"), "planned entry ticker timestamp", allow_zero=False))
                 if ask_px < bid_px or now_ms < ticker_ts or now_ms - ticker_ts > self.policy.max_snapshot_age_ms:
                     raise PortfolioError("Planned entry ticker is stale or invalid")
+                spread_pct = (ask_px - bid_px) / bid_px * Decimal("100")
+                if spread_pct > self.policy.max_spread_pct:
+                    raise PortfolioError("Planned entry spread exceeds the current portfolio limit")
                 # The candidate price was built from an earlier public ticker.
                 # Bound its drift against the latest ask so an old limit price
                 # cannot authorize an entry after the market has moved materially.
