@@ -44,6 +44,7 @@ class DemoOrderManager:
         if spec.inst_id != inst_id or spec.quote_ccy != "USDT":
             raise OrderManagerError("V1 only permits the requested USDT-quoted Spot instrument")
         size, price = spec.normalize_order(side, size, price)
+        approved_risk_plan = None
         # A real OKX client must be paired with a portfolio/risk authorization
         # callback before any new long exposure can be reserved or submitted.
         # Fake clients used by offline unit tests intentionally have no settings.
@@ -77,15 +78,27 @@ class DemoOrderManager:
             try:
                 from decimal import Decimal, InvalidOperation
                 approved_risk = Decimal(str(approved_plan["risk_to_stop_quote"]))
+                stop = Decimal(str(approved_plan["stop_loss"]))
+                target = Decimal(str(approved_plan["take_profit"]))
+                entry = Decimal(price)
                 settings = self.client.settings
-                if (not approved_risk.is_finite() or approved_risk <= 0
+                if (not all(value.is_finite() and value > 0 for value in (approved_risk, stop, target))
+                        or not stop < entry < target
                         or approved_risk > Decimal(str(settings.max_risk_quote))):
-                    raise ValueError("approved risk exceeds configured per-position limit")
+                    raise ValueError("approved risk or protective levels are invalid")
+                approved_risk_plan = {
+                    "instrument": inst_id, "size": size, "entry_price": price,
+                    "stop_loss": str(stop), "take_profit": str(target),
+                    "risk_to_stop_quote": str(approved_risk),
+                }
             except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
-                raise OrderManagerError("Approved risk amount is invalid or exceeds configured limit") from exc
+                raise OrderManagerError("Approved risk amount or protective levels are invalid") from exc
         try:
             if side == "buy":
-                reserved = self.state.reserve_entry_intent(client_order_id, inst_id, candle_ts, side)
+                reserved = self.state.reserve_entry_intent(
+                    client_order_id, inst_id, candle_ts, side,
+                    risk_plan=approved_risk_plan,
+                )
             else:
                 if not position_client_order_id:
                     raise OrderManagerError("Spot sell requires the active position_client_order_id")
