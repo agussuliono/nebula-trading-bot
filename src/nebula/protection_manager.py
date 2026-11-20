@@ -387,6 +387,29 @@ class DemoProtectionManager:
             raise ProtectionManagerError("No durable OCO intent exists")
         if intent["status"] != "reserved":
             raise ProtectionManagerError(f"OCO is {intent['status']}; never resubmit automatically")
+        # On the real exchange client, re-check immediately available base
+        # inventory and outstanding orders just before placing the protective
+        # OCO. A valid historical fill ledger alone does not prove the balance
+        # is still free (fees, manual activity, or another order may have changed it).
+        if hasattr(self.client, "settings"):
+            from .reconciliation import DemoAccountReconciler
+            try:
+                account = DemoAccountReconciler(self.client).snapshot(intent["instrument"])
+                required = Decimal(str(intent["filled_size"]))
+                if not required.is_finite() or required <= 0:
+                    raise ValueError("invalid persisted OCO size")
+                if account.has_open_orders:
+                    raise ValueError("open regular/algo orders exist for this instrument")
+                if account.available_base < required:
+                    raise ValueError("available base balance is below the protective OCO size")
+            except Exception as exc:
+                self.state.record_event(
+                    "oco_pre_submit_balance_blocked", entry_client_order_id,
+                    {"error_type": type(exc).__name__},
+                )
+                raise ProtectionManagerError(
+                    "Fresh Spot balance/order check failed; protective OCO was not submitted"
+                ) from exc
         # Durable state is changed before the network call. A crash or timeout
         # leaves an ambiguous intent that must be reconciled by algoClOrdId.
         self.state.update_protection_intent(entry_client_order_id, "submitting")
