@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 from nebula.orders import DemoOrderManager, OrderManagerError
 from nebula.exchange import OkxError
