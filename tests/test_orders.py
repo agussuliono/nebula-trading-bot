@@ -298,6 +298,10 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
         enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
         max_risk_quote=2, max_position_quote=100, market_data_max_age_ms=30000)
     class SnapshotClient:
+        def get_spot_instrument(self, inst_id):
+            return {"instType": "SPOT", "instId": inst_id, "baseCcy": "AAA",
+                    "quoteCcy": "USDT", "tickSz": "0.1", "lotSz": "0.001",
+                    "minSz": "0.001", "state": "live"}
         def get_account_config(self):
             return [{"acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
                      "perm": "read_only,trade"}]
