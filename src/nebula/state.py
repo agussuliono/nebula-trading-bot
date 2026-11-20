@@ -215,14 +215,22 @@ class StateStore:
 
     def release_rejected_entry_lock(self, client_order_id: str) -> bool:
         """Release only when the exchange/local adapter definitively rejected the entry."""
+        from decimal import Decimal, InvalidOperation
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             intent = db.execute("SELECT status,side FROM intents WHERE client_order_id=?", (client_order_id,)).fetchone()
             snapshot = db.execute("SELECT cumulative_fill_size FROM order_snapshots WHERE client_order_id=?", (client_order_id,)).fetchone()
             if not intent or intent["side"] != "buy" or intent["status"] != "rejected":
                 return False
-            if snapshot and float(snapshot["cumulative_fill_size"]) > 0:
-                return False
+            if snapshot:
+                try:
+                    cumulative = Decimal(str(snapshot["cumulative_fill_size"]))
+                except (InvalidOperation, TypeError, ValueError):
+                    return False
+                # Exact Decimal comparison: never release a position lock because
+                # float conversion rounded a tiny partial fill down to zero.
+                if not cumulative.is_finite() or cumulative != 0:
+                    return False
             cursor = db.execute("DELETE FROM position_lock WHERE singleton=1 AND owner_client_order_id=?", (client_order_id,))
             return cursor.rowcount == 1
 
@@ -409,6 +417,31 @@ class StateStore:
             db.execute("INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
                        ("protection_state_updated",entry_client_order_id,
                         json.dumps({"status":status,"exchange_algo_id":exchange_algo_id,"error_type":error_type},sort_keys=True)))
+            return dict(db.execute("SELECT * FROM protection_intents WHERE entry_client_order_id=?",
+                                   (entry_client_order_id,)).fetchone())
+
+
+    def defer_protection_intent(self, entry_client_order_id: str,
+                                error_type: str | None = None) -> dict[str, Any]:
+        """Return a definitely-not-submitted OCO intent to reserved after local rejection.
+
+        This transition is allowed only from submitting. It must never be used
+        after a network attempt whose outcome could be unknown.
+        """
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM protection_intents WHERE entry_client_order_id=?",
+                             (entry_client_order_id,)).fetchone()
+            if not row:
+                raise ValueError("Unknown protection intent")
+            if row["status"] != "submitting":
+                raise ValueError("Only a locally blocked OCO submission can be deferred")
+            db.execute("""UPDATE protection_intents SET status='reserved',last_error_type=?,
+                updated_at=CURRENT_TIMESTAMP WHERE entry_client_order_id=?""",
+                (error_type, entry_client_order_id))
+            db.execute("INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
+                       ("protection_submission_deferred", entry_client_order_id,
+                        json.dumps({"status": "reserved", "error_type": error_type}, sort_keys=True)))
             return dict(db.execute("SELECT * FROM protection_intents WHERE entry_client_order_id=?",
                                    (entry_client_order_id,)).fetchone())
 
