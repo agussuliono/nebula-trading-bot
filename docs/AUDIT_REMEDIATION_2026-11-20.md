@@ -46,6 +46,7 @@ New tests cover API key permission requirements and risk authorizer allow/deny b
 - This is input-integrity hardening only. It does not improve or establish strategy profitability, and the EMA strategy remains research-only and not approved for automated orders.
 
 ## Repeated efficiency and safety audit — 2026-11-20
+- Restrict CI push-triggered runs to `main`; PR branches continue to run on `pull_request`. This removes duplicate test-suite executions for commits that update an open PR while retaining validation for the target branch and manual dispatch.
 
 A subsequent review of the authenticated HTTP boundary, persistent OCO state transitions, precision-sensitive position-lock release, and CI workflow found and addressed these additional issues:
 
