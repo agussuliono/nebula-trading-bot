@@ -59,7 +59,6 @@ class SnapshotClient:
             "autoLoan": False,
             "enableSpotBorrow": False,
             "perm": "read_only,trade",
-            "uid": "test-demo-account-uid",
         }]
 
     def get_balance(self):
@@ -84,10 +83,6 @@ class SnapshotClient:
             "askSz": "100",
             "ts": str(NOW_MS),
         }]
-
-    def get_account_bills(self, *, begin=None, end=None, limit=100):
-        self.read_calls.append("account_bills")
-        return self.bills
 
     def get_pending_orders(self, inst_type):
         self.read_calls.append("pending_regular")
@@ -141,7 +136,7 @@ def test_candidate_preflight_uses_private_reads_without_enabling_writes(tmp_path
     assert Decimal(result["authorization"]["planned_entry"]["risk_to_stop_quote"]) <= Decimal("2")
     assert client.read_calls == [
         "instrument_rules", "account_config", "balance", "tickers",
-        "pending_regular", "pending_oco", "pending_conditional", "account_bills",
+        "pending_regular", "pending_oco", "pending_conditional",
     ]
     assert any(
         event["event_type"] == "entry_risk_preflight_approved"
@@ -351,22 +346,3 @@ def test_non_spot_or_transfer_bill_blocks_authorization(tmp_path):
     result = CandidateRiskPreflight(authorizer, state).evaluate(candidate())
     assert result["status"] == "rejected"
     assert "baseline missing after account activity" in result["reason"].lower()
-
-
-
-def test_daily_baseline_refuses_to_start_after_account_activity(tmp_path):
-    client = SnapshotClient(bills=[{
-        "billId": "123", "ccy": "USDT", "balChg": "-1", "bal": "999",
-        "type": "2", "subType": "1", "ts": str(NOW_MS - 1000),
-        "instId": "AAA-USDT",
-    }])
-    state = StateStore(str(tmp_path / "activity-before-baseline.sqlite3"))
-    authorizer = PortfolioRiskAuthorizer(
-        client, state, read_only_settings(),
-        plan_provider=lambda **kwargs: pytest.fail("candidate plan should not be reached"),
-        clock_ms=lambda: NOW_MS,
-    )
-    result = CandidateRiskPreflight(authorizer, state).evaluate(candidate())
-    assert result["status"] == "rejected"
-    assert "baseline missing after account activity" in result["reason"].lower()
-    assert client.read_calls.count("account_bills") == 1

@@ -29,7 +29,7 @@ class FakeClient:
         return self.pending
     def get_account_config(self):
         return [{"acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
-                 "perm": "read_only,trade"}]
+                 "perm": "read_only,trade", "uid": "test-demo-account-uid"}]
     def get_balance(self):
         return [{"uTime": "1800000000000", "details": [
             {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]}]
@@ -37,6 +37,8 @@ class FakeClient:
         return [{"instId": "BTC-USDT", "bidPx": "49999.95", "askPx": "50000",
                  "bidSz": "100", "askSz": "100", "ts": "1800000000000"}]
     def get_pending_algo_orders(self, ord_type):
+        return []
+    def get_account_bills(self, *, begin=None, end=None, limit=100):
         return []
 
 
@@ -395,7 +397,7 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
                     "minSz": "0.001", "state": "live"}
         def get_account_config(self):
             return [{"acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
-                     "perm": "read_only,trade"}]
+                     "perm": "read_only,trade", "uid": "test-demo-account-uid"}]
         def get_balance(self):
             return [{"uTime": "1800000000000", "details": [
                 {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]}]
@@ -405,6 +407,8 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
         def get_pending_orders(self, inst_type):
             return []
         def get_pending_algo_orders(self, ord_type):
+            return []
+        def get_account_bills(self, *, begin=None, end=None, limit=100):
             return []
     authorizer = PortfolioRiskAuthorizer(
         SnapshotClient(), StateStore(str(tmp_path / "auth.db")), settings,
