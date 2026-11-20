@@ -66,12 +66,37 @@ def test_read_only_demo_verification_checks_public_private_and_spot_safety():
     assert result["private_api"] == "ok"
     assert result["account_mode"] == "spot"
     assert result["api_permissions"] == "compliant"
+    assert result["trade_permission"] == "present"
     assert result["open_orders"] == "clear"
     assert result["exchange_writes"] == 0
     assert result["orders_enabled"] is False
     assert result["private_reads_attempted"] is True
     assert "uid" not in str(result)
     assert all(not name.startswith(("place", "cancel", "submit")) for name in client.calls)
+
+
+def test_read_only_key_is_sufficient_for_connectivity_verification():
+    client = ReadOnlyDemoStub(config={
+        "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+        "perm": "read_only",
+    })
+    result = verify_demo_read_only(client, credentials())
+
+    assert result["status"] == "read_only_demo_connection_verified"
+    assert result["api_permissions"] == "compliant"
+    assert result["trade_permission"] == "absent_read_only"
+    assert result["exchange_writes"] == 0
+
+
+def test_missing_read_permission_is_a_blocker():
+    client = ReadOnlyDemoStub(config={
+        "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+        "perm": "trade",
+    })
+    result = verify_demo_read_only(client, credentials())
+
+    assert result["status"] == "connected_but_not_ready"
+    assert "api_key_missing_read_permission" in result["blockers"]
 
 
 def test_withdraw_permission_is_a_blocker_and_no_write_is_possible():
@@ -134,7 +159,6 @@ def test_private_read_timeout_fails_closed_without_retry_or_writes():
     assert result["account_snapshot"] == "incomplete"
     assert result["exchange_writes"] == 0
     assert client.calls.count("get_balance") == 1
-
 
 
 def test_tiny_non_quote_balance_is_not_lost_to_float_underflow():
