@@ -19,6 +19,11 @@ from .history import BAR_MS, SYMBOL_RE
 
 # Last timestamp in the previously inspected dataset (2026-11-20 01:00 UTC).
 PROSPECTIVE_CUTOFF_TS = 1_795_136_400_000
+FROZEN_BASELINE_SHA256 = {
+    "BTC-USDT": "bb7b6fe47bf08a75947e5c7b23d7d2e24cea1bb73cd0c9c6c56d8fac54656aca",
+    "ETH-USDT": "bf5555498c8d36d8d03c954cc075320cb835e78d696ebcc1624e1e83316ca3ee",
+    "SOL-USDT": "ffb364c8ee77e11e88850f66762f5840db525054935e4f3b364821059065f739",
+}
 
 
 def append_prospective_candles(
@@ -55,6 +60,15 @@ def append_prospective_candles(
     digest_before = hashlib.sha256(target.read_bytes()).hexdigest()
     if manifest.get("csv_sha256") != digest_before:
         raise BacktestError("Existing CSV hash does not match its manifest")
+    expected_baseline = FROZEN_BASELINE_SHA256.get(normalized)
+    if expected_baseline is None:
+        raise BacktestError("Symbol is not part of the frozen prospective research basket")
+    if manifest.get("collection_mode") == "append_only_prospective":
+        if (manifest.get("baseline_sha256") != expected_baseline
+                or manifest.get("frozen_cutoff_ts") != cutoff_ts):
+            raise BacktestError("Prospective manifest does not trace to the frozen baseline")
+    elif digest_before != expected_baseline:
+        raise BacktestError("Initial dataset is not the exact frozen research baseline")
     if (manifest.get("symbol") != normalized or manifest.get("bar") != bar
             or manifest.get("last_ts") != existing[-1].ts
             or manifest.get("first_ts") != existing[0].ts
@@ -87,6 +101,7 @@ def append_prospective_candles(
     updated = {
         **manifest,
         "collection_mode": "append_only_prospective",
+        "baseline_sha256": manifest.get("baseline_sha256", digest_before),
         "frozen_cutoff_ts": cutoff_ts,
         "last_collection_at_utc": datetime.now(timezone.utc).isoformat(),
         "appended_candle_count": int(manifest.get("appended_candle_count", 0)) + len(additions),
