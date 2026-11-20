@@ -37,6 +37,10 @@ def main():
     parser.add_argument("--max-drawdown-halt-pct", type=float, default=0.20)
     parser.add_argument("--fast-ema", type=int, default=20)
     parser.add_argument("--slow-ema", type=int, default=50)
+    parser.add_argument("--plan-risk-quote", type=float,
+                        help="Explicit quote-currency risk budget for read-only candidate plans")
+    parser.add_argument("--plan-max-notional-quote", type=float,
+                        help="Explicit quote-currency notional cap for read-only candidate plans")
     args = parser.parse_args()
     if args.command == "download-history":
         if not args.symbol:
@@ -192,8 +196,24 @@ def main():
         return
     # Deliberately public-data-only. This command never creates an order manager,
     # never reads private balances, and cannot submit or cancel exchange orders.
+    if (args.plan_risk_quote is None) != (args.plan_max_notional_quote is None):
+        parser.error("--plan-risk-quote and --plan-max-notional-quote must be supplied together")
+    if args.command != "analyze-once" and (args.plan_risk_quote is not None or args.plan_max_notional_quote is not None):
+        parser.error("candidate-plan sizing options are only valid with analyze-once")
+    plan_policy = None
+    if args.plan_risk_quote is not None:
+        from .entry_plan import EntryPlanPolicy
+        try:
+            plan_policy = EntryPlanPolicy(
+                risk_budget_quote=args.plan_risk_quote,
+                max_notional_quote=args.plan_max_notional_quote,
+                fee_bps=settings.fee_bps,
+                slippage_bps=settings.slippage_bps,
+            )
+        except ValueError as exc:
+            parser.error(f"invalid candidate-plan sizing policy: {exc}")
     state = StateStore(args.db)
-    policy = RuntimePolicy(bar=args.bar)
+    policy = RuntimePolicy(bar=args.bar, entry_plan_policy=plan_policy)
     runtime = ReadOnlyRuntime(client, state, policy=policy)
     emit_result(result_json(runtime.run_once()))
 
