@@ -1,0 +1,184 @@
+from decimal import Decimal
+
+import pytest
+
+from nebula.config import Settings
+from nebula.risk_authorizer import (
+    CandidateRiskPreflight,
+    PortfolioRiskAuthorizer,
+    RiskAuthorizationError,
+)
+from nebula.state import StateStore
+
+
+NOW_MS = 1_800_000_000_000
+CANDLE_TS = NOW_MS - 3_600_000
+
+
+def candidate(**overrides):
+    value = {
+        "instrument": "AAA-USDT",
+        "signal_action": "buy",
+        "candle_closed": True,
+        "candle_ts": CANDLE_TS,
+        "entry_price": "100",
+        "size": "0.1",
+        "stop_loss": "90",
+        "take_profit": "120",
+        "orders_submitted": 0,
+    }
+    value.update(overrides)
+    return value
+
+
+class SnapshotClient:
+    def __init__(self, ask="100"):
+        self.ask = ask
+        self.read_calls = []
+
+    def get_account_config(self):
+        self.read_calls.append("account_config")
+        return [{
+            "acctLv": "1",
+            "autoLoan": False,
+            "enableSpotBorrow": False,
+            "perm": "read_only,trade",
+        }]
+
+    def get_balance(self):
+        self.read_calls.append("balance")
+        return [{
+            "uTime": str(NOW_MS),
+            "details": [{
+                "ccy": "USDT",
+                "eq": "1000",
+                "availBal": "1000",
+                "frozenBal": "0",
+            }],
+        }]
+
+    def get_tickers(self):
+        self.read_calls.append("tickers")
+        return [{
+            "instId": "AAA-USDT",
+            "bidPx": "99",
+            "askPx": self.ask,
+            "bidSz": "100",
+            "askSz": "100",
+            "ts": str(NOW_MS),
+        }]
+
+    def get_pending_orders(self, inst_type):
+        self.read_calls.append("pending_regular")
+        assert inst_type == "SPOT"
+        return []
+
+    def get_pending_algo_orders(self, ord_type):
+        self.read_calls.append("pending_" + ord_type)
+        return []
+
+
+def read_only_settings():
+    # Private Demo reads are permitted, but exchange writes remain disabled.
+    return Settings(
+        api_key="demo-key",
+        secret_key="demo-secret",
+        passphrase="demo-pass",
+        enable_demo_orders=False,
+        kill_switch=True,
+        max_daily_loss_quote=20,
+        max_risk_quote=2,
+        max_position_quote=100,
+        market_data_max_age_ms=30_000,
+    )
+
+
+def make_preflight(tmp_path, *, ask="100"):
+    client = SnapshotClient(ask=ask)
+    state = StateStore(str(tmp_path / "preflight.sqlite3"))
+    authorizer = PortfolioRiskAuthorizer(
+        client,
+        state,
+        read_only_settings(),
+        # The preflight uses the immutable candidate supplied to its own method.
+        plan_provider=lambda **kwargs: pytest.fail("plan_provider must not replace candidate"),
+        clock_ms=lambda: NOW_MS,
+    )
+    return CandidateRiskPreflight(authorizer, state), client, state
+
+
+def test_candidate_preflight_uses_private_reads_without_enabling_writes(tmp_path):
+    preflight, client, state = make_preflight(tmp_path)
+    result = preflight.evaluate(candidate())
+
+    assert result["status"] == "approved"
+    assert result["entry_allowed"] is True
+    assert result["execution"] == "not_submitted_preflight_only"
+    assert result["order_submission_attempts"] == 0
+    assert result["authorization"]["planned_entry"]["instrument"] == "AAA-USDT"
+    assert Decimal(result["authorization"]["planned_entry"]["risk_to_stop_quote"]) <= Decimal("2")
+    assert client.read_calls == [
+        "account_config", "balance", "tickers",
+        "pending_regular", "pending_oco", "pending_conditional",
+    ]
+    assert any(
+        event["event_type"] == "entry_risk_preflight_approved"
+        for event in state.list_events()
+    )
+
+
+@pytest.mark.parametrize("overrides", [
+    {"signal_action": "sell"},
+    {"candle_closed": False},
+    {"orders_submitted": 1},
+    {"size": "NaN"},
+    {"stop_loss": "100"},
+])
+def test_invalid_candidate_is_rejected_before_private_reads(tmp_path, overrides):
+    preflight, client, state = make_preflight(tmp_path)
+    result = preflight.evaluate(candidate(**overrides))
+
+    assert result["status"] == "rejected"
+    assert result["entry_allowed"] is False
+    assert result["execution"] == "not_submitted_preflight_only"
+    assert result["order_submission_attempts"] == 0
+    assert client.read_calls == []
+    assert any(
+        event["event_type"] == "entry_risk_preflight_rejected"
+        for event in state.list_events()
+    )
+
+
+def test_candidate_preflight_rejects_price_that_moved_beyond_slippage_budget(tmp_path):
+    preflight, client, _ = make_preflight(tmp_path, ask="100.5")
+    result = preflight.evaluate(candidate())
+
+    assert result["status"] == "rejected"
+    assert "risk authorization failed closed" in result["reason"].lower()
+    assert "tickers" in client.read_calls
+
+
+def test_order_manager_authorizer_still_requires_demo_write_gate(tmp_path):
+    client = SnapshotClient()
+    state = StateStore(str(tmp_path / "write-gate.sqlite3"))
+    authorizer = PortfolioRiskAuthorizer(
+        client,
+        state,
+        read_only_settings(),
+        plan_provider=lambda **kwargs: candidate(
+            instrument=kwargs["instrument"],
+            size=kwargs["size"],
+            entry_price=kwargs["entry_price"],
+            candle_ts=kwargs["candle_ts"],
+        ),
+        clock_ms=lambda: NOW_MS,
+    )
+
+    with pytest.raises(RiskAuthorizationError, match="failed closed"):
+        authorizer(
+            instrument="AAA-USDT",
+            requested_size="0.1",
+            requested_price="100",
+            candle_ts=CANDLE_TS,
+        )
+    assert client.read_calls == []
