@@ -67,6 +67,7 @@ def test_append_rejects_wrong_symbol_and_missing_manifest(tmp_path, monkeypatch)
 
 def test_append_can_continue_using_verified_baseline_chain(tmp_path, monkeypatch):
     path, _ = existing_dataset(tmp_path, monkeypatch)
+    baseline_digest = hashlib.sha256(path.read_bytes()).hexdigest()
     first = Candle(PROSPECTIVE_CUTOFF_TS + HOUR, 101, 103, 100, 102, 1200, True)
     second = Candle(PROSPECTIVE_CUTOFF_TS + 2 * HOUR, 102, 104, 101, 103, 1300, True)
     append_prospective_candles(path, "BTC-USDT", "1H", [first])
@@ -76,6 +77,4 @@ def test_append_can_continue_using_verified_baseline_chain(tmp_path, monkeypatch
     assert saved["appended_candle_count"] == 2
     assert saved["prospective_source"] == "OKX V5 GET /api/v5/market/candles"
     assert saved["last_appended_first_ts"] == second.ts
-    assert saved["baseline_sha256"] == hashlib.sha256(
-        (path.parent / "BTC.csv").read_bytes()
-    ).hexdigest() if False else saved["baseline_sha256"]
+    assert saved["baseline_sha256"] == baseline_digest
