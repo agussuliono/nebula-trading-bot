@@ -99,6 +99,7 @@ def read_only_settings():
         api_key="demo-key",
         secret_key="demo-secret",
         passphrase="demo-pass",
+        demo_account_exclusive=True,
         enable_demo_orders=False,
         kill_switch=True,
         max_daily_loss_quote=20,
@@ -219,6 +220,7 @@ def test_order_authorizer_rejects_mismatched_plan_identity_before_reads(
     state = StateStore(str(tmp_path / "mismatched-plan.sqlite3"))
     settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        demo_account_exclusive=True,
         enable_demo_orders=True, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
