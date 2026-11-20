@@ -172,3 +172,9 @@ def test_runtime_blocks_candidate_plan_when_circuit_breaker_halted(monkeypatch, 
     assert signal["blocked_reason"] == "risk_circuit_breaker_halted"
     assert signal["candidate_entry_plan"] is None
     assert signal["entry_plan_status"] == "not_applicable"
+
+
+
+def test_default_runtime_policy_is_self_consistent():
+    policy = RuntimePolicy()
+    assert policy.min_data_points >= policy.slow_ema + 1
