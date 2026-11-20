@@ -75,10 +75,10 @@ This milestone is a local/fake-backed integration boundary only. No API credenti
 - The preflight accepts only a confirmed closed-candle buy candidate with finite positive values, valid stop/entry/target ordering, and an exact integer `orders_submitted=0`.
 - The preflight uses authenticated private reads without opening the Demo write gate. The normal `DemoOrderManager` authorization path still requires the explicit write gate and emergency-stop clearance.
 - Current public Spot instrument metadata is fetched again and tick/lot/minimum-size rules are revalidated before private account snapshots.
-- The latest ask, top-of-book depth, and allowed slippage band are checked against the candidate price; stale or moved prices fail closed.
+- The latest bid/ask spread, ask depth, and allowed slippage band are rechecked against the candidate price; widened spreads and stale/moved prices fail closed.
 - Plan instrument, size, entry price, stop, and target must remain consistent across the candidate and portfolio approval.
 - The preflight has no order manager and records an auditable approved/rejected result with `order_submission_attempts=0`.
-- GitHub Actions run #160 on `db815d9c7563b820d51c5425ddd0b71fc4575335` completed successfully: **270 tests passed in 1.48s**. Compileall, explicit Demo-off/emergency-stop-on checks, and fail-closed default checks passed. Pip cache restored successfully.
+- GitHub Actions run #166 on `630939ce6d49503901c881d73cf352c9adc87116` completed successfully: **271 tests passed in 1.77s**. Compileall, explicit Demo-off/emergency-stop-on checks, and fail-closed default checks passed. Pip cache restored successfully.
 - All tests used local fakes and SQLite. No actual OKX credentials, private account requests, or exchange write requests were used in this development session.
 
 This does not yet connect preflight output to automated order submission. It is a risk decision only; Demo order lifecycle, OCO protection, partial-fill reconciliation, and restart recovery remain separate blocked milestones.
