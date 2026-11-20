@@ -347,10 +347,19 @@ class PortfolioRiskEngine:
                 if not planned_ticker:
                     raise PortfolioError("Planned entry ticker is missing")
                 ask_px = _d(planned_ticker.get("askPx"), "planned entry ask", allow_zero=False)
+                bid_px = _d(planned_ticker.get("bidPx"), "planned entry bid", allow_zero=False)
                 ask_size = _d(planned_ticker.get("askSz"), "planned entry ask size", allow_zero=False)
                 ticker_ts = int(_d(planned_ticker.get("ts"), "planned entry ticker timestamp", allow_zero=False))
-                if ask_px < _d(planned_ticker.get("bidPx"), "planned entry bid", allow_zero=False) or now_ms < ticker_ts or now_ms - ticker_ts > self.policy.max_snapshot_age_ms:
+                if ask_px < bid_px or now_ms < ticker_ts or now_ms - ticker_ts > self.policy.max_snapshot_age_ms:
                     raise PortfolioError("Planned entry ticker is stale or invalid")
+                # The candidate price was built from an earlier public ticker.
+                # Bound its drift against the latest ask so an old limit price
+                # cannot authorize an entry after the market has moved materially.
+                max_acceptable_buy_price = ask_px * (
+                    Decimal("1") + self.policy.slippage_bps / Decimal("10000")
+                )
+                if entry_px < ask_px or entry_px > max_acceptable_buy_price:
+                    raise PortfolioError("Planned entry price is outside the current ask/slippage band")
                 if ask_size < planned_qty:
                     raise PortfolioError("Planned entry exceeds top-of-book ask depth")
                 entry_value = planned_qty * entry_px
