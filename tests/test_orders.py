@@ -304,30 +304,59 @@ def test_real_okx_entry_rejects_authorization_without_protective_levels(tmp_path
         max_daily_loss_quote=20, max_risk_quote=20, max_position_quote=1000,
     )
     client.settings = settings
+    authorizer = PortfolioRiskAuthorizer(
+        client,
+        StateStore(str(tmp_path / "missing-protection-plan.db")),
+        settings,
+        plan_provider=lambda **kwargs: {
+            "instrument": kwargs["instrument"],
+            "size": kwargs["size"],
+            "entry_price": kwargs["entry_price"],
+            "signal_action": "buy",
+            "candle_closed": True,
+            "candle_ts": kwargs["candle_ts"],
+            "risk_to_stop_quote": "1",
+        },
+        clock_ms=lambda: 1_800_000_000_000,
+    )
+    state = StateStore(str(tmp_path / "missing-protection-state.db"))
+    manager = DemoOrderManager(client, state, risk_authorizer=authorizer)
 
-    class Authorizer(PortfolioRiskAuthorizer):
-        def __init__(self):
-            pass
+    with pytest.raises(OrderManagerError, match="Portfolio risk authorization failed"):
+        submit(manager, "NBMISSING_PROTECTION")
+    assert client.place_calls == 0
+    assert state.get_position_lock() is None
 
+
+def test_authorizer_subclass_cannot_fabricate_approval(tmp_path):
+    from nebula.config import Settings
+    from nebula.risk_authorizer import PortfolioRiskAuthorizer
+
+    class FabricatedApproval(PortfolioRiskAuthorizer):
         def __call__(self, **kwargs):
             return {
                 "entry_allowed": True,
                 "planned_entry": {
-                    "instrument": kwargs["instrument"],
-                    "size": kwargs["requested_size"],
-                    "entry_price": kwargs["requested_price"],
-                    "risk_to_stop_quote": "1",
+                    "instrument": "BTC-USDT", "size": "0.01",
+                    "entry_price": "50000", "stop_loss": "49000",
+                    "take_profit": "52000", "risk_to_stop_quote": "1",
                 },
             }
 
-    manager = DemoOrderManager(
-        client, StateStore(str(tmp_path / "missing-protection-plan.db")),
-        risk_authorizer=Authorizer(),
+    client = FakeClient()
+    client.settings = Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
-    with pytest.raises(OrderManagerError, match="protective levels"):
-        submit(manager, "NBMISSING_PROTECTION")
+    manager = DemoOrderManager(
+        client, StateStore(str(tmp_path / "subclass.db")),
+        risk_authorizer=FabricatedApproval.__new__(FabricatedApproval),
+    )
+
+    with pytest.raises(OrderManagerError, match="No integrated PortfolioRiskAuthorizer"):
+        submit(manager, "NBSUBCLASS")
     assert client.place_calls == 0
-    assert manager.state.get_position_lock() is None
 
 
 def test_real_okx_client_rejects_generic_callable_that_fabricates_approval(tmp_path):
