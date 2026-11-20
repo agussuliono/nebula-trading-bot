@@ -192,7 +192,14 @@ def test_candidate_rejects_boolean_order_count_even_though_false_equals_zero(tmp
     assert client.read_calls == []
 
 
-def test_order_authorizer_rejects_plan_for_different_instrument_before_reads(tmp_path):
+@pytest.mark.parametrize(("field", "wrong_value"), [
+    ("instrument", "BBB-USDT"),
+    ("size", "0.2"),
+    ("entry_price", "100.1"),
+])
+def test_order_authorizer_rejects_mismatched_plan_identity_before_reads(
+    tmp_path, field, wrong_value
+):
     client = SnapshotClient()
     state = StateStore(str(tmp_path / "mismatched-plan.sqlite3"))
     settings = Settings(
@@ -200,10 +207,10 @@ def test_order_authorizer_rejects_plan_for_different_instrument_before_reads(tmp
         enable_demo_orders=True, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
-    authorizer = PortfolioRiskAuthorizer(
-        client, state, settings,
-        plan_provider=lambda **kwargs: {
-            "instrument": "BBB-USDT",
+
+    def plan_provider(**kwargs):
+        plan = {
+            "instrument": kwargs["instrument"],
             "size": kwargs["size"],
             "entry_price": kwargs["entry_price"],
             "signal_action": "buy",
@@ -211,11 +218,17 @@ def test_order_authorizer_rejects_plan_for_different_instrument_before_reads(tmp
             "candle_ts": kwargs["candle_ts"],
             "stop_loss": "90",
             "take_profit": "120",
-        },
+        }
+        plan[field] = wrong_value
+        return plan
+
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, settings,
+        plan_provider=plan_provider,
         clock_ms=lambda: NOW_MS,
     )
 
-    with pytest.raises(RiskAuthorizationError, match="instrument"):
+    with pytest.raises(RiskAuthorizationError, match=field):
         authorizer(
             instrument="AAA-USDT",
             requested_size="0.1",
