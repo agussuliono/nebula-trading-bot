@@ -35,6 +35,15 @@ class DemoOrderManager:
         # and the Settings order gate. This manager adds durable idempotency.
         if side not in {"buy", "sell"}:
             raise ValueError("side must be buy or sell")
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.check_order_allowed(side)
+        # Always use current exchange precision rules. No implicit rounding without
+        # the exchange's current tickSz/lotSz/minSz metadata.
+        raw_spec = self.client.get_spot_instrument(inst_id)
+        spec = SpotInstrument.from_okx(raw_spec)
+        if spec.inst_id != inst_id or spec.quote_ccy != "USDT":
+            raise OrderManagerError("V1 only permits the requested USDT-quoted Spot instrument")
+        size, price = spec.normalize_order(side, size, price)
         # A real OKX client must be paired with a portfolio/risk authorization
         # callback before any new long exposure can be reserved or submitted.
         # Fake clients used by offline unit tests intentionally have no settings.
@@ -70,15 +79,6 @@ class DemoOrderManager:
                     raise ValueError("approved risk exceeds configured per-position limit")
             except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
                 raise OrderManagerError("Approved risk amount is invalid or exceeds configured limit") from exc
-        if self.circuit_breaker is not None:
-            self.circuit_breaker.check_order_allowed(side)
-        # Always use current exchange precision rules. No implicit rounding without
-        # the exchange's current tickSz/lotSz/minSz metadata.
-        raw_spec = self.client.get_spot_instrument(inst_id)
-        spec = SpotInstrument.from_okx(raw_spec)
-        if spec.inst_id != inst_id or spec.quote_ccy != "USDT":
-            raise OrderManagerError("V1 only permits the requested USDT-quoted Spot instrument")
-        size, price = spec.normalize_order(side, size, price)
         try:
             if side == "buy":
                 reserved = self.state.reserve_entry_intent(client_order_id, inst_id, candle_ts, side)
