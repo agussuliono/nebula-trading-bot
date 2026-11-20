@@ -85,7 +85,11 @@ def verify_demo_read_only(client, settings) -> dict:
         if "withdraw" in permissions:
             report["blockers"].append("api_key_has_withdraw_permission")
             permission_blocked = True
-        report["trade_permission"] = "present" if "trade" in permissions else "absent_read_only"
+        trade_present = "trade" in permissions
+        report["trade_permission"] = "present" if trade_present else "absent_read_only"
+        if trade_present:
+            report["blockers"].append("api_key_has_trade_permission")
+            permission_blocked = True
         report["api_permissions"] = "not_compliant" if permission_blocked else "compliant"
 
         balances = client.get_balance()
