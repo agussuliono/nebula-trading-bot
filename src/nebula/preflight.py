@@ -43,11 +43,16 @@ def run_read_only_preflight(client, state_store, settings, *,
 
     # The provider is intentionally unused by preflight_candidate: the exact
     # immutable candidate object is passed directly to the read-only evaluator.
+    bar_ms = {"1H": 3_600_000, "4H": 14_400_000, "1D": 86_400_000}.get(bar)
+    if bar_ms is None:
+        raise ValueError("preflight supports only 1H, 4H, or 1D candles")
+
     authorizer = PortfolioRiskAuthorizer(
         client,
         state_store,
         settings,
         plan_provider=lambda **kwargs: None,
+        bar_ms=bar_ms,
     )
     decision = CandidateRiskPreflight(authorizer, state_store).evaluate(
         candidate_signal["candidate_entry_plan"]
