@@ -12,7 +12,7 @@ from .portfolio import PortfolioPolicy, PortfolioRiskEngine
 
 def main():
     parser = argparse.ArgumentParser(prog="nebula")
-    parser.add_argument("command", choices=["check-demo-public", "analyze-once", "preflight-once", "portfolio-once", "recover-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
+    parser.add_argument("command", choices=["check-demo-public", "analyze-once", "preflight-once", "portfolio-once", "recover-once", "orchestrate-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
     parser.add_argument("--db", default=os.getenv("NEBULA_DB_PATH", "nebula.sqlite3"))
     parser.add_argument("--bar", default="1H")
     parser.add_argument("--data", help="Local ascending OHLCV CSV for offline backtest or dataset audit")
@@ -41,7 +41,11 @@ def main():
                         help="Explicit quote-currency risk budget for read-only candidate plans")
     parser.add_argument("--plan-max-notional-quote", type=float,
                         help="Explicit quote-currency notional cap for read-only candidate plans")
+    parser.add_argument("--execute-demo", action="store_true",
+                        help="Explicitly request one guarded OKX Spot Demo execution cycle (never live)")
     args = parser.parse_args()
+    if args.execute_demo and args.command != "orchestrate-once":
+        parser.error("--execute-demo is only valid with orchestrate-once")
     if (args.plan_risk_quote is None) != (args.plan_max_notional_quote is None):
         parser.error("--plan-risk-quote and --plan-max-notional-quote must be supplied together")
     if args.command not in {"analyze-once", "preflight-once"} and (args.plan_risk_quote is not None or args.plan_max_notional_quote is not None):
@@ -144,6 +148,15 @@ def main():
         instruments = client.get_instruments()
         tickers = client.get_tickers()
         emit_result(f"OK: {len(instruments)} spot instruments; {len(tickers)} tickers (public market data). No orders sent.")
+        return
+    if args.command == "orchestrate-once":
+        from .orchestrator import ExecutionOrchestrator
+        state = StateStore(args.db)
+        orchestrator = ExecutionOrchestrator(
+            client, state, settings, bar=args.bar,
+        )
+        report = orchestrator.run_once(execute=args.execute_demo)
+        emit_result(json.dumps(report, indent=2, sort_keys=True, default=str))
         return
     if args.command == "preflight-once":
         from .entry_plan import EntryPlanPolicy
