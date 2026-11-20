@@ -11,16 +11,18 @@ from nebula.prospective import PROSPECTIVE_CUTOFF_TS, append_prospective_candles
 HOUR = 3_600_000
 
 
-def existing_dataset(tmp_path):
+def existing_dataset(tmp_path, monkeypatch):
     rows = [Candle(PROSPECTIVE_CUTOFF_TS - (59 - i) * HOUR,
                    100, 102, 99, 101, 1000, True) for i in range(60)]
     path = tmp_path / "BTC.csv"
     save_dataset(path, "BTC-USDT", "1H", rows, {"research_role": "frozen_prior_sample"})
+    from nebula import prospective
+    monkeypatch.setitem(prospective.FROZEN_BASELINE_SHA256, "BTC-USDT", hashlib.sha256(path.read_bytes()).hexdigest())
     return path, rows
 
 
-def test_append_prospective_single_confirmed_candle_and_manifest(tmp_path):
-    path, rows = existing_dataset(tmp_path)
+def test_append_prospective_single_confirmed_candle_and_manifest(tmp_path, monkeypatch):
+    path, rows = existing_dataset(tmp_path, monkeypatch)
     new = Candle(PROSPECTIVE_CUTOFF_TS + HOUR, 101, 103, 100, 102, 1200, True)
     result = append_prospective_candles(path, "BTC-USDT", "1H", [new])
     saved = json.loads(path.with_suffix(".csv.manifest.json").read_text())
@@ -39,22 +41,22 @@ def test_append_prospective_single_confirmed_candle_and_manifest(tmp_path):
     ([Candle(PROSPECTIVE_CUTOFF_TS + 2 * HOUR, 101, 103, 100, 102, 100, True)], "contiguous"),
     ([Candle(PROSPECTIVE_CUTOFF_TS + HOUR, 101, 103, 100, 102, 100, False)], "confirmed"),
 ])
-def test_append_rejects_overlap_gap_or_unconfirmed(tmp_path, new_candles, message):
-    path, _ = existing_dataset(tmp_path)
+def test_append_rejects_overlap_gap_or_unconfirmed(tmp_path, monkeypatch, new_candles, message):
+    path, _ = existing_dataset(tmp_path, monkeypatch)
     with pytest.raises(BacktestError, match=message):
         append_prospective_candles(path, "BTC-USDT", "1H", new_candles)
 
 
-def test_append_rejects_manifest_hash_mismatch(tmp_path):
-    path, _ = existing_dataset(tmp_path)
+def test_append_rejects_manifest_hash_mismatch(tmp_path, monkeypatch):
+    path, _ = existing_dataset(tmp_path, monkeypatch)
     path.write_text(path.read_text() + "\n")
     new = Candle(PROSPECTIVE_CUTOFF_TS + HOUR, 101, 103, 100, 102, 100, True)
     with pytest.raises(BacktestError, match="hash"):
         append_prospective_candles(path, "BTC-USDT", "1H", [new])
 
 
-def test_append_rejects_wrong_symbol_and_missing_manifest(tmp_path):
-    path, _ = existing_dataset(tmp_path)
+def test_append_rejects_wrong_symbol_and_missing_manifest(tmp_path, monkeypatch):
+    path, _ = existing_dataset(tmp_path, monkeypatch)
     new = Candle(PROSPECTIVE_CUTOFF_TS + HOUR, 101, 103, 100, 102, 100, True)
     with pytest.raises(BacktestError, match="symbol"):
         append_prospective_candles(path, "ETH-USDT", "1H", [new])
