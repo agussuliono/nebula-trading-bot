@@ -223,9 +223,15 @@ class DemoProtectionManager:
                                                 error_type="AlgoNotFound")
             return self.state.get_protection_intent(entry_client_order_id)
         state = row.get("state")
-        mapping = {"live": "active", "pause": "active", "partially_effective": "active",
-                   "effective": "triggered", "canceled": "canceled",
-                   "order_failed": "failed", "partially_failed": "failed"}
+        mapping = {"live": "active", "pause": "active",
+                   # OKX documents partially_effective as a distinct algo state.
+                   # It is not equivalent to an untouched live OCO: reconcile any
+                   # spawned child orders and retain the position lock.
+                   "partially_effective": "triggered", "effective": "triggered",
+                   "canceled": "canceled", "order_failed": "failed",
+                   # A partially failed OCO may still have spawned child orders.
+                   # Keep it non-resubmittable but continue read-only reconciliation.
+                   "partially_failed": "partially_failed"}
         mapped = mapping.get(state)
         if mapped is None:
             self.state.update_protection_intent(entry_client_order_id, "submission_unknown",
@@ -234,10 +240,14 @@ class DemoProtectionManager:
         updated = self.state.update_protection_intent(
             entry_client_order_id, mapped, exchange_algo_id=str(row.get("algoId") or "") or None,
             error_type=("ExchangeAlgoFailed" if mapped == "failed" else None))
-        if mapped == "triggered":
+        if mapped in {"triggered", "partially_failed"}:
             child_ids = row.get("ordIdList") or ([row["ordId"]] if row.get("ordId") else [])
             if child_ids or self.state.list_exit_child_orders(entry_client_order_id):
                 return self.reconcile_exit_children(entry_client_order_id, child_order_ids=child_ids or None)
+            # A partial outcome without visible children is still unresolved.
+            # Keep the lock and surface the exact exchange state to the caller.
+            return {**updated, "position_lock_retained": True,
+                    "child_orders_reconciled": False}
         return updated
 
     def _ingest_order_fills(self, instrument: str, order_id: str, *, page_limit: int = 100,
@@ -313,7 +323,7 @@ class DemoProtectionManager:
             self.state.record_event("oco_children_reconciled", entry_client_order_id,
                                     {"child_order_ids": order_ids[:-1] if entry_snapshot and entry_snapshot.get("exchange_order_id") else order_ids,
                                      "fill_count": len(ledger), "accounting_complete": accounting["accounting_complete"]})
-            return {"status": "triggered", "child_orders": child_rows,
+            return {"status": intent["status"], "child_orders": child_rows,
                     "fill_count": len(ledger), "accounting": accounting,
                     "position_lock_retained": True}
         except ProtectionManagerError:
