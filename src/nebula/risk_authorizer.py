@@ -38,9 +38,34 @@ class PortfolioRiskAuthorizer:
 
     def __call__(self, *, instrument: str, requested_size: str,
                  requested_price: str, candle_ts: int) -> dict:
+        """Order-manager authorization; still requires the Demo write gate."""
+        return self._authorize(
+            instrument=instrument, requested_size=requested_size,
+            requested_price=requested_price, candle_ts=candle_ts,
+            plan_override=None, require_order_gate=True,
+        )
+
+    def preflight_candidate(self, candidate_plan: dict) -> dict:
+        """Read-only portfolio preflight; never requires or enables exchange writes."""
+        candidate = CandidateRiskPreflight._validate_candidate(candidate_plan)
+        return self._authorize(
+            instrument=candidate["instrument"],
+            requested_size=candidate["size"],
+            requested_price=candidate["entry_price"],
+            candle_ts=candidate["candle_ts"],
+            plan_override=candidate,
+            require_order_gate=False,
+        )
+
+    def _authorize(self, *, instrument: str, requested_size: str,
+                   requested_price: str, candle_ts: int,
+                   plan_override: dict | None, require_order_gate: bool) -> dict:
         try:
-            self.settings.validate_order_permission()
-            plan = self.plan_provider(
+            if require_order_gate:
+                self.settings.validate_order_permission()
+            else:
+                self.settings.validate_private_read_permission()
+            plan = plan_override if plan_override is not None else self.plan_provider(
                 instrument=instrument, size=requested_size,
                 entry_price=requested_price, candle_ts=candle_ts,
             )
