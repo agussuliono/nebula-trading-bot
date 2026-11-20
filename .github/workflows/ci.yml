@@ -1,7 +1,11 @@
 name: NEBULA CI
 
 on:
+  # Main receives push validation; feature branches are validated once via
+  # pull_request instead of running the same suite for both events.
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 
