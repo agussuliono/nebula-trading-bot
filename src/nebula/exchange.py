@@ -27,6 +27,7 @@ class OkxDemoClient:
     _PRIVATE_READS = {
         ("GET", "/api/v5/account/config"),
         ("GET", "/api/v5/account/balance"),
+        ("GET", "/api/v5/account/bills"),
         ("GET", "/api/v5/trade/order"),
         ("GET", "/api/v5/trade/fills-history"),
         ("GET", "/api/v5/trade/orders-pending"),
@@ -181,6 +182,46 @@ class OkxDemoClient:
     def get_balance(self):
         """Read account balances; requires a read-only-capable Demo API key."""
         return self.request("GET", "/api/v5/account/balance", private=True)
+
+    def get_account_bills(self, *, begin: str | None = None, end: str | None = None,
+                          limit: int = 100):
+        """Read all account bills for a bounded time window (maximum 7 days).
+
+        The API is read-only. Pagination uses the OKX billId cursor and fails
+        closed on malformed, repeated, or non-advancing pages.
+        """
+        if isinstance(limit, bool) or not 1 <= int(limit) <= 100:
+            raise ValueError("Account bill page limit must be between 1 and 100")
+        for name, value in (("begin", begin), ("end", end)):
+            if value is not None and not str(value).isdigit():
+                raise ValueError(f"{name} must be a millisecond timestamp")
+        if begin is not None and end is not None and int(begin) > int(end):
+            raise ValueError("begin must not be later than end")
+        rows_all, seen, cursor = [], set(), None
+        for _page in range(100):
+            params = {"limit": str(limit)}
+            if begin is not None:
+                params["begin"] = str(begin)
+            if end is not None:
+                params["end"] = str(end)
+            if cursor is not None:
+                params["after"] = cursor
+            page = self.request("GET", "/api/v5/account/bills", params, private=True)
+            if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+                raise OkxError("OKX account-bills page is malformed")
+            for row in page:
+                bill_id = str(row.get("billId") or "")
+                if not bill_id or bill_id in seen:
+                    raise OkxError("OKX account-bills pagination has a missing or duplicate billId")
+                seen.add(bill_id)
+                rows_all.append(row)
+            if len(page) < int(limit):
+                return rows_all
+            next_cursor = str(page[-1].get("billId") or "")
+            if not next_cursor or next_cursor == cursor:
+                raise OkxError("OKX account-bills pagination cursor did not advance")
+            cursor = next_cursor
+        raise OkxError("OKX account-bills pagination exceeded the safety page limit")
 
     def get_order(self, inst_id: str, client_order_id: str):
         return self.request("GET", "/api/v5/trade/order", {"instId": inst_id, "clOrdId": client_order_id}, private=True)
