@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 
 import requests
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from .config import DEMO_FLAG, DEMO_REST_URL, Settings, SafetyError
 from .instruments import InstrumentRuleError, SpotInstrument
@@ -397,6 +397,13 @@ class OkxDemoClient:
             raise ValueError("side must be buy or sell")
         if not client_order_id or len(client_order_id) > 32 or not client_order_id.isalnum():
             raise ValueError("client_order_id must be 1..32 alphanumeric characters")
+        try:
+            numeric_size, numeric_price = Decimal(str(size)), Decimal(str(price))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("size and price must be valid decimals") from exc
+        if (not numeric_size.is_finite() or not numeric_price.is_finite()
+                or numeric_size <= 0 or numeric_price <= 0):
+            raise ValueError("size and price must be finite and positive")
         spec = self._get_validated_spot_instrument(inst_id)
         validated_size, validated_price = self._validate_spot_order_values(
             spec, side=side, size=size, price=price
