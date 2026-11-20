@@ -58,7 +58,7 @@ def test_demo_private_read_contract_signs_exact_path_and_always_marks_demo():
     args, kwargs = session.calls[0]
     method, url = args[:2]
     headers = kwargs["headers"]
-    path = "/api/v5/trade/orders-algo-pending?ordType=oco"
+    path = "/api/v5/trade/orders-algo-pending?ordType=oco&instType=SPOT&limit=100"
     timestamp = headers["OK-ACCESS-TIMESTAMP"]
     expected = base64.b64encode(
         hmac.new(
@@ -74,7 +74,7 @@ def test_demo_private_read_contract_signs_exact_path_and_always_marks_demo():
     assert headers["OK-ACCESS-KEY"] == "demo-api-key"
     assert headers["OK-ACCESS-SIGN"] == expected
     assert kwargs["allow_redirects"] is False
-    assert "instType=" not in url
+    assert "instType=SPOT" in url
 
 
 def test_algo_history_uses_only_documented_ordtype_and_state_filters():
@@ -84,8 +84,8 @@ def test_algo_history_uses_only_documented_ordtype_and_state_filters():
     assert client.get_algo_order_history("oco", "effective") == []
 
     url = session.calls[0][0][1]
-    assert url.endswith("/api/v5/trade/orders-algo-history?ordType=oco&state=effective")
-    assert "instType=" not in url
+    assert url.endswith("/api/v5/trade/orders-algo-history?ordType=oco&state=effective&instType=SPOT")
+    assert "instType=SPOT" in url
 
 
 def test_spot_oco_contract_has_cash_mode_market_exit_prices_and_demo_header():
@@ -150,4 +150,60 @@ def test_spot_regular_pending_orders_keep_the_supported_insttype_filter():
 
     assert client.get_pending_orders("SPOT") == []
     url = session.calls[0][0][1]
-    assert url.endswith("/api/v5/trade/orders-pending?instType=SPOT")
+    assert url.endswith("/api/v5/trade/orders-pending?instType=SPOT&limit=100")
+
+
+
+def test_pending_regular_orders_paginate_to_complete_account_snapshot():
+    first_page = [{"ordId": str(index), "instId": "BTC-USDT"} for index in range(100, 0, -1)]
+    second_page = [{"ordId": "0", "instId": "ETH-USDT"}]
+    session = RecordingSession(
+        Response({"code": "0", "msg": "", "data": first_page}),
+        Response({"code": "0", "msg": "", "data": second_page}),
+    )
+    client = OkxDemoClient(enabled_settings(), session=session)
+
+    rows = client.get_pending_orders("SPOT")
+
+    assert len(rows) == 101
+    assert session.calls[0][0][1].endswith(
+        "/api/v5/trade/orders-pending?instType=SPOT&limit=100"
+    )
+    assert session.calls[1][0][1].endswith(
+        "/api/v5/trade/orders-pending?instType=SPOT&limit=100&after=1"
+    )
+
+
+def test_pending_algo_orders_paginate_by_algo_id():
+    first_page = [{"algoId": str(index), "instId": "BTC-USDT"} for index in range(100, 0, -1)]
+    second_page = [{"algoId": "0", "instId": "ETH-USDT"}]
+    session = RecordingSession(
+        Response({"code": "0", "msg": "", "data": first_page}),
+        Response({"code": "0", "msg": "", "data": second_page}),
+    )
+    client = OkxDemoClient(enabled_settings(), session=session)
+
+    rows = client.get_pending_algo_orders("oco")
+
+    assert len(rows) == 101
+    assert session.calls[0][0][1].endswith(
+        "/api/v5/trade/orders-algo-pending?ordType=oco&instType=SPOT&limit=100"
+    )
+    assert session.calls[1][0][1].endswith(
+        "/api/v5/trade/orders-algo-pending?ordType=oco&instType=SPOT&limit=100&after=1"
+    )
+
+
+def test_pending_order_pagination_rejects_non_advancing_or_duplicate_cursor():
+    page = [{"ordId": str(index)} for index in range(100, 0, -1)]
+    repeated_page = [{"ordId": "1"}]
+    session = RecordingSession(
+        Response({"code": "0", "msg": "", "data": page}),
+        Response({"code": "0", "msg": "", "data": repeated_page}),
+    )
+    client = OkxDemoClient(enabled_settings(), session=session)
+
+    from nebula.exchange import OkxError
+    import pytest
+    with pytest.raises(OkxError, match="missing or duplicate cursor"):
+        client.get_pending_orders("SPOT")
