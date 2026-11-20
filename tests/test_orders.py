@@ -27,15 +27,26 @@ class FakeClient:
         return self.order or []
     def get_pending_orders(self, inst_type="SPOT"):
         return self.pending
+    def get_account_config(self):
+        return [{"acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+                 "perm": "read_only,trade"}]
+    def get_balance(self):
+        return [{"uTime": "1800000000000", "details": [
+            {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]}]
+    def get_tickers(self):
+        return [{"instId": "BTC-USDT", "bidPx": "49999.95", "askPx": "50000",
+                 "bidSz": "100", "askSz": "100", "ts": "1800000000000"}]
+    def get_pending_algo_orders(self, ord_type):
+        return []
 
 
 def setup(tmp_path, client):
     return DemoOrderManager(client, StateStore(str(tmp_path / "state.db")))
 
 
-def submit(manager, cid="NB123"):
+def submit(manager, cid="NB123", candle_ts=123):
     return manager.submit_limit(inst_id="BTC-USDT", side="buy", size="0.01",
-                                price="50000", client_order_id=cid, candle_ts=123)
+                                price="50000", client_order_id=cid, candle_ts=candle_ts)
 
 
 def test_submit_reserves_and_persists_ack(tmp_path):
@@ -235,7 +246,7 @@ def test_real_okx_client_requires_portfolio_risk_authorization(tmp_path):
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
     manager = setup(tmp_path, client)
-    with pytest.raises(OrderManagerError, match="No integrated portfolio risk authorization"):
+    with pytest.raises(OrderManagerError, match="No integrated PortfolioRiskAuthorizer"):
         submit(manager, "NBRISK_REQUIRED")
     assert client.place_calls == 0
     assert manager.state.get_intent("NBRISK_REQUIRED") is None
