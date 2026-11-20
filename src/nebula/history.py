@@ -130,7 +130,7 @@ def save_dataset(path: str | Path, symbol: str, bar: str, candles: list[Candle],
         "candle_count": len(data),
         "csv_sha256": digest,
     }
-    manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\\n").encode("utf-8")
+    manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
     staged = []
     try:
