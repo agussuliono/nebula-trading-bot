@@ -286,3 +286,63 @@ def test_real_okx_client_rejects_risk_plan_mismatch(tmp_path):
     with pytest.raises(OrderManagerError, match="does not match"):
         submit(manager, "NBRISK_MISMATCH")
     assert client.place_calls == 0
+
+def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp_path):
+    from nebula.config import Settings
+    from nebula.risk_authorizer import PortfolioRiskAuthorizer
+    from nebula.state import StateStore
+
+    settings = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
+        max_risk_quote=2, max_position_quote=100, market_data_max_age_ms=30000)
+    class SnapshotClient:
+        def get_account_config(self):
+            return [{"acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+                     "perm": "read_only,trade"}]
+        def get_balance(self):
+            return [{"uTime": "1800000000000", "details": [
+                {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]}]
+        def get_tickers(self):
+            return [{"instId": "AAA-USDT", "bidPx": "99", "askPx": "100",
+                     "bidSz": "100", "askSz": "100", "ts": "1800000000000"}]
+        def get_pending_orders(self, inst_type):
+            return []
+        def get_pending_algo_orders(self, ord_type):
+            return []
+    authorizer = PortfolioRiskAuthorizer(
+        SnapshotClient(), StateStore(str(tmp_path / "auth.db")), settings,
+        plan_provider=lambda **kwargs: {
+            "signal_action": "buy", "candle_closed": True, "candle_ts": 123,
+            "stop_loss": "90", "take_profit": "120",
+        },
+        clock_ms=lambda: 1800000000000,
+    )
+    result = authorizer(instrument="AAA-USDT", requested_size="0.1",
+                        requested_price="100", candle_ts=123)
+    assert result["entry_allowed"] is True
+    assert result["planned_entry"]["stop_loss"] == "90"
+    assert Decimal(result["planned_entry"]["risk_to_stop_quote"]) <= Decimal("2")
+
+
+def test_portfolio_authorizer_rejects_unconfirmed_candle_before_private_snapshot(tmp_path):
+    from nebula.config import Settings
+    from nebula.risk_authorizer import PortfolioRiskAuthorizer, RiskAuthorizationError
+    from nebula.state import StateStore
+
+    settings = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
+        max_risk_quote=2, max_position_quote=100)
+    class NeverReadClient:
+        def get_account_config(self):
+            raise AssertionError("private snapshot must not be fetched")
+    authorizer = PortfolioRiskAuthorizer(
+        NeverReadClient(), StateStore(str(tmp_path / "unclosed.db")), settings,
+        plan_provider=lambda **kwargs: {
+            "signal_action": "buy", "candle_closed": False, "candle_ts": 123,
+            "stop_loss": "90", "take_profit": "120",
+        },
+        clock_ms=lambda: 1800000000000,
+    )
+    with pytest.raises(RiskAuthorizationError, match="closed-candle"):
+        authorizer(instrument="AAA-USDT", requested_size="0.1",
+                   requested_price="100", candle_ts=123)
