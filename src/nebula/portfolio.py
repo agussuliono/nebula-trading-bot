@@ -153,6 +153,8 @@ class PortfolioRiskEngine:
         permissions = {part.strip().lower() for part in str(config.get("perm", "")).split(",") if part.strip()}
         if "read_only" not in permissions:
             blockers.append("api_key_read_permission_missing")
+        if "trade" not in permissions:
+            blockers.append("api_key_trade_permission_missing")
         if "withdraw" in permissions:
             blockers.append("api_key_withdraw_permission_forbidden")
         if not isinstance(balance, list) or len(balance) != 1:
