@@ -11,12 +11,13 @@ Working branch: `audit/fix-safety-gates-2026-11-20`
 3. Real OKX Spot buy submissions through `DemoOrderManager` now fail closed unless a portfolio risk-authorizer callback is supplied. The callback must approve the entry, provide a plan matching the exchange-normalized instrument, size, and price, and report a finite positive stop risk not exceeding the configured per-position risk limit.
 4. Portfolio-once now synchronizes entry trade fills before inventory valuation. Fill-sync failures are recorded and surfaced as blockers, and mark valuation incomplete.
 5. `valuation_complete` is now separated from entry eligibility. Policy blockers such as an already-active position or a missing proposed entry no longer falsely mark otherwise complete account valuation as incomplete.
-6. Added regression tests for endpoint allowlisting, central Demo write gating, cancellation during emergency stop, required/matching risk authorization, valuation status semantics, and failed fill synchronization.
+6. Added `PortfolioRiskAuthorizer`, which fetches fresh private account/balance/order snapshots, checks persistent daily realized P&L, rejects unresolved orders or active positions, requires a matching confirmed closed-candle buy plan with precomputed stop/target, and delegates fee/slippage-aware sizing-risk checks to `PortfolioRiskEngine`. It returns an approval object only; it never submits an order. The caller must inject it into `DemoOrderManager`.
+7. Corrected API-key permission validation: OKX `perm` must include both `read_only` and `trade`, and must not include `withdraw`. The prior check incorrectly required read-only permission without requiring Trade, which could falsely classify a read-only-only key as eligible.
 
 ## Explicitly not completed / still blocks V1
 
 - There is no production risk-authorizer implementation wired into an automated runtime yet. The new callback requirement intentionally blocks real Demo buy submission until the portfolio snapshot, daily P&L, position sizing, fee/slippage, and stop-risk calculation are connected end-to-end.
-- No complete trading orchestrator currently coordinates scanner → closed-candle signal → portfolio/risk approval → order manager → OCO protection → reconciliation.
+- No complete trading orchestrator currently coordinates scanner → closed-candle signal → stop/target plan → risk approval → order manager → OCO protection → reconciliation. The current authorizer is a callable component, not proof of end-to-end integration.
 - Protective-order lifecycle needs further integration testing against current OKX Demo responses, including OCO trigger behavior, partial exits, child-order fills, and restart recovery.
 - Emergency-stop policy for protective actions needs a full lifecycle design and tests. This change only allows cancellation of regular orders during the stop; it does not bypass the stop for OCO submission/cancellation.
 - GitHub CodeQL, secret scanning/push protection, and branch-protection settings were not changed here. Repository security settings require a separate explicit settings audit and, where applicable, account-level permissions.
@@ -32,4 +33,4 @@ Working branch: `audit/fix-safety-gates-2026-11-20`
 
 ## Verification
 
-GitHub Actions NEBULA CI runs on this branch. Test counts and final conclusion must be taken from the completed workflow run, not inferred from a successful commit response.
+New tests cover API key permission requirements and risk authorizer allow/deny behavior. The latest branch head must receive a completed GitHub Actions run before this remediation batch is marked verified; no test count is inferred from commit creation.
