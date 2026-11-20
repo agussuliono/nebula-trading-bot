@@ -122,7 +122,8 @@ class PortfolioRiskEngine:
                  local_unresolved_intents: list[dict] | None = None,
                  planned_entry: dict | None = None,
                  position_fill_sync_error: str | None = None,
-                 now_ms: int, daily_realized_pnl_quote="0",\n                 daily_unrealized_pnl_quote=None) -> dict:
+                 now_ms: int, daily_realized_pnl_quote="0",
+                 daily_unrealized_pnl_quote=None) -> dict:
         blockers = []
         if position_fill_sync_error:
             blockers.append("position_fill_sync_failed:" + str(position_fill_sync_error))
