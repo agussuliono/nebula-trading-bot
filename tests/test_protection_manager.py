@@ -11,9 +11,9 @@ class PublicDemoStub:
                 'tickSz':'0.1','lotSz':'0.0001','minSz':'0.0001','state':'live'}
 
 
-def seeded(tmp_path, state='filled', fill='0.004'):
+def seeded(tmp_path, state='filled', fill='0.004', risk_plan=None):
     store = StateStore(str(tmp_path / 'protection.db'))
-    store.reserve_entry_intent('NBENTRY1', 'BTC-USDT', 123, 'buy')
+    store.reserve_entry_intent('NBENTRY1', 'BTC-USDT', 123, 'buy', risk_plan=risk_plan)
     store.update_intent('NBENTRY1', state, '10001')
     store.save_order_snapshot('NBENTRY1', {'ordId':'10001','state':state,'sz':'0.01',
         'accFillSz':fill,'avgPx':'50000','fee':'-0.1','feeCcy':'USDT'})
@@ -45,6 +45,53 @@ def test_prepare_is_idempotent_and_rejects_parameter_change(tmp_path):
     assert first['algo_client_order_id'] == again['algo_client_order_id']
     with pytest.raises(ProtectionManagerError, match='different'):
         manager.prepare(entry_client_order_id='NBENTRY1', take_profit='53000', stop_loss='48000')
+
+
+def test_protection_uses_exact_persisted_portfolio_approved_levels(tmp_path):
+    plan = {
+        "instrument": "BTC-USDT", "size": "0.01", "entry_price": "50000",
+        "stop_loss": "48000", "take_profit": "52000", "risk_to_stop_quote": "20",
+    }
+    store = seeded(tmp_path, risk_plan=plan)
+    manager = DemoProtectionManager(PublicDemoStub(), store)
+
+    result = manager.prepare(entry_client_order_id="NBENTRY1")
+    assert result["status"] == "reserved"
+    assert result["stop_loss"] == "48000"
+    assert result["take_profit"] == "52000"
+
+
+def test_protection_rejects_levels_that_differ_from_approved_entry_plan(tmp_path):
+    plan = {
+        "instrument": "BTC-USDT", "size": "0.01", "entry_price": "50000",
+        "stop_loss": "48000", "take_profit": "52000", "risk_to_stop_quote": "20",
+    }
+    store = seeded(tmp_path, risk_plan=plan)
+    manager = DemoProtectionManager(PublicDemoStub(), store)
+
+    with pytest.raises(ProtectionManagerError, match="differ"):
+        manager.prepare(
+            entry_client_order_id="NBENTRY1",
+            take_profit="53000",
+            stop_loss="48000",
+        )
+    assert store.get_protection_intent("NBENTRY1") is None
+
+
+def test_exchange_backed_protection_requires_persisted_approved_plan(tmp_path):
+    class ExchangeBacked(PublicDemoStub):
+        settings = Settings()
+
+    store = seeded(tmp_path)
+    manager = DemoProtectionManager(ExchangeBacked(), store)
+
+    with pytest.raises(ProtectionManagerError, match="No persisted portfolio-approved"):
+        manager.prepare(
+            entry_client_order_id="NBENTRY1",
+            take_profit="52000",
+            stop_loss="48000",
+        )
+    assert store.get_protection_intent("NBENTRY1") is None
 
 
 def test_prepare_requires_position_lock_owner(tmp_path):
