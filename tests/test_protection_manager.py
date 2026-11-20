@@ -125,6 +125,54 @@ def test_exchange_backed_protection_requires_persisted_approved_plan(tmp_path):
     assert store.get_protection_intent("NBENTRY1") is None
 
 
+def test_exchange_backed_oco_uses_net_base_after_base_currency_fee(tmp_path):
+    plan = {
+        "instrument": "BTC-USDT", "size": "0.004", "entry_price": "50000",
+        "stop_loss": "48000", "take_profit": "52000", "risk_to_stop_quote": "8",
+    }
+    store = seeded(tmp_path, fill="0.004", risk_plan=plan)
+
+    class ExchangeBacked(PublicDemoStub):
+        settings = Settings(max_daily_loss_quote=10)
+
+        def get_fills_history(self, instrument, order_id, limit=100, after=None):
+            assert instrument == "BTC-USDT"
+            assert order_id == "10001"
+            return [{
+                "instId": "BTC-USDT", "ordId": "10001", "tradeId": "70001",
+                "clOrdId": "NBENTRY1", "side": "buy",
+                "fillSz": "0.004", "fillPx": "50000",
+                "fee": "-0.0001", "feeCcy": "BTC",
+                "fillTime": "1800000000000",
+            }]
+
+    manager = DemoProtectionManager(ExchangeBacked(), store)
+    result = manager.prepare(entry_client_order_id="NBENTRY1")
+
+    assert result["status"] == "reserved"
+    assert result["filled_size"] == "0.0039"
+    assert store.get_protection_intent("NBENTRY1")["filled_size"] == "0.0039"
+
+
+def test_exchange_backed_oco_blocks_when_trade_fill_ledger_is_incomplete(tmp_path):
+    plan = {
+        "instrument": "BTC-USDT", "size": "0.004", "entry_price": "50000",
+        "stop_loss": "48000", "take_profit": "52000", "risk_to_stop_quote": "8",
+    }
+    store = seeded(tmp_path, fill="0.004", risk_plan=plan)
+
+    class ExchangeBacked(PublicDemoStub):
+        settings = Settings(max_daily_loss_quote=10)
+
+        def get_fills_history(self, instrument, order_id, limit=100, after=None):
+            return []
+
+    manager = DemoProtectionManager(ExchangeBacked(), store)
+    with pytest.raises(ProtectionManagerError, match="Entry fills/fees could not be reconciled"):
+        manager.prepare(entry_client_order_id="NBENTRY1")
+    assert store.get_protection_intent("NBENTRY1") is None
+
+
 def test_prepare_requires_position_lock_owner(tmp_path):
     store = StateStore(str(tmp_path / 'unlocked.db'))
     store.reserve_intent('NBENTRY1','BTC-USDT',123,'buy')
