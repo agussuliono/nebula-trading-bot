@@ -6,6 +6,8 @@ Working branch: `audit/fix-safety-gates-2026-11-20`
 
 ## Implemented in this branch
 
+8. Added an append-only prospective 1H collector for the frozen BTC/ETH/SOL research basket. It validates the exact baseline CSV SHA-256, matching manifest, fixed cutoff, confirmed candle status, strict timestamp continuity, and refuses overlap/gaps/tampering. It uses only the public market-candles endpoint and reports zero private API calls and zero submitted orders. The CLI is `collect-prospective`; the original evidence files must be copied with their manifests before collection.
+
 1. OKX REST adapter now uses an explicit method/path allowlist for supported public reads, private reads, and four reviewed Spot order/cancel endpoints. Unknown endpoints and method/path combinations fail before network I/O.
 2. All private write requests are centrally gated in the adapter. Regular order cancellation has a separate permission check so an emergency stop can prevent new exposure while still allowing an operator to cancel a resting regular order. OCO cancellation remains behind the full emergency-stop gate because it can remove active protection.
 3. Real OKX Spot buy submissions through `DemoOrderManager` now fail closed unless a portfolio risk-authorizer callback is supplied. The callback must approve the entry, provide a plan matching the exchange-normalized instrument, size, and price, and report a finite positive stop risk not exceeding the configured per-position risk limit.
@@ -22,6 +24,8 @@ Working branch: `audit/fix-safety-gates-2026-11-20`
 - Emergency-stop policy for protective actions needs a full lifecycle design and tests. This change only allows cancellation of regular orders during the stop; it does not bypass the stop for OCO submission/cancellation.
 - GitHub CodeQL, secret scanning/push protection, and branch-protection settings were not changed here. Repository security settings require a separate explicit settings audit and, where applicable, account-level permissions.
 - No OKX API credentials were used and no exchange write endpoint was called by these code changes.
+- Prospective collection has not yet been run on the user's laptop; no new market observations have been collected or evaluated here.
+- The collector fetches at most 300 recent candles per request and fails closed if it cannot append a contiguous sequence. CSV and manifest are staged before replacement, but their two replacements are not a single filesystem transaction.
 
 ## Safety invariants retained
 
