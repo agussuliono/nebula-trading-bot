@@ -57,4 +57,4 @@ A subsequent review of the authenticated HTTP boundary, persistent OCO state tra
 
 Added regression tests cover 302/307 redirects on private GET/POST, retry of a locally blocked OCO after explicit safety-gate correction, refusal to reset an ambiguous OCO, and exact tiny-fill lock retention. All exchange interactions in these tests use local fakes; no API credential or exchange write request is used.
 
-The latest commit's CI status and test count must be verified from its own workflow run before this audit batch is considered verified.
+Verification for branch head `22b398f4e1edce0b569bc55d6327fef3d148badc`: GitHub Actions run #143 completed successfully. `pytest -q` reported **257 passed in 2.27s**; compileall, explicit Demo-off/emergency-stop-on checks, and fail-closed default checks all passed. The pip cache restored successfully (`Cache hit`). Tests used no OKX credentials and submitted no exchange write request.
