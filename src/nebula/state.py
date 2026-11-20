@@ -45,6 +45,8 @@ class StateStore:
                 db.execute("ALTER TABLE intents ADD COLUMN last_update TEXT")
             if "position_client_order_id" not in columns:
                 db.execute("ALTER TABLE intents ADD COLUMN position_client_order_id TEXT")
+            if "risk_plan_json" not in columns:
+                db.execute("ALTER TABLE intents ADD COLUMN risk_plan_json TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS idx_intents_status ON intents(status)")
             db.execute("""CREATE TABLE IF NOT EXISTS order_snapshots (
                 client_order_id TEXT PRIMARY KEY REFERENCES intents(client_order_id),
@@ -148,10 +150,47 @@ class StateStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def reserve_entry_intent(self, client_order_id: str, instrument: str, candle_ts: int, side: str) -> bool:
+    def get_entry_risk_plan(self, client_order_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT risk_plan_json FROM intents WHERE client_order_id=?",
+                (client_order_id,),
+            ).fetchone()
+            if not row or not row["risk_plan_json"]:
+                return None
+            try:
+                value = json.loads(row["risk_plan_json"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Persisted entry risk plan is corrupt") from exc
+            if not isinstance(value, dict):
+                raise ValueError("Persisted entry risk plan is not an object")
+            return value
+
+    def reserve_entry_intent(self, client_order_id: str, instrument: str, candle_ts: int,
+                             side: str, risk_plan: dict[str, Any] | None = None) -> bool:
         """Atomically reserve the sole position slot and the entry intent."""
         if side != "buy":
             raise ValueError("entry intents must be Spot buy orders")
+        encoded_plan = None
+        if risk_plan is not None:
+            from decimal import Decimal, InvalidOperation
+            try:
+                if not isinstance(risk_plan, dict) or risk_plan.get("instrument") != instrument:
+                    raise ValueError("Risk plan instrument does not match entry intent")
+                values = {
+                    field: Decimal(str(risk_plan[field]))
+                    for field in ("size", "entry_price", "stop_loss", "take_profit", "risk_to_stop_quote")
+                }
+                if not all(value.is_finite() and value > 0 for value in values.values()):
+                    raise ValueError("Risk plan values must be finite and positive")
+                if not values["stop_loss"] < values["entry_price"] < values["take_profit"]:
+                    raise ValueError("Risk plan stop/entry/target ordering is invalid")
+            except (KeyError, TypeError, InvalidOperation) as exc:
+                raise ValueError("Risk plan is incomplete or invalid") from exc
+            encoded_plan = json.dumps({
+                "instrument": instrument,
+                **{key: str(value) for key, value in values.items()},
+            }, sort_keys=True, separators=(",", ":"))
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT 1 FROM intents WHERE client_order_id=?", (client_order_id,)).fetchone()
@@ -162,8 +201,8 @@ class StateStore:
                 raise RuntimeError(f"Single-position slot is occupied by {lock['owner_client_order_id']} ({lock['instrument']})")
             db.execute("INSERT INTO position_lock(singleton,owner_client_order_id,instrument) VALUES(1,?,?)",
                        (client_order_id, instrument))
-            db.execute("INSERT INTO intents(client_order_id,instrument,candle_ts,side,status) VALUES(?,?,?,?,'reserved')",
-                       (client_order_id, instrument, candle_ts, side))
+            db.execute("INSERT INTO intents(client_order_id,instrument,candle_ts,side,status,risk_plan_json) VALUES(?,?,?,?,'reserved',?)",
+                       (client_order_id, instrument, candle_ts, side, encoded_plan))
             return True
 
     def reserve_exit_intent(self, client_order_id: str, instrument: str, candle_ts: int,
