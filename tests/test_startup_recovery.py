@@ -12,6 +12,10 @@ from nebula.state import StateStore
 class CleanAccount:
     settings = SimpleNamespace(demo_account_exclusive=True, max_daily_loss_quote=20)
 
+    def get_account_config(self):
+        return [{"uid": "demo-account-1", "acctLv": "1", "autoLoan": False,
+                 "enableSpotBorrow": False, "perm": "read_only,trade"}]
+
     def get_balance(self):
         return [{"details": [{"ccy": "USDT", "availBal": "1000", "frozenBal": "0"}]}]
 
@@ -78,12 +82,15 @@ def test_filled_position_without_lock_or_release_event_blocks_startup(tmp_path):
 
 def test_clean_empty_account_is_reported_but_never_authorizes_entries(tmp_path):
     state = StateStore(str(tmp_path / "empty.db"))
-    result = StartupRecovery(CleanAccount(), state).run()
+    recovery = StartupRecovery(CleanAccount(), state)
+    result = recovery.run()
 
     assert result["status"] == "clean_no_local_position"
     assert result["entry_authorized"] is False
     assert result["exchange_writes"] == 0
     assert result["blockers"] == []
+    assert result["entry_permit_issued"] is True
+    assert recovery.entry_permit is not None
 
 
 def test_untracked_exchange_order_blocks_empty_local_state(tmp_path):
