@@ -14,6 +14,7 @@ def test_top_level_help_exits_successfully_and_formats_percent(capsys, monkeypat
     assert "diagnose-portfolio" in output
     assert "preflight-once" in output
     assert "orchestrate-once" in output
+    assert "verify-demo-once" in output
     assert "--execute-demo" in output
 
 
@@ -130,3 +131,33 @@ def test_orchestrate_cli_passes_explicit_demo_execution_choice(
 
     assert calls == {"bar": "1H", "execute": expected}
     assert '"status": "test"' in capsys.readouterr().out
+
+
+
+def test_execute_demo_flag_is_rejected_for_read_only_demo_verification(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["nebula", "verify-demo-once", "--execute-demo"])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+
+
+def test_verify_demo_cli_invokes_read_only_probe_only(monkeypatch, capsys):
+    from nebula.config import Settings
+
+    calls = {}
+    monkeypatch.setattr("sys.argv", ["nebula", "verify-demo-once"])
+    monkeypatch.setattr("nebula.cli.Settings.from_env", lambda: Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass"
+    ))
+    monkeypatch.setattr("nebula.cli.OkxDemoClient", lambda settings: object())
+
+    def verify(client, settings):
+        calls["client"] = client
+        calls["settings"] = settings
+        return {"status": "read_only_demo_connection_verified", "exchange_writes": 0}
+
+    monkeypatch.setattr("nebula.demo_verification.verify_demo_read_only", verify)
+    main()
+
+    assert calls["settings"].api_key == "demo-key"
+    assert '"exchange_writes": 0' in capsys.readouterr().out
