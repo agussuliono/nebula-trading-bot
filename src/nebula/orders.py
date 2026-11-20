@@ -27,7 +27,8 @@ class DemoOrderManager:
         self.startup_permit = startup_permit
         if hasattr(client, "install_startup_entry_permit") and startup_permit is not None:
             client.install_startup_entry_permit(startup_permit, state_store)
-        if circuit_breaker is None and hasattr(client, "settings"):
+        if (circuit_breaker is None and hasattr(client, "settings")
+                and float(getattr(client.settings, "max_daily_loss_quote", 0)) > 0):
             from .risk_controls import CircuitBreaker
             circuit_breaker = CircuitBreaker(state_store, client.settings.max_daily_loss_quote)
         self.circuit_breaker = circuit_breaker
