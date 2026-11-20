@@ -112,6 +112,8 @@ def test_open_position_without_utc_daily_mark_fails_closed_instead_of_using_life
 def test_daily_pnl_uses_daily_mark_delta_not_lifetime_inventory_unrealized():
     data = _snapshot(bid="90", stop="80", realized="-2")
     report = _engine().evaluate(**data, now_ms=NOW, daily_unrealized_pnl_quote="10")
+    assert report["daily_unrealized_pnl_quote"] == "10"
+    assert report["daily_unrealized_pnl_baseline_available"] is True
     assert Decimal(report["daily_combined_pnl_quote"]) == Decimal("8")
     assert Decimal(report["position"]["unrealized_pnl_net_quote"]) < Decimal("0")
 
