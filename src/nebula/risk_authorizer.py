@@ -65,6 +65,11 @@ class PortfolioRiskAuthorizer:
                 self.settings.validate_order_permission()
             else:
                 self.settings.validate_private_read_permission()
+            if getattr(self.settings, "demo_account_exclusive", False) is not True:
+                raise RiskAuthorizationError(
+                    "Demo account exclusivity must be explicitly confirmed; "
+                    "the local daily P&L ledger is not an account-wide loss record"
+                )
             plan = plan_override if plan_override is not None else self.plan_provider(
                 instrument=instrument, size=requested_size,
                 entry_price=requested_price, candle_ts=candle_ts,
