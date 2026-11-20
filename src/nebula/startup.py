@@ -29,6 +29,7 @@ class StartupRecovery:
             protection = DemoProtectionManager(client, state_store)
         self.orders = orders
         self.protection = protection
+        self.entry_permit = None
 
     @staticmethod
     def _positive(value, field):
@@ -149,6 +150,17 @@ class StartupRecovery:
         }
 
     def _account_without_local_position(self):
+        account_config = self.client.get_account_config()
+        if not isinstance(account_config, list) or len(account_config) != 1:
+            raise StartupRecoveryError("Account configuration snapshot is missing or ambiguous")
+        config = account_config[0]
+        if str(config.get("acctLv")) != "1":
+            raise StartupRecoveryError("OKX account is not in Spot account mode")
+        if config.get("autoLoan") is not False or config.get("enableSpotBorrow") is not False:
+            raise StartupRecoveryError("Borrowing or auto-loan is enabled or its state is unknown")
+        permissions = {part.strip().lower() for part in str(config.get("perm", "")).split(",") if part.strip()}
+        if not {"read_only", "trade"}.issubset(permissions) or "withdraw" in permissions:
+            raise StartupRecoveryError("API key must have read_only and trade permissions and no withdrawal permission")
         balances = self.client.get_balance()
         regular = self.client.get_pending_orders("SPOT")
         algos = [
@@ -166,6 +178,7 @@ class StartupRecovery:
             if row["ccy"] != "USDT" and amount + frozen > 0:
                 holdings.append(row["ccy"])
         return {
+            "account_uid": config.get("uid"),
             "non_quote_holdings": sorted(set(holdings)),
             "open_regular_orders": len(regular),
             "open_algo_orders": len(algos),
@@ -222,9 +235,15 @@ class StartupRecovery:
                                          "demo_account_exclusive", False))
                 if not exclusive:
                     blockers.append("dedicated_demo_account_not_attested")
+                if not blockers:
+                    from .entry_gate import issue_startup_entry_permit
+                    self.entry_permit = issue_startup_entry_permit(
+                        self.client, self.state, account.get("account_uid")
+                    )
                 return {
                     "status": "clean_no_local_position" if not blockers else "blocked_account_mismatch",
                     "entry_authorized": False,
+                    "entry_permit_issued": self.entry_permit is not None,
                     "local_database": local,
                     "account": account,
                     "reconciled_intents": len(outcomes),
