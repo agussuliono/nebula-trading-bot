@@ -317,7 +317,12 @@ class DemoProtectionManager:
                 take_profit=intent["take_profit"], stop_loss=intent["stop_loss"],
                 algo_client_order_id=intent["algo_client_order_id"])
         except (SafetyError, ValueError) as exc:
-            self.state.update_protection_intent(entry_client_order_id, "failed", error_type=type(exc).__name__)
+            # These errors are raised by local safety/parameter validation before
+            # the HTTP request. Keep the immutable OCO intent reserved so it can
+            # be retried manually after the gate or input is corrected. Network
+            # errors remain submission_unknown and are never retried blindly.
+            self.state.defer_protection_intent(
+                entry_client_order_id, error_type=type(exc).__name__)
             raise
         except OkxError as exc:
             definitive = str(exc).startswith("OKX OCO rejected")
