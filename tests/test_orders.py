@@ -338,7 +338,7 @@ def test_portfolio_authorizer_rejects_unconfirmed_candle_before_private_snapshot
     from nebula.state import StateStore
 
     settings = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
         max_risk_quote=2, max_position_quote=100)
     class NeverReadClient:
         def get_account_config(self):
