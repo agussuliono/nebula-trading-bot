@@ -351,3 +351,33 @@ def test_non_spot_or_transfer_bill_blocks_authorization(tmp_path):
     result = CandidateRiskPreflight(authorizer, state).evaluate(candidate())
     assert result["status"] == "rejected"
     assert "baseline missing after account activity" in result["reason"].lower()
+
+
+def test_daily_pnl_reconciliation_rejects_type_two_margin_bill(tmp_path):
+    import hashlib
+    from nebula.account_ledger import AccountLedger
+
+    client = SnapshotClient(bills=[{
+        "billId": "991", "ccy": "USDT", "balChg": "-0.1", "bal": "999.9",
+        "type": "2", "subType": "1", "ts": str(NOW_MS - 500),
+        "instType": "MARGIN", "instId": "AAA-USDT",
+    }])
+    state = StateStore(str(tmp_path / "margin-bill.sqlite3"))
+    fingerprint = hashlib.sha256(b"test-demo-account-uid").hexdigest()
+    AccountLedger(state).establish_daily_baseline(
+        equity_quote="1000", timestamp_ms=NOW_MS - 1000,
+        account_fingerprint=fingerprint,
+    )
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, read_only_settings(),
+        plan_provider=lambda **kwargs: pytest.fail("plan provider must not be reached"),
+        clock_ms=lambda: NOW_MS,
+    )
+    with pytest.raises(RiskAuthorizationError, match="non-Spot"):
+        authorizer._daily_account_pnl(
+            account_config=client.get_account_config(),
+            balance=client.get_balance(),
+            tickers=client.get_tickers(),
+            regular=[], oco=[], conditional=[], lock=None, unresolved=[],
+            now_ms=NOW_MS, daily_realized="0",
+        )
