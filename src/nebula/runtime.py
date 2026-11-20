@@ -25,7 +25,7 @@ class RuntimePolicy:
     min_volatility_pct: float = 0.20
     max_volatility_pct: float = 5.0
     min_listing_age_days: int = 30
-    min_data_points: int = 50
+    min_data_points: int = 51
     fast_ema: int = 20
     slow_ema: int = 50
     max_candle_age_intervals: int = 2
