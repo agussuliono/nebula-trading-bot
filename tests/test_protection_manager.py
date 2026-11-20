@@ -56,18 +56,65 @@ def test_prepare_requires_position_lock_owner(tmp_path):
         DemoProtectionManager(PublicDemoStub(), store).prepare(entry_client_order_id='NBENTRY1', take_profit='12', stop_loss='9')
 
 
-def test_submit_stays_gated_and_never_retries_failed_intent(tmp_path):
+def test_local_oco_gate_block_remains_retryable_without_network_io(tmp_path):
     store = seeded(tmp_path)
+
     class Client(PublicDemoStub):
-        def __init__(self): self.demo = OkxDemoClient(Settings())
-        def place_spot_oco_exit(self, **kwargs): return self.demo.place_spot_oco_exit(**kwargs)
-    manager = DemoProtectionManager(Client(), store)
+        def __init__(self):
+            self.demo = OkxDemoClient(Settings())
+
+        def place_spot_oco_exit(self, **kwargs):
+            return self.demo.place_spot_oco_exit(**kwargs)
+
+    manager_client = Client()
+    manager = DemoProtectionManager(manager_client, store)
     manager.prepare(entry_client_order_id='NBENTRY1', take_profit='52000', stop_loss='48000')
+
+    # The default Settings gate blocks before the HTTP client is called.
     with pytest.raises(SafetyError):
         manager.submit_reserved('NBENTRY1')
-    assert store.get_protection_intent('NBENTRY1')['status'] == 'failed'
-    with pytest.raises(ProtectionManagerError, match='never resubmit'):
-        manager.submit_reserved('NBENTRY1')
+    intent = store.get_protection_intent('NBENTRY1')
+    assert intent['status'] == 'reserved'
+    assert intent['last_error_type'] == 'SafetyError'
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {'code': '0', 'data': [{'algoId': '9988', 'sCode': '0'}]}
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return Response()
+
+    settings = Settings(
+        api_key='demo-key', secret_key='demo-secret', passphrase='demo-pass',
+        enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
+    )
+    session = Session()
+    manager_client.demo = OkxDemoClient(settings, session=session)
+    result = manager.submit_reserved('NBENTRY1')
+
+    assert result['status'] == 'active'
+    assert result['exchange_algo_id'] == '9988'
+    assert len(session.calls) == 1
+    assert session.calls[0][1]['allow_redirects'] is False
+
+
+def test_ambiguous_oco_intent_cannot_be_deferred_to_reserved(tmp_path):
+    store = seeded(tmp_path)
+    DemoProtectionManager(PublicDemoStub(), store).prepare(
+        entry_client_order_id='NBENTRY1', take_profit='52000', stop_loss='48000')
+    store.update_protection_intent('NBENTRY1', 'submission_unknown')
+    with pytest.raises(ValueError, match='Only a locally blocked OCO submission'):
+        store.defer_protection_intent('NBENTRY1', error_type='SafetyError')
+    assert store.get_protection_intent('NBENTRY1')['status'] == 'submission_unknown'
 
 
 def test_ambiguous_oco_submission_is_persistently_blocked(tmp_path):
