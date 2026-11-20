@@ -13,6 +13,8 @@ def test_top_level_help_exits_successfully_and_formats_percent(capsys, monkeypat
     assert "30 percent" in output
     assert "diagnose-portfolio" in output
     assert "preflight-once" in output
+    assert "orchestrate-once" in output
+    assert "--execute-demo" in output
 
 
 
@@ -89,3 +91,42 @@ def test_preflight_once_accepts_paired_limits_and_invokes_read_only_orchestrator
     from decimal import Decimal
     assert Decimal(str(calls["risk_budget"])) == Decimal("5")
     assert Decimal(str(calls["max_notional"])) == Decimal("100")
+
+
+
+def test_execute_demo_flag_is_restricted_to_orchestrator(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["nebula", "analyze-once", "--execute-demo"])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("execute_flag,expected", [(False, False), (True, True)])
+def test_orchestrate_cli_passes_explicit_demo_execution_choice(
+    monkeypatch, tmp_path, capsys, execute_flag, expected
+):
+    from nebula.config import Settings
+
+    calls = {}
+    argv = ["nebula", "orchestrate-once", "--db", str(tmp_path / "orchestrate.sqlite3")]
+    if execute_flag:
+        argv.append("--execute-demo")
+    monkeypatch.setattr("sys.argv", argv)
+    monkeypatch.setattr("nebula.cli.Settings.from_env", lambda: Settings())
+
+    class FakeOrchestrator:
+        def __init__(self, client, state, settings, *, bar):
+            calls["bar"] = bar
+
+        def run_once(self, *, execute):
+            calls["execute"] = execute
+            return {"status": "test", "execution": "not_submitted"}
+
+    monkeypatch.setattr("nebula.orchestrator.ExecutionOrchestrator", FakeOrchestrator)
+    monkeypatch.setattr("nebula.cli.OkxDemoClient", lambda settings: object())
+    monkeypatch.setattr("nebula.cli.StateStore", lambda path: "test-state")
+
+    main()
+
+    assert calls == {"bar": "1H", "execute": expected}
+    assert '"status": "test"' in capsys.readouterr().out
