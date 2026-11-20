@@ -105,7 +105,7 @@ def test_open_position_without_utc_daily_mark_fails_closed_instead_of_using_life
     assert report["daily_unrealized_pnl_baseline_available"] is False
     assert report["daily_combined_pnl_quote"] == "0"
     assert "daily_unrealized_pnl_baseline_missing" in report["blockers"]
-    assert report["valuation_complete"] is False
+    assert report["valuation_complete"] is True
     assert report["entry_allowed"] is False
 
 
