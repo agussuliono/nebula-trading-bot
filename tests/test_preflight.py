@@ -38,7 +38,7 @@ class ReadOnlySnapshotClient:
         self.calls.append("account_config")
         return [{
             "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
-            "perm": "read_only,trade", "uid": "test-demo-account-uid",
+            "perm": "read_only,trade",
         }]
 
     def get_balance(self):
@@ -57,10 +57,6 @@ class ReadOnlySnapshotClient:
             "instId": "AAA-USDT", "bidPx": "99.95", "askPx": "100",
             "bidSz": "100", "askSz": "100", "ts": str(NOW_MS),
         }]
-
-    def get_account_bills(self, *, begin=None, end=None, limit=100):
-        self.calls.append("account_bills")
-        return []
 
     def get_pending_orders(self, inst_type):
         self.calls.append("pending_regular")
@@ -150,7 +146,7 @@ def test_preflight_orchestrator_approves_candidate_without_exchange_writes(
     assert report["risk_preflight"]["execution"] == "not_submitted_preflight_only"
     assert client.calls == [
         "instrument_rules", "account_config", "balance", "tickers",
-        "pending_regular", "pending_oco", "pending_conditional", "account_bills",
+        "pending_regular", "pending_oco", "pending_conditional",
     ]
     assert not hasattr(client, "place_spot_limit")
     assert not hasattr(client, "place_spot_oco_exit")

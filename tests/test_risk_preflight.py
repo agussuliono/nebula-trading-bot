@@ -59,6 +59,7 @@ class SnapshotClient:
             "autoLoan": False,
             "enableSpotBorrow": False,
             "perm": "read_only,trade",
+            "uid": "test-demo-account-uid",
         }]
 
     def get_balance(self):
@@ -83,6 +84,10 @@ class SnapshotClient:
             "askSz": "100",
             "ts": str(NOW_MS),
         }]
+
+    def get_account_bills(self, *, begin=None, end=None, limit=100):
+        self.read_calls.append("account_bills")
+        return self.bills
 
     def get_pending_orders(self, inst_type):
         self.read_calls.append("pending_regular")
