@@ -32,9 +32,10 @@ def candidate(**overrides):
 
 
 class SnapshotClient:
-    def __init__(self, ask="100", min_size="0.001"):
+    def __init__(self, ask="100", min_size="0.001", bid_offset="0.05"):
         self.ask = ask
         self.min_size = min_size
+        self.bid_offset = bid_offset
         self.read_calls = []
 
     def get_spot_instrument(self, inst_id):
@@ -75,7 +76,7 @@ class SnapshotClient:
         self.read_calls.append("tickers")
         return [{
             "instId": "AAA-USDT",
-            "bidPx": str(Decimal(self.ask) - Decimal("0.05")),
+            "bidPx": str(Decimal(self.ask) - Decimal(self.bid_offset)),
             "askPx": self.ask,
             "bidSz": "100",
             "askSz": "100",
@@ -267,3 +268,21 @@ def test_candidate_preflight_rechecks_current_minimum_size_before_private_reads(
     assert result["status"] == "rejected"
     assert "instrument_rules" in client.read_calls
     assert "account_config" not in client.read_calls
+
+
+
+def test_candidate_preflight_rejects_widened_current_spread(tmp_path):
+    client = SnapshotClient(bid_offset="1")
+    state = StateStore(str(tmp_path / "wide-spread.sqlite3"))
+    authorizer = PortfolioRiskAuthorizer(
+        client,
+        state,
+        read_only_settings(),
+        plan_provider=lambda **kwargs: pytest.fail("plan_provider must not replace candidate"),
+        clock_ms=lambda: NOW_MS,
+    )
+    result = CandidateRiskPreflight(authorizer, state).evaluate(candidate())
+
+    assert result["status"] == "rejected"
+    assert "planned_entry_invalid" in result["reason"].lower()
+    assert "tickers" in client.read_calls
