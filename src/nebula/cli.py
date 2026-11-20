@@ -126,6 +126,16 @@ def main():
         pending_oco = client.get_pending_algo_orders("oco")
         pending_conditional = client.get_pending_algo_orders("conditional")
         lock = state.get_position_lock()
+        fill_sync_error = None
+        if lock:
+            from .protection_manager import DemoProtectionManager
+            try:
+                DemoProtectionManager(client, state).sync_entry_fills(lock["owner_client_order_id"])
+            except Exception as exc:
+                fill_sync_error = type(exc).__name__
+                state.record_event("portfolio_entry_fill_sync_failed",
+                                   lock["owner_client_order_id"],
+                                   {"error_type": fill_sync_error})
         local_unresolved = state.list_unresolved_intents()
         context = state.get_position_context(lock["owner_client_order_id"]) if lock else None
         fills = state.get_position_fills(lock["owner_client_order_id"]) if lock else []
@@ -147,6 +157,7 @@ def main():
             account_config=account_config, balance=balance, tickers=tickers,
             position_lock=lock, position_fills=fills, position_context=context,
             protection_intent=protection, local_unresolved_intents=local_unresolved,
+            position_fill_sync_error=fill_sync_error,
             open_regular_orders=pending_regular, open_algo_orders=[*pending_oco, *pending_conditional],
             now_ms=int(time.time() * 1000), daily_realized_pnl_quote=daily_realized,
         )
