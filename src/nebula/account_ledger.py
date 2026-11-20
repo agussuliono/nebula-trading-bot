@@ -181,6 +181,8 @@ class AccountLedger:
             raise AccountLedgerError("Daily equity baseline or current mark is missing")
         if account_fingerprint != baseline["account_fingerprint"]:
             raise AccountLedgerError("Account fingerprint missing or changed")
+        if int(latest["timestamp_ms"]) != ts:
+            raise AccountLedgerError("A fresh equity mark for the requested timestamp is required")
         if external_flows_quote is None:
             raise AccountLedgerError("External cash flows have not been fully reconciled")
         flows = _decimal(external_flows_quote, "external_flows_quote")
