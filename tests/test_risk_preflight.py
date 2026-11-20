@@ -182,3 +182,44 @@ def test_order_manager_authorizer_still_requires_demo_write_gate(tmp_path):
             candle_ts=CANDLE_TS,
         )
     assert client.read_calls == []
+
+
+
+def test_candidate_rejects_boolean_order_count_even_though_false_equals_zero(tmp_path):
+    preflight, client, _ = make_preflight(tmp_path)
+    result = preflight.evaluate(candidate(orders_submitted=False))
+    assert result["status"] == "rejected"
+    assert client.read_calls == []
+
+
+def test_order_authorizer_rejects_plan_for_different_instrument_before_reads(tmp_path):
+    client = SnapshotClient()
+    state = StateStore(str(tmp_path / "mismatched-plan.sqlite3"))
+    settings = Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
+    )
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, settings,
+        plan_provider=lambda **kwargs: {
+            "instrument": "BBB-USDT",
+            "size": kwargs["size"],
+            "entry_price": kwargs["entry_price"],
+            "signal_action": "buy",
+            "candle_closed": True,
+            "candle_ts": kwargs["candle_ts"],
+            "stop_loss": "90",
+            "take_profit": "120",
+        },
+        clock_ms=lambda: NOW_MS,
+    )
+
+    with pytest.raises(RiskAuthorizationError, match="instrument"):
+        authorizer(
+            instrument="AAA-USDT",
+            requested_size="0.1",
+            requested_price="100",
+            candle_ts=CANDLE_TS,
+        )
+    assert client.read_calls == []
