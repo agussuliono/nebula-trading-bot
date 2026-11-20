@@ -37,7 +37,7 @@ Working branch: `audit/fix-safety-gates-2026-11-20`
 
 ## Verification
 
-New tests cover API key permission requirements and risk authorizer allow/deny behavior. The latest branch head must receive a completed GitHub Actions run before this remediation batch is marked verified; no test count is inferred from commit creation.
+Initial tests cover API-key permission requirements and risk-authorizer allow/deny behavior. The later sections below record the current branch-head verification and supersede this initial note.
 
 
 ## Additional strategy-input hardening
@@ -69,3 +69,16 @@ Verification for branch head `22b398f4e1edce0b569bc55d6327fef3d148badc`: GitHub 
 - Added regression tests for approved read-only preflight, malformed candidate rejection before private reads, stale-price rejection, boolean order-count rejection, mismatched provider instrument, and the unchanged Demo write gate.
 
 This milestone is a local/fake-backed integration boundary only. No API credentials, private OKX account reads, or exchange writes were used in this development session. Real Demo private-read verification remains a later separately authorized step.
+
+### Verification — candidate risk preflight implementation
+
+- The preflight accepts only a confirmed closed-candle buy candidate with finite positive values, valid stop/entry/target ordering, and an exact integer `orders_submitted=0`.
+- The preflight uses authenticated private reads without opening the Demo write gate. The normal `DemoOrderManager` authorization path still requires the explicit write gate and emergency-stop clearance.
+- Current public Spot instrument metadata is fetched again and tick/lot/minimum-size rules are revalidated before private account snapshots.
+- The latest ask, top-of-book depth, and allowed slippage band are checked against the candidate price; stale or moved prices fail closed.
+- Plan instrument, size, entry price, stop, and target must remain consistent across the candidate and portfolio approval.
+- The preflight has no order manager and records an auditable approved/rejected result with `order_submission_attempts=0`.
+- GitHub Actions run #160 on `db815d9c7563b820d51c5425ddd0b71fc4575335` completed successfully: **270 tests passed in 1.48s**. Compileall, explicit Demo-off/emergency-stop-on checks, and fail-closed default checks passed. Pip cache restored successfully.
+- All tests used local fakes and SQLite. No actual OKX credentials, private account requests, or exchange write requests were used in this development session.
+
+This does not yet connect preflight output to automated order submission. It is a risk decision only; Demo order lifecycle, OCO protection, partial-fill reconciliation, and restart recovery remain separate blocked milestones.
