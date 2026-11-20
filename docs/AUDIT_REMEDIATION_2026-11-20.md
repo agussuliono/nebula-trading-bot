@@ -127,3 +127,11 @@ The CLI preflight is still an evaluation only. It does not call the order manage
 - Added a durable `partially_failed` protection state. It cannot be resubmitted or regressed to active, but the bot continues read-only reconciliation because some child orders may already exist.
 - Added a last-moment exchange-backed pre-submit gate: fetch fresh Spot balance and regular/algo pending orders; require available base balance to cover the exact OCO size and no existing orders for that instrument. Any read failure, insufficient balance, or outstanding order blocks the OCO POST and leaves the durable intent reserved.
 - Added regression tests for both partial algo states, monotonic state transitions, insufficient available base, and outstanding orders. No exchange writes were executed.
+
+
+## Follow-up audit fixes — 2026-11-20
+
+- Tightened the execution-time portfolio permission gate to allow exactly `read_only` and `trade`. It now rejects Transfer, Loan, Earn, Onchain, Withdraw, and any unrecognized/additional permission. This is an allowlist, so new exchange permission labels fail closed by default.
+- Corrected the read-only verification report so `private_reads_attempted` becomes true only immediately before the first authenticated private read. Public API failures no longer claim private account access was attempted.
+- Added regression tests for all restricted permission classes, an unknown future permission, and the public-failure reporting path.
+- These are offline unit tests; they do not constitute an authenticated OKX Demo account test.

@@ -43,7 +43,6 @@ def verify_demo_read_only(client, settings) -> dict:
         report["blockers"].append("private_read_credentials_missing")
         return report
 
-    report["private_reads_attempted"] = True
     try:
         instruments = client.get_instruments()
         tickers = client.get_tickers()
@@ -59,6 +58,8 @@ def verify_demo_read_only(client, settings) -> dict:
         report["blockers"].append("public_api_" + type(exc).__name__)
         return report
 
+    # Mark the private-read attempt only immediately before the first private GET.
+    report["private_reads_attempted"] = True
     try:
         config_rows = client.get_account_config()
         if not isinstance(config_rows, list) or len(config_rows) != 1:

@@ -176,6 +176,19 @@ def test_missing_credentials_short_circuit_before_any_network_read():
     assert result["exchange_writes"] == 0
 
 
+def test_public_api_failure_does_not_claim_private_reads_were_attempted():
+    class PublicFailure(ReadOnlyDemoStub):
+        def get_tickers(self):
+            self.calls.append("get_tickers")
+            raise TimeoutError("simulated public timeout")
+
+    client = PublicFailure()
+    result = verify_demo_read_only(client, credentials())
+    assert result["public_api"] == "failed"
+    assert result["private_reads_attempted"] is False
+    assert "get_account_config" not in client.calls
+
+
 def test_private_read_timeout_fails_closed_without_retry_or_writes():
     client = ReadOnlyDemoStub(private_error="get_balance")
     result = verify_demo_read_only(client, credentials())

@@ -158,8 +158,15 @@ class PortfolioRiskEngine:
             blockers.append("api_key_read_permission_missing")
         if "trade" not in permissions:
             blockers.append("api_key_trade_permission_missing")
-        if "withdraw" in permissions:
-            blockers.append("api_key_withdraw_permission_forbidden")
+        # Execution keys are least-privilege: exactly Read + Trade.
+        # An allowlist also rejects new or unknown OKX permission labels by default.
+        for permission in sorted(permissions - {"read_only", "trade"}):
+            if permission == "withdraw":
+                blockers.append("api_key_withdraw_permission_forbidden")
+            elif permission in {"transfer", "loan", "earn", "onchain"}:
+                blockers.append("api_key_" + permission + "_permission_forbidden")
+            else:
+                blockers.append("api_key_unrecognized_or_unapproved_permission")
         if not isinstance(balance, list) or len(balance) != 1:
             raise PortfolioError("Balance snapshot is missing or ambiguous")
         account = balance[0]

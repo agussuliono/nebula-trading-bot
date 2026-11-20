@@ -210,6 +210,18 @@ def test_spot_borrow_or_withdraw_permission_blocks_entry():
     assert report["entry_allowed"] is False
 
 
+@pytest.mark.parametrize("permission", ["transfer", "loan", "earn", "onchain", "future_scope"])
+def test_execution_key_rejects_permissions_beyond_read_and_trade(permission):
+    data = _snapshot()
+    data["account_config"][0]["perm"] = "read_only,trade," + permission
+    report = _engine().evaluate(**data, now_ms=NOW)
+    assert report["entry_allowed"] is False
+    if permission == "future_scope":
+        assert "api_key_unrecognized_or_unapproved_permission" in report["blockers"]
+    else:
+        assert "api_key_" + permission + "_permission_forbidden" in report["blockers"]
+
+
 def test_unknown_spot_borrow_permission_blocks_entry():
     data = _snapshot()
     data["account_config"][0].pop("enableSpotBorrow")
