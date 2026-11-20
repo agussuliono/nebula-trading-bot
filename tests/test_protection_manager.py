@@ -182,6 +182,61 @@ def test_prepare_requires_position_lock_owner(tmp_path):
         DemoProtectionManager(PublicDemoStub(), store).prepare(entry_client_order_id='NBENTRY1', take_profit='12', stop_loss='9')
 
 
+@pytest.mark.parametrize(
+    "available, pending, expected",
+    [
+        ("0.003", [], "available base balance"),
+        ("0.01", [{"instId": "BTC-USDT"}], "open regular/algo orders"),
+    ],
+)
+def test_exchange_backed_oco_requires_fresh_unreserved_base_balance(
+    tmp_path, available, pending, expected
+):
+    class ExchangeBacked(PublicDemoStub):
+        def __init__(self):
+            self.settings = Settings(
+                api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+                demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+                max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
+            )
+            self.place_calls = 0
+
+        def get_balance(self):
+            return [{"details": [
+                {"ccy": "BTC", "availBal": available, "frozenBal": "0"},
+                {"ccy": "USDT", "availBal": "1000", "frozenBal": "0"},
+            ]}]
+
+        def get_pending_orders(self, inst_type):
+            return pending
+
+        def get_pending_algo_orders(self, ord_type):
+            return []
+
+        def place_spot_oco_exit(self, **kwargs):
+            self.place_calls += 1
+            return [{"algoId": "9988", "sCode": "0"}]
+
+    store = seeded(tmp_path)
+    client = ExchangeBacked()
+    manager = DemoProtectionManager(client, store)
+    manager.prepare(
+        entry_client_order_id="NBENTRY1",
+        take_profit="52000",
+        stop_loss="48000",
+    )
+    # The seeded intent is a legacy fake entry without risk-plan/real fills.
+    # Move the client into the exchange-backed path only for the pre-submit gate.
+    client.settings = Settings()
+
+    with pytest.raises(ProtectionManagerError, match="Fresh Spot balance/order check failed"):
+        manager.submit_reserved("NBENTRY1")
+
+    assert store.get_protection_intent("NBENTRY1")["status"] == "reserved"
+    assert client.place_calls == 0
+    assert store.get_position_lock()["owner_client_order_id"] == "NBENTRY1"
+
+
 def test_local_oco_gate_block_remains_retryable_without_network_io(tmp_path):
     store = seeded(tmp_path)
 
