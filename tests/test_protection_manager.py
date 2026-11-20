@@ -111,7 +111,7 @@ def test_protection_rejects_fill_quantity_above_approved_entry_size(tmp_path):
 
 def test_exchange_backed_protection_requires_persisted_approved_plan(tmp_path):
     class ExchangeBacked(PublicDemoStub):
-        settings = Settings()
+        settings = Settings(max_daily_loss_quote=10)
 
     store = seeded(tmp_path)
     manager = DemoProtectionManager(ExchangeBacked(), store)
