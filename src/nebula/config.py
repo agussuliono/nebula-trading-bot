@@ -84,6 +84,11 @@ class Settings:
         if self.max_risk_quote > self.max_daily_loss_quote:
             raise SafetyError("Per-trade risk cannot exceed the daily loss limit")
 
+    def validate_private_read_permission(self) -> None:
+        """Allow authenticated Demo reads without enabling any exchange writes."""
+        if not all((self.api_key, self.secret_key, self.passphrase)):
+            raise SafetyError("Private API credentials are incomplete")
+
     def validate_order_permission(self) -> None:
         self._validate_demo_write_base()
         if self.kill_switch:
