@@ -1,3 +1,5 @@
+import pytest
+
 from nebula.config import DEMO_FLAG, DEMO_REST_URL, Settings
 from nebula.demo_verification import verify_demo_read_only
 
