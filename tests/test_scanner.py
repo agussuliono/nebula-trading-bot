@@ -7,7 +7,7 @@ def test_build_candidates_uses_usdt_live_spot_and_quote_volume():
         {"instId":"ETH-USDT", "state":"suspend", "quoteCcy":"USDT", "listTime":"1000"},
         {"instId":"BTC-USDC", "state":"live", "quoteCcy":"USDC", "listTime":"1000"},
     ]
-    tickers = [{"instId":"BTC-USDT", "bidPx":"99", "askPx":"101", "volCcy24h":"100000"}]
+    tickers = [{"instId":"BTC-USDT", "bidPx":"99", "askPx":"101", "bidSz":"10", "askSz":"10", "volCcy24h":"100000", "ts":str(86_400_000 * 10 - 1000)}]
     got = build_candidates(instruments, tickers, now_ms=86_400_000 * 10)
     assert len(got) == 1
     assert got[0].inst_id == "BTC-USDT"
@@ -65,3 +65,31 @@ def test_volatility_rejects_invalid_window():
     import pytest
     with pytest.raises(ValueError):
         candle_range_volatility([], window=0)
+
+
+
+def test_build_candidates_rejects_stale_future_and_duplicate_tickers():
+    now = 10_000_000
+    instrument = {"instId":"BTC-USDT", "instType":"SPOT", "state":"live",
+                  "quoteCcy":"USDT", "listTime":str(now - 90 * 86_400_000)}
+    base = {"instId":"BTC-USDT", "bidPx":"99", "askPx":"100",
+            "bidSz":"5", "askSz":"5", "volCcy24h":"1000000", "ts":str(now - 1000)}
+    assert len(build_candidates([instrument], [base], now_ms=now)) == 1
+    stale = {**base, "ts":str(now - 31_000)}
+    future = {**base, "ts":str(now + 1)}
+    assert build_candidates([instrument], [stale], now_ms=now) == []
+    assert build_candidates([instrument], [future], now_ms=now) == []
+    assert build_candidates([instrument], [base, base], now_ms=now) == []
+
+
+def test_build_candidates_rejects_future_listing_and_nonfinite_market_fields():
+    now = 10_000_000
+    future_listing = {"instId":"BTC-USDT", "instType":"SPOT", "state":"live",
+                      "quoteCcy":"USDT", "listTime":str(now + 1)}
+    ticker = {"instId":"BTC-USDT", "bidPx":"99", "askPx":"100",
+              "bidSz":"5", "askSz":"5", "volCcy24h":"1000000", "ts":str(now)}
+    assert build_candidates([future_listing], [ticker], now_ms=now) == []
+    bad = {**ticker, "volCcy24h":"nan"}
+    assert build_candidates([{"instId":"BTC-USDT", "instType":"SPOT", "state":"live",
+                              "quoteCcy":"USDT", "listTime":str(now - 1000)}],
+                            [bad], now_ms=now) == []
