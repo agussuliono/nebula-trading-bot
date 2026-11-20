@@ -17,7 +17,7 @@ Establish a genuinely unseen, timestamp-disjoint evaluation set after the previo
 ## Frozen research rules
 
 1. Keep the old sample, old holdout, and rejected candidate results frozen. No parameter tuning on them.
-2. Start a prospective UTC 1H collection after 2026-11-19T23:00:00Z (the previous sample's final candle opening timestamp was 2026-11-19T23:00:00Z). Do not use any candle whose timestamp is at or before that cutoff for independent evaluation.
+2. Start a prospective UTC 1H collection after 2026-11-20T01:00:00Z (the previous sample's final candle opening timestamp was 2026-11-20T01:00:00Z). Do not use any candle whose timestamp is at or before that cutoff for independent evaluation. The first eligible 1H candle opening is 2026-11-20T02:00:00Z.
 3. Collect the same eligible universe consistently. Initial diagnostic symbols: BTC-USDT, ETH-USDT, SOL-USDT. This is a fixed diagnostic basket, not proof that the dynamic asset selector is unbiased.
 4. Retain original OKX rows/CSV, SHA-256 manifest, UTC timestamps, and all gap/zero-volume reports. Never fill missing candles silently.
 5. Only confirmed candles may enter signal calculations. Entry simulation occurs no earlier than the next candle open.
@@ -54,7 +54,7 @@ nebula audit-data --bar 1H --data ~/NEBULA/research/prospective/ETH-USDT-1H.csv
 nebula audit-data --bar 1H --data ~/NEBULA/research/prospective/SOL-USDT-1H.csv
 ```
 
-Do not run strategy tuning until all three files cover the same prospective timestamps, the post-cutoff sample is large enough, and gaps/zero-volume bars have been reviewed. The exact collection mechanism for incremental forward updates remains to be implemented; do not repeatedly overwrite a dataset that is being preserved as evidence.
+Do not run strategy tuning until all three files cover the same prospective timestamps, the post-cutoff sample is large enough, and gaps/zero-volume bars have been reviewed. The exact collection mechanism for incremental forward updates remains to be implemented; do not repeatedly overwrite a dataset that is being preserved as evidence. The CLI command shown downloads a rolling historical window and does not by itself maintain a future-only dataset.
 
 ## Current exit criteria
 
