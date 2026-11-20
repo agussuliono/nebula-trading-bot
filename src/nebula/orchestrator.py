@@ -125,17 +125,13 @@ class ExecutionOrchestrator:
         # Public market scan only. It never calls an order-writing endpoint.
         scan = self.runtime.run_once()
         candidate = self._candidate(scan)
-        if candidate is None:
-            return {
-                "mode": "demo_execution" if execute else "shadow_only",
-                "status": "no_eligible_buy_candidate",
-                "scan": scan,
-                "execution": "not_submitted",
-                "order_submission_attempts": 0,
-            }
-
-        plan = candidate["candidate_entry_plan"]
         if not execute:
+            if candidate is None:
+                return {
+                    "mode": "shadow_only", "status": "no_eligible_buy_candidate",
+                    "scan": scan, "execution": "not_submitted",
+                    "order_submission_attempts": 0,
+                }
             return {
                 "mode": "shadow_only",
                 "status": "candidate_ready_but_execution_disabled",
@@ -147,23 +143,90 @@ class ExecutionOrchestrator:
         stage = "startup_recovery"
         entry_attempts = 0
         oco_attempts = 0
-        client_order_id = self._client_order_id(plan["instrument"], plan["candle_ts"])
-        self._record("orchestrator_execution_requested", {
-            "instrument": plan["instrument"], "candle_ts": plan["candle_ts"],
-            "mode": "okx_spot_demo",
-        })
+        plan = candidate["candidate_entry_plan"] if candidate else None
+        client_order_id = (
+            self._client_order_id(plan["instrument"], plan["candle_ts"])
+            if plan else None
+        )
+        if candidate:
+            self._record("orchestrator_execution_requested", {
+                "instrument": plan["instrument"], "candle_ts": plan["candle_ts"],
+                "mode": "okx_spot_demo",
+            })
 
         try:
             from .startup import StartupRecovery
             recovery_cls = self.startup_recovery_cls or StartupRecovery
             recovery = recovery_cls(self.client, self.state)
             recovery_result = recovery.run()
-            if (recovery_result.get("status") != "clean_no_local_position"
+
+            # Existing positions must be reconciled even when the market scan
+            # has no new buy candidate. An active OCO remains exchange-protected;
+            # a triggered OCO is reconciled and may release the lock only after
+            # the fill ledger and a fresh account snapshot prove the account flat.
+            recovery_status = recovery_result.get("status")
+            if recovery_status == "position_reconciled_protection_active":
+                return {
+                    "mode": "demo_execution",
+                    "status": "existing_position_protected",
+                    "recovery": recovery_result,
+                    "execution": "no_new_entry",
+                    "order_submission_attempts": 0,
+                }
+            if recovery_status == "position_reconciled_exit_in_progress":
+                from .protection_manager import DemoProtectionManager
+                protection_cls = self.protection_manager_cls or DemoProtectionManager
+                protection = protection_cls(self.client, self.state, circuit_breaker=self.breaker)
+                owner = recovery_result.get("position_client_order_id")
+                exit_reconciliation = protection.reconcile(owner)
+                accounting = exit_reconciliation.get("accounting")
+                if not isinstance(accounting, dict) or accounting.get("accounting_complete") is not True:
+                    return {
+                        "mode": "demo_execution",
+                        "status": "existing_position_exit_reconciliation_incomplete",
+                        "recovery": recovery_result,
+                        "exit_reconciliation": exit_reconciliation,
+                        "position_lock_retained": True,
+                        "do_not_retry": True,
+                        "order_submission_attempts": 0,
+                    }
+                finalized = protection.finalize_position_if_flat(
+                    owner, accounting=accounting
+                )
+                if finalized.get("released") is not True:
+                    return {
+                        "mode": "demo_execution",
+                        "status": "existing_position_not_yet_flat",
+                        "recovery": recovery_result,
+                        "exit_reconciliation": exit_reconciliation,
+                        "finalization": finalized,
+                        "position_lock_retained": True,
+                        "order_submission_attempts": 0,
+                    }
+                # Do not open another position in the same cycle that closes one.
+                return {
+                    "mode": "demo_execution",
+                    "status": "existing_position_closed_next_cycle",
+                    "finalization": finalized,
+                    "execution": "no_new_entry_this_cycle",
+                    "order_submission_attempts": 0,
+                }
+
+            if (recovery_status != "clean_no_local_position"
                     or recovery_result.get("entry_permit_issued") is not True
                     or recovery.entry_permit is None):
                 return {
                     "mode": "demo_execution_blocked",
                     "status": "startup_recovery_denied",
+                    "recovery": recovery_result,
+                    "execution": "not_submitted",
+                    "order_submission_attempts": 0,
+                }
+            if candidate is None:
+                return {
+                    "mode": "demo_execution",
+                    "status": "no_eligible_buy_candidate",
+                    "scan": scan,
                     "recovery": recovery_result,
                     "execution": "not_submitted",
                     "order_submission_attempts": 0,
