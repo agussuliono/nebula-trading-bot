@@ -18,7 +18,7 @@ def _snapshot(*, bid="110", balance_qty="1", balance_ts=None, ticker_ts=None,
             {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"},
             {"ccy": "AAA", "eq": balance_qty, "availBal": balance_qty, "frozenBal": "0"},
         ]}],
-        "tickers": [{"instId": "AAA-USDT", "bidPx": bid, "askPx": str(Decimal(bid) + 1), "bidSz": "10", "askSz": "10",
+        "tickers": [{"instId": "AAA-USDT", "bidPx": bid, "askPx": str(Decimal(bid) + Decimal("0.1")), "bidSz": "10", "askSz": "10",
                      "ts": str(ticker_ts or NOW)}],
         "position_lock": {"owner_client_order_id": "entry1", "instrument": "AAA-USDT"},
         "position_fills": [{"side": "buy", "fill_size": "1", "fill_price": "100",
@@ -141,7 +141,7 @@ def test_flat_or_missing_position_inventory_fails_closed():
 
 
 def test_planned_entry_risk_includes_entry_exit_fee_and_slippage():
-    data = _snapshot(bid="100")
+    data = _snapshot(bid="100.9")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
@@ -163,7 +163,7 @@ def test_planned_entry_risk_includes_entry_exit_fee_and_slippage():
 
 
 def test_planned_entry_risk_over_limit_blocks_entry():
-    data = _snapshot(bid="100")
+    data = _snapshot(bid="100.9")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
@@ -182,7 +182,7 @@ def test_planned_entry_risk_over_limit_blocks_entry():
 
 
 def test_planned_entry_must_have_stop_below_entry_and_target_above():
-    data = _snapshot(bid="100")
+    data = _snapshot(bid="100.9")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
@@ -241,7 +241,7 @@ def test_missing_read_permission_blocks_entry():
 
 
 def test_planned_entry_requires_available_quote_balance():
-    data = _snapshot(bid="100")
+    data = _snapshot(bid="100.9")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
@@ -393,7 +393,7 @@ def test_api_key_must_have_read_and_trade_but_never_withdraw_permission():
     data["position_context"] = None
     data["protection_intent"] = None
     data["open_algo_orders"] = []
-    data["tickers"] = [{"instId": "AAA-USDT", "bidPx": "100", "askPx": "101", "bidSz": "10", "askSz": "10", "ts": str(NOW)}]
+    data["tickers"] = [{"instId": "AAA-USDT", "bidPx": "100.95", "askPx": "101", "bidSz": "10", "askSz": "10", "ts": str(NOW)}]
     data["account_config"][0]["perm"] = "read_only"
     report = _engine().evaluate(**data, now_ms=NOW, planned_entry={
         "instrument": "AAA-USDT", "size": "1", "entry_price": "101",
