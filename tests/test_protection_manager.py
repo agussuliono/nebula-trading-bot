@@ -78,6 +78,37 @@ def test_protection_rejects_levels_that_differ_from_approved_entry_plan(tmp_path
     assert store.get_protection_intent("NBENTRY1") is None
 
 
+def test_protection_rejects_actual_fill_above_approved_take_profit(tmp_path):
+    plan = {
+        "instrument": "BTC-USDT", "size": "0.01", "entry_price": "50000",
+        "stop_loss": "48000", "take_profit": "52000", "risk_to_stop_quote": "20",
+    }
+    store = seeded(tmp_path, risk_plan=plan)
+    store.save_order_snapshot("NBENTRY1", {
+        "ordId": "10001", "state": "filled", "sz": "0.01",
+        "accFillSz": "0.004", "avgPx": "52500",
+        "fee": "-0.1", "feeCcy": "USDT",
+    })
+    manager = DemoProtectionManager(PublicDemoStub(), store)
+
+    with pytest.raises(ProtectionManagerError, match="Persisted approved entry plan is invalid"):
+        manager.prepare(entry_client_order_id="NBENTRY1")
+    assert store.get_protection_intent("NBENTRY1") is None
+
+
+def test_protection_rejects_fill_quantity_above_approved_entry_size(tmp_path):
+    plan = {
+        "instrument": "BTC-USDT", "size": "0.003", "entry_price": "50000",
+        "stop_loss": "48000", "take_profit": "52000", "risk_to_stop_quote": "6",
+    }
+    store = seeded(tmp_path, risk_plan=plan, fill="0.004")
+    manager = DemoProtectionManager(PublicDemoStub(), store)
+
+    with pytest.raises(ProtectionManagerError, match="Persisted approved entry plan is invalid"):
+        manager.prepare(entry_client_order_id="NBENTRY1")
+    assert store.get_protection_intent("NBENTRY1") is None
+
+
 def test_exchange_backed_protection_requires_persisted_approved_plan(tmp_path):
     class ExchangeBacked(PublicDemoStub):
         settings = Settings()
