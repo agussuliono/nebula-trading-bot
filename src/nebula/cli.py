@@ -42,6 +42,10 @@ def main():
     parser.add_argument("--plan-max-notional-quote", type=float,
                         help="Explicit quote-currency notional cap for read-only candidate plans")
     args = parser.parse_args()
+    if (args.plan_risk_quote is None) != (args.plan_max_notional_quote is None):
+        parser.error("--plan-risk-quote and --plan-max-notional-quote must be supplied together")
+    if args.command != "analyze-once" and (args.plan_risk_quote is not None or args.plan_max_notional_quote is not None):
+        parser.error("candidate-plan sizing options are only valid with analyze-once")
     if args.command == "download-history":
         if not args.symbol:
             parser.error("download-history requires --symbol BTC-USDT")
@@ -196,10 +200,6 @@ def main():
         return
     # Deliberately public-data-only. This command never creates an order manager,
     # never reads private balances, and cannot submit or cancel exchange orders.
-    if (args.plan_risk_quote is None) != (args.plan_max_notional_quote is None):
-        parser.error("--plan-risk-quote and --plan-max-notional-quote must be supplied together")
-    if args.command != "analyze-once" and (args.plan_risk_quote is not None or args.plan_max_notional_quote is not None):
-        parser.error("candidate-plan sizing options are only valid with analyze-once")
     plan_policy = None
     if args.plan_risk_quote is not None:
         from .entry_plan import EntryPlanPolicy
