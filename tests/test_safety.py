@@ -260,3 +260,59 @@ def test_regular_order_cancel_remains_available_during_emergency_stop():
     client = OkxDemoClient(settings, session=session)
     assert client.cancel_order(inst_id="BTC-USDT", order_id="123")[0]["sCode"] == "0"
     assert session.calls == 1
+
+
+@pytest.mark.parametrize(
+    "method,path,payload,status_code",
+    [
+        ("GET", "/api/v5/account/balance", None, 302),
+        ("POST", "/api/v5/trade/order", {"instId": "BTC-USDT"}, 307),
+    ],
+)
+def test_http_redirects_are_rejected_without_following_or_replaying_private_headers(
+    method, path, payload, status_code
+):
+    from nebula.exchange import OkxError
+
+    class RedirectResponse:
+        def __init__(self, code):
+            self.status_code = code
+
+        def raise_for_status(self):
+            raise AssertionError("redirect must be rejected before normal status handling")
+
+        def json(self):
+            raise AssertionError("redirect response must not be parsed as an OKX payload")
+
+    class RedirectSession:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return RedirectResponse(status_code)
+
+    settings = Settings(
+        api_key="demo-key",
+        secret_key="demo-secret",
+        passphrase="demo-pass",
+        enable_demo_orders=True,
+        kill_switch=False,
+        max_daily_loss_quote=20,
+        max_risk_quote=2,
+        max_position_quote=100,
+    )
+    session = RedirectSession()
+    client = OkxDemoClient(settings, session=session)
+
+    with pytest.raises(OkxError, match="redirect"):
+        client.request(method, path, payload=payload, private=True)
+
+    # The HTTP client must not follow a redirect to another host or replay a
+    # signed POST; exactly one request is made to the fixed Demo REST host.
+    assert len(session.calls) == 1
+    args, kwargs = session.calls[0]
+    assert args[1].startswith("https://openapi.okx.com/")
+    assert kwargs["allow_redirects"] is False
+    assert kwargs["headers"]["OK-ACCESS-KEY"] == "demo-key"
+    assert kwargs["headers"]["x-simulated-trading"] == "1"
