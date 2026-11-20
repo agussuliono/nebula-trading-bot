@@ -44,6 +44,37 @@ def test_local_database_integrity_passes_for_clean_state(tmp_path):
     assert report["position_lock_present"] is False
 
 
+def test_fill_without_known_parent_order_blocks_database_recovery(tmp_path):
+    state = StateStore(str(tmp_path / "orphan-fill.db"))
+    seed_filled_position(state)
+    state.save_fill({
+        "instId": "BTC-USDT", "ordId": "99999", "tradeId": "70001",
+        "clOrdId": "", "side": "buy", "fillSz": "0.01", "fillPx": "50000",
+        "fee": "-0.001", "feeCcy": "BTC", "fillTime": "1000",
+    })
+
+    report = StartupRecovery(CleanAccount(), state).validate_local_database()
+
+    assert report["ok"] is False
+    assert "fill_order_link_missing_or_ambiguous:99999" in report["errors"]
+
+
+def test_fill_with_mismatched_instrument_or_side_blocks_database_recovery(tmp_path):
+    state = StateStore(str(tmp_path / "mismatched-fill.db"))
+    seed_filled_position(state)
+    state.save_fill({
+        "instId": "BTC-USDT", "ordId": "10001", "tradeId": "70002",
+        "clOrdId": "NBSTARTUPENTRY", "side": "sell", "fillSz": "0.01",
+        "fillPx": "50000", "fee": "-0.001", "feeCcy": "BTC",
+        "fillTime": "1000",
+    })
+
+    report = StartupRecovery(CleanAccount(), state).validate_local_database()
+
+    assert report["ok"] is False
+    assert "fill_order_link_mismatch:10001" in report["errors"]
+
+
 def test_missing_required_table_blocks_startup(tmp_path):
     path = str(tmp_path / "missing-table.db")
     state = StateStore(path)
