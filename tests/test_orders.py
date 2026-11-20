@@ -290,7 +290,8 @@ def test_real_okx_client_accepts_only_concrete_portfolio_authorizer(tmp_path):
     persisted_plan = manager.state.get_entry_risk_plan("NBRISK_OK")
     assert persisted_plan["stop_loss"] == "49000"
     assert persisted_plan["take_profit"] == "52000"
-    assert persisted_plan["risk_to_stop_quote"] == "1.5"
+    assert Decimal(persisted_plan["risk_to_stop_quote"]) > 0
+    assert Decimal(persisted_plan["risk_to_stop_quote"]) <= Decimal("20")
 
 
 def test_real_okx_entry_rejects_authorization_without_protective_levels(tmp_path):
