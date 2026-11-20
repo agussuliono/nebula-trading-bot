@@ -97,3 +97,30 @@ def test_direct_authenticated_buy_request_cannot_bypass_startup_gate():
         client.request("POST", "/api/v5/trade/order",
                        payload={"instId": "BTC-USDT", "tdMode": "cash", "side": "buy"},
                        private=True)
+
+
+def test_permit_cannot_be_reused_for_a_different_buy_payload(tmp_path):
+    class NeverCallSession:
+        def request(self, *args, **kwargs):
+            raise AssertionError("network must not be called")
+
+    settings = Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
+    )
+    client = OkxDemoClient(settings, session=NeverCallSession())
+    state = StateStore(str(tmp_path / "bound-order.db"))
+    from nebula.entry_gate import issue_startup_entry_permit
+    permit = issue_startup_entry_permit(client, state, "demo-uid")
+    client.install_startup_entry_permit(permit, state)
+    permit.consume(client, state, instrument="BTC-USDT", size="0.001",
+                   price="50000", client_order_id="NBBOUND")
+
+    with pytest.raises(SafetyError, match="startup recovery gate"):
+        client.request(
+            "POST", "/api/v5/trade/order",
+            payload={"instId": "BTC-USDT", "tdMode": "cash", "side": "buy",
+                     "sz": "0.002", "px": "50000", "clOrdId": "NBBOUND"},
+            private=True,
+        )
