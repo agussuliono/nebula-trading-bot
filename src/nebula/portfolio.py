@@ -373,7 +373,20 @@ class PortfolioRiskEngine:
         total_risk = risk_to_stop + planned_risk
         if self.policy.max_position_risk_quote > 0 and total_risk > self.policy.max_position_risk_quote:
             blockers.append("portfolio_risk_exceeds_limit")
-        complete = not any(x.startswith(("unpriced_assets", "invalid_or_stale_ticker", "insufficient_top_bid_depth", "insufficient_position_bid_depth", "position_ticker", "stale_balance", "exchange_balance", "protective_stop", "protective_order", "position_restart", "position_context", "entry_order", "entry_exchange", "entry_fill", "unresolved_exit", "unresolved_oco", "local_unresolved_order_intents", "exchange_open_regular_orders", "exchange_oco_pending", "exchange_open_algo_orders", "account_not_spot", "auto_borrow", "account_auto_loan_status_unknown", "spot_borrow", "api_key_read_permission_missing", "api_key_withdraw_permission_forbidden", "untracked_non_usdt", "position_notional")) for x in blockers)
+        # Valuation completeness is distinct from entry eligibility. Policy
+        # blockers can forbid a new entry without making account valuation incomplete.
+        valuation_incomplete_prefixes = (
+            "unpriced_assets", "invalid_or_stale_ticker", "insufficient_top_bid_depth",
+            "insufficient_position_bid_depth", "position_ticker", "stale_balance",
+            "exchange_balance", "position_restart", "position_context",
+            "entry_order", "entry_exchange", "entry_fill", "unresolved_exit",
+            "unresolved_oco", "local_unresolved_order_intents",
+            "exchange_open_regular_orders", "exchange_oco_pending",
+            "exchange_open_algo_orders", "untracked_non_usdt",
+        )
+        complete = not any(
+            blocker.startswith(valuation_incomplete_prefixes) for blocker in blockers
+        )
         return {
             "mode": "read_only_demo_portfolio_analysis", "orders_enabled": False,
             "order_submission_attempts": 0, "valuation_currency": "USDT",
