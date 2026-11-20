@@ -87,23 +87,70 @@ def fetch_history(client, symbol: str, bar: str, candle_count: int, *, sleep_sec
 
 
 def save_dataset(path: str | Path, symbol: str, bar: str, candles: list[Candle], fetch_meta: dict, *, overwrite: bool = False):
+    """Persist a validated dataset and a provenance manifest.
+
+    Canonical manifest fields are constructed after fetch metadata so callers
+    cannot override symbol, source, timestamps, count, or the CSV digest.
+    Both files are staged before either destination is replaced.
+    """
     target = Path(path)
+    normalized_symbol = str(symbol).strip().upper()
+    if not SYMBOL_RE.fullmatch(normalized_symbol):
+        raise BacktestError("Only normalized USDT Spot symbols such as BTC-USDT are supported")
+    if bar not in BAR_MS:
+        raise BacktestError(f"Unsupported bar {bar}")
+    if not isinstance(fetch_meta, dict):
+        raise BacktestError("fetch_meta must be a dictionary")
+    data = validate_candles(candles)
     target.parent.mkdir(parents=True, exist_ok=True)
     manifest_path = target.with_suffix(target.suffix + ".manifest.json")
     if not overwrite and (target.exists() or manifest_path.exists()):
         raise FileExistsError("Dataset or manifest already exists; choose another --output or pass --overwrite")
-    with target.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["ts", "open", "high", "low", "close", "volume", "confirm"])
-        for c in candles:
-            writer.writerow([c.ts, repr(c.open), repr(c.high), repr(c.low), repr(c.close), repr(c.volume), "1"])
-    digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    manifest = {"schema_version": 1, "symbol": symbol, "bar": bar,
-                "source": "OKX V5 GET /api/v5/market/history-candles",
-                "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
-                "first_ts": candles[0].ts, "last_ts": candles[-1].ts,
-                "candle_count": len(candles), "csv_sha256": digest, **fetch_meta}
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    import io
+    import os
+    import tempfile
+
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer)
+    writer.writerow(["ts", "open", "high", "low", "close", "volume", "confirm"])
+    for c in data:
+        writer.writerow([c.ts, repr(c.open), repr(c.high), repr(c.low), repr(c.close), repr(c.volume), "1"])
+    csv_bytes = buffer.getvalue().encode("utf-8")
+    digest = hashlib.sha256(csv_bytes).hexdigest()
+    manifest = {
+        **fetch_meta,
+        "schema_version": 1,
+        "symbol": normalized_symbol,
+        "bar": bar,
+        "source": "OKX V5 GET /api/v5/market/history-candles",
+        "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
+        "first_ts": data[0].ts,
+        "last_ts": data[-1].ts,
+        "candle_count": len(data),
+        "csv_sha256": digest,
+    }
+    manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\\n").encode("utf-8")
+
+    staged = []
+    try:
+        for destination, payload in ((target, csv_bytes), (manifest_path, manifest_bytes)):
+            with tempfile.NamedTemporaryFile(mode="wb", dir=target.parent,
+                                             prefix=destination.name + ".", suffix=".tmp",
+                                             delete=False) as tmp:
+                tmp.write(payload)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                staged.append((Path(tmp.name), destination))
+        # Stage complete: replace each file atomically on its own filesystem.
+        for temporary, destination in staged:
+            os.replace(temporary, destination)
+    finally:
+        for temporary, _ in staged:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
     return manifest
 
 
