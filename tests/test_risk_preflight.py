@@ -75,7 +75,7 @@ class SnapshotClient:
         self.read_calls.append("tickers")
         return [{
             "instId": "AAA-USDT",
-            "bidPx": "99",
+            "bidPx": str(Decimal(self.ask) - Decimal("0.05")),
             "askPx": self.ask,
             "bidSz": "100",
             "askSz": "100",
