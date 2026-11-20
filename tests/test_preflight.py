@@ -71,7 +71,7 @@ class ReadOnlySnapshotClient:
 def settings_read_only():
     return Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        enable_demo_orders=False, kill_switch=True,
+        demo_account_exclusive=True, enable_demo_orders=False, kill_switch=True,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
 
