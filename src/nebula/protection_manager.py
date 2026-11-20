@@ -97,7 +97,8 @@ class DemoProtectionManager:
                                  "cancel_ack_error_type": type(cancel_error).__name__ if cancel_error else None})
         return {"status": state, "filled_size": new_snapshot["cumulative_fill_size"]}
 
-    def prepare(self, *, entry_client_order_id: str, take_profit: str, stop_loss: str) -> dict:
+    def prepare(self, *, entry_client_order_id: str,
+                take_profit: str | None = None, stop_loss: str | None = None) -> dict:
         entry = self.state.get_intent(entry_client_order_id)
         snapshot = self.state.get_order_snapshot(entry_client_order_id)
         if not entry or entry["side"] != "buy" or not snapshot:
@@ -112,6 +113,74 @@ class DemoProtectionManager:
         lock = self.state.get_position_lock()
         if not lock or lock["owner_client_order_id"] != entry_client_order_id:
             raise ProtectionManagerError("Entry no longer owns the single-position lock")
+
+        # For exchange-backed entries, protection must use the exact stop/target
+        # that passed portfolio authorization before the entry was submitted.
+        # Never accept a newly supplied, unreviewed OCO price pair.
+        try:
+            approved_plan = self.state.get_entry_risk_plan(entry_client_order_id)
+        except ValueError as exc:
+            raise ProtectionManagerError("Persisted entry risk plan is corrupt; protection is blocked") from exc
+        exchange_backed = hasattr(self.client, "settings")
+        if approved_plan is None and exchange_backed:
+            raise ProtectionManagerError("No persisted portfolio-approved stop/target for this entry")
+
+        # OKX cumulative fill size is gross execution size. If the fee is charged
+        # in base currency, the spendable Spot inventory is smaller. Reconcile
+        # every entry trade and size OCO from the net base inventory, not accFillSz.
+        effective_average_fill = Decimal(str(snapshot["average_fill_price"]))
+        gross_filled_quantity = Decimal(str(filled))
+        if exchange_backed:
+            try:
+                self.sync_entry_fills(entry_client_order_id)
+                order_id = snapshot.get("exchange_order_id") or entry.get("exchange_order_id")
+                fills = self.state.list_fills(entry["instrument"], [str(order_id)])
+                if not fills or any(row.get("side") != "buy" for row in fills):
+                    raise ValueError("entry fill ledger is empty or contains a non-buy execution")
+                ledger_gross = sum(
+                    (Decimal(str(row["fill_size"])) for row in fills), Decimal("0")
+                )
+                if ledger_gross != gross_filled_quantity:
+                    raise ValueError("trade-level fills do not reconcile to cumulative order fill")
+                from .portfolio import calculate_inventory_basis
+                inventory = calculate_inventory_basis(fills, entry["instrument"])
+                net_base_quantity = inventory["quantity"]
+                effective_average_fill = inventory["average_entry_price"]
+                if not net_base_quantity.is_finite() or net_base_quantity <= 0:
+                    raise ValueError("net base inventory after fees is not positive")
+                filled = format(net_base_quantity, "f")
+            except Exception as exc:
+                raise ProtectionManagerError(
+                    "Entry fills/fees could not be reconciled to net Spot inventory; OCO is blocked"
+                ) from exc
+
+        if approved_plan is not None:
+            try:
+                approved_size = Decimal(str(approved_plan["size"]))
+                approved_entry = Decimal(str(approved_plan["entry_price"]))
+                approved_tp = Decimal(str(approved_plan["take_profit"]))
+                approved_sl = Decimal(str(approved_plan["stop_loss"]))
+                if (approved_plan.get("instrument") != entry["instrument"]
+                        or not all(value.is_finite() and value > 0 for value in
+                                   (approved_size, approved_entry, approved_tp, approved_sl,
+                                    effective_average_fill, gross_filled_quantity))
+                        or gross_filled_quantity > approved_size
+                        or not approved_sl < effective_average_fill < approved_tp):
+                    raise ValueError("approved plan does not safely cover actual entry fills")
+                if ((take_profit is not None and Decimal(str(take_profit)) != approved_tp)
+                        or (stop_loss is not None and Decimal(str(stop_loss)) != approved_sl)):
+                    raise ProtectionManagerError(
+                        "Requested OCO levels differ from the portfolio-approved entry plan"
+                    )
+            except ProtectionManagerError:
+                raise
+            except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+                raise ProtectionManagerError(
+                    "Persisted approved entry plan is invalid; protection is blocked"
+                ) from exc
+            take_profit, stop_loss = str(approved_tp), str(approved_sl)
+        if take_profit is None or stop_loss is None:
+            raise ProtectionManagerError("Approved take-profit and stop-loss are required")
         try:
             spec = SpotInstrument.from_okx(self.client.get_spot_instrument(entry["instrument"]))
             quantity = Decimal(filled)
@@ -154,9 +223,15 @@ class DemoProtectionManager:
                                                 error_type="AlgoNotFound")
             return self.state.get_protection_intent(entry_client_order_id)
         state = row.get("state")
-        mapping = {"live": "active", "pause": "active", "partially_effective": "active",
-                   "effective": "triggered", "canceled": "canceled",
-                   "order_failed": "failed", "partially_failed": "failed"}
+        mapping = {"live": "active", "pause": "active",
+                   # OKX documents partially_effective as a distinct algo state.
+                   # It is not equivalent to an untouched live OCO: reconcile any
+                   # spawned child orders and retain the position lock.
+                   "partially_effective": "triggered", "effective": "triggered",
+                   "canceled": "canceled", "order_failed": "failed",
+                   # A partially failed OCO may still have spawned child orders.
+                   # Keep it non-resubmittable but continue read-only reconciliation.
+                   "partially_failed": "partially_failed"}
         mapped = mapping.get(state)
         if mapped is None:
             self.state.update_protection_intent(entry_client_order_id, "submission_unknown",
@@ -165,10 +240,14 @@ class DemoProtectionManager:
         updated = self.state.update_protection_intent(
             entry_client_order_id, mapped, exchange_algo_id=str(row.get("algoId") or "") or None,
             error_type=("ExchangeAlgoFailed" if mapped == "failed" else None))
-        if mapped == "triggered":
+        if mapped in {"triggered", "partially_failed"}:
             child_ids = row.get("ordIdList") or ([row["ordId"]] if row.get("ordId") else [])
             if child_ids or self.state.list_exit_child_orders(entry_client_order_id):
                 return self.reconcile_exit_children(entry_client_order_id, child_order_ids=child_ids or None)
+            # A partial outcome without visible children is still unresolved.
+            # Keep the lock and surface the exact exchange state to the caller.
+            return {**updated, "position_lock_retained": True,
+                    "child_orders_reconciled": False}
         return updated
 
     def _ingest_order_fills(self, instrument: str, order_id: str, *, page_limit: int = 100,
@@ -189,6 +268,20 @@ class DemoProtectionManager:
                 raise ProtectionManagerError("Fill history pagination cursor is missing or repeated")
             cursor = next_cursor
         raise ProtectionManagerError("Fill history exceeds safe pagination limit; ledger is incomplete")
+
+    def sync_entry_fills(self, entry_client_order_id: str) -> int:
+        """Synchronize entry executions before portfolio inventory is valued."""
+        lock = self.state.get_position_lock()
+        if not lock or lock.get("owner_client_order_id") != entry_client_order_id:
+            raise ProtectionManagerError("Entry does not own the active position lock")
+        entry = self.state.get_intent(entry_client_order_id)
+        snapshot = self.state.get_order_snapshot(entry_client_order_id)
+        if not entry or entry.get("side") != "buy" or not snapshot:
+            raise ProtectionManagerError("A reconciled Spot entry and order snapshot are required")
+        order_id = snapshot.get("exchange_order_id") or entry.get("exchange_order_id")
+        if not order_id or not str(order_id).isdigit():
+            raise ProtectionManagerError("Entry exchange order ID is unavailable")
+        return self._ingest_order_fills(entry["instrument"], str(order_id))
 
     def reconcile_exit_children(self, entry_client_order_id: str, *,
                                 child_order_ids: list[str] | None = None,
@@ -230,7 +323,7 @@ class DemoProtectionManager:
             self.state.record_event("oco_children_reconciled", entry_client_order_id,
                                     {"child_order_ids": order_ids[:-1] if entry_snapshot and entry_snapshot.get("exchange_order_id") else order_ids,
                                      "fill_count": len(ledger), "accounting_complete": accounting["accounting_complete"]})
-            return {"status": "triggered", "child_orders": child_rows,
+            return {"status": intent["status"], "child_orders": child_rows,
                     "fill_count": len(ledger), "accounting": accounting,
                     "position_lock_retained": True}
         except ProtectionManagerError:
@@ -294,6 +387,29 @@ class DemoProtectionManager:
             raise ProtectionManagerError("No durable OCO intent exists")
         if intent["status"] != "reserved":
             raise ProtectionManagerError(f"OCO is {intent['status']}; never resubmit automatically")
+        # On the real exchange client, re-check immediately available base
+        # inventory and outstanding orders just before placing the protective
+        # OCO. A valid historical fill ledger alone does not prove the balance
+        # is still free (fees, manual activity, or another order may have changed it).
+        if hasattr(self.client, "settings"):
+            from .reconciliation import DemoAccountReconciler
+            try:
+                account = DemoAccountReconciler(self.client).snapshot(intent["instrument"])
+                required = Decimal(str(intent["filled_size"]))
+                if not required.is_finite() or required <= 0:
+                    raise ValueError("invalid persisted OCO size")
+                if account.has_open_orders:
+                    raise ValueError("open regular/algo orders exist for this instrument")
+                if account.available_base < required:
+                    raise ValueError("available base balance is below the protective OCO size")
+            except Exception as exc:
+                self.state.record_event(
+                    "oco_pre_submit_balance_blocked", entry_client_order_id,
+                    {"error_type": type(exc).__name__},
+                )
+                raise ProtectionManagerError(
+                    "Fresh Spot balance/order check failed; protective OCO was not submitted"
+                ) from exc
         # Durable state is changed before the network call. A crash or timeout
         # leaves an ambiguous intent that must be reconciled by algoClOrdId.
         self.state.update_protection_intent(entry_client_order_id, "submitting")
@@ -303,7 +419,12 @@ class DemoProtectionManager:
                 take_profit=intent["take_profit"], stop_loss=intent["stop_loss"],
                 algo_client_order_id=intent["algo_client_order_id"])
         except (SafetyError, ValueError) as exc:
-            self.state.update_protection_intent(entry_client_order_id, "failed", error_type=type(exc).__name__)
+            # These errors are raised by local safety/parameter validation before
+            # the HTTP request. Keep the immutable OCO intent reserved so it can
+            # be retried manually after the gate or input is corrected. Network
+            # errors remain submission_unknown and are never retried blindly.
+            self.state.defer_protection_intent(
+                entry_client_order_id, error_type=type(exc).__name__)
             raise
         except OkxError as exc:
             definitive = str(exc).startswith("OKX OCO rejected")

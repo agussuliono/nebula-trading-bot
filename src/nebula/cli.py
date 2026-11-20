@@ -12,7 +12,7 @@ from .portfolio import PortfolioPolicy, PortfolioRiskEngine
 
 def main():
     parser = argparse.ArgumentParser(prog="nebula")
-    parser.add_argument("command", choices=["check-demo-public", "analyze-once", "portfolio-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "audit-data"])
+    parser.add_argument("command", choices=["check-demo-public", "verify-demo-once", "analyze-once", "preflight-once", "portfolio-once", "recover-once", "orchestrate-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
     parser.add_argument("--db", default=os.getenv("NEBULA_DB_PATH", "nebula.sqlite3"))
     parser.add_argument("--bar", default="1H")
     parser.add_argument("--data", help="Local ascending OHLCV CSV for offline backtest or dataset audit")
@@ -37,7 +37,21 @@ def main():
     parser.add_argument("--max-drawdown-halt-pct", type=float, default=0.20)
     parser.add_argument("--fast-ema", type=int, default=20)
     parser.add_argument("--slow-ema", type=int, default=50)
+    parser.add_argument("--plan-risk-quote", type=float,
+                        help="Explicit quote-currency risk budget for read-only candidate plans")
+    parser.add_argument("--plan-max-notional-quote", type=float,
+                        help="Explicit quote-currency notional cap for read-only candidate plans")
+    parser.add_argument("--execute-demo", action="store_true",
+                        help="Explicitly request one guarded OKX Spot Demo execution cycle (never live)")
     args = parser.parse_args()
+    if args.execute_demo and args.command != "orchestrate-once":
+        parser.error("--execute-demo is only valid with orchestrate-once")
+    if (args.plan_risk_quote is None) != (args.plan_max_notional_quote is None):
+        parser.error("--plan-risk-quote and --plan-max-notional-quote must be supplied together")
+    if args.command not in {"analyze-once", "preflight-once"} and (args.plan_risk_quote is not None or args.plan_max_notional_quote is not None):
+        parser.error("candidate-plan sizing options are only valid with analyze-once or preflight-once")
+    if args.command == "preflight-once" and args.plan_risk_quote is None:
+        parser.error("preflight-once requires --plan-risk-quote and --plan-max-notional-quote")
     if args.command == "download-history":
         if not args.symbol:
             parser.error("download-history requires --symbol BTC-USDT")
@@ -47,6 +61,28 @@ def main():
         manifest = save_dataset(args.output, args.symbol.strip().upper(), args.bar, candles, meta, overwrite=args.overwrite)
         emit_result(json.dumps({"csv": args.output, "manifest": args.output + ".manifest.json",
                           "dataset": manifest, "orders_submitted": 0}, indent=2, sort_keys=True))
+        return
+    if args.command == "collect-prospective":
+        if not args.symbol:
+            parser.error("collect-prospective requires --symbol BTC-USDT")
+        if args.bar != "1H":
+            parser.error("The frozen prospective research protocol currently supports 1H only")
+        from .backtest import Candle, load_csv
+        from .prospective import append_prospective_candles
+        # Settings() has no credentials; this command uses only the public candles endpoint.
+        client = OkxDemoClient(Settings())
+        existing = load_csv(args.output)
+        rows = client.get_candles(args.symbol.strip().upper(), bar=args.bar, limit=300)
+        parsed = [Candle.from_okx(row) for row in rows]
+        fresh = sorted((c for c in parsed if c.confirmed and c.ts > existing[-1].ts),
+                       key=lambda c: c.ts)
+        if not fresh:
+            emit_result(json.dumps({"symbol": args.symbol.strip().upper(), "bar": args.bar,
+                                    "appended": 0, "reason": "no_new_confirmed_candles",
+                                    "orders_submitted": 0, "private_api_calls": 0}, indent=2))
+            return
+        report = append_prospective_candles(args.output, args.symbol, args.bar, fresh)
+        emit_result(json.dumps(report, indent=2, sort_keys=True))
         return
     if args.command == "audit-data":
         if not args.data:
@@ -113,6 +149,50 @@ def main():
         tickers = client.get_tickers()
         emit_result(f"OK: {len(instruments)} spot instruments; {len(tickers)} tickers (public market data). No orders sent.")
         return
+    if args.command == "verify-demo-once":
+        from .demo_verification import verify_demo_read_only
+        report = verify_demo_read_only(client, settings)
+        emit_result(json.dumps(report, indent=2, sort_keys=True))
+        if report.get("status") != "read_only_demo_connection_verified":
+            raise SystemExit(1)
+        return
+    if args.command == "orchestrate-once":
+        from .orchestrator import ExecutionOrchestrator
+        state = StateStore(args.db)
+        orchestrator = ExecutionOrchestrator(
+            client, state, settings, bar=args.bar,
+        )
+        report = orchestrator.run_once(execute=args.execute_demo)
+        emit_result(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return
+    if args.command == "preflight-once":
+        from .entry_plan import EntryPlanPolicy
+        from .preflight import run_read_only_preflight
+        try:
+            plan_policy = EntryPlanPolicy(
+                risk_budget_quote=args.plan_risk_quote,
+                max_notional_quote=args.plan_max_notional_quote,
+                fee_bps=settings.fee_bps,
+                slippage_bps=settings.slippage_bps,
+            )
+        except ValueError as exc:
+            parser.error(f"invalid candidate-plan sizing policy: {exc}")
+        state = StateStore(args.db)
+        report = run_read_only_preflight(
+            client, state, settings, bar=args.bar,
+            entry_plan_policy=plan_policy,
+        )
+        emit_result(json.dumps(report, indent=2, sort_keys=True))
+        return
+    if args.command == "recover-once":
+        # Authenticated read-only startup recovery. This path never creates an
+        # order manager with submission authority and never calls write endpoints.
+        settings.validate_private_read_permission()
+        from .startup import StartupRecovery
+        state = StateStore(args.db)
+        report = StartupRecovery(client, state).run()
+        emit_result(json.dumps(report, indent=2, sort_keys=True))
+        return
     if args.command == "portfolio-once":
         # Read-only private account endpoints plus public tickers. No order manager
         # is instantiated and no order-writing endpoint is reachable from this path.
@@ -126,6 +206,16 @@ def main():
         pending_oco = client.get_pending_algo_orders("oco")
         pending_conditional = client.get_pending_algo_orders("conditional")
         lock = state.get_position_lock()
+        fill_sync_error = None
+        if lock:
+            from .protection_manager import DemoProtectionManager
+            try:
+                DemoProtectionManager(client, state).sync_entry_fills(lock["owner_client_order_id"])
+            except Exception as exc:
+                fill_sync_error = type(exc).__name__
+                state.record_event("portfolio_entry_fill_sync_failed",
+                                   lock["owner_client_order_id"],
+                                   {"error_type": fill_sync_error})
         local_unresolved = state.list_unresolved_intents()
         context = state.get_position_context(lock["owner_client_order_id"]) if lock else None
         fills = state.get_position_fills(lock["owner_client_order_id"]) if lock else []
@@ -147,6 +237,7 @@ def main():
             account_config=account_config, balance=balance, tickers=tickers,
             position_lock=lock, position_fills=fills, position_context=context,
             protection_intent=protection, local_unresolved_intents=local_unresolved,
+            position_fill_sync_error=fill_sync_error,
             open_regular_orders=pending_regular, open_algo_orders=[*pending_oco, *pending_conditional],
             now_ms=int(time.time() * 1000), daily_realized_pnl_quote=daily_realized,
         )
@@ -159,8 +250,20 @@ def main():
         return
     # Deliberately public-data-only. This command never creates an order manager,
     # never reads private balances, and cannot submit or cancel exchange orders.
+    plan_policy = None
+    if args.plan_risk_quote is not None:
+        from .entry_plan import EntryPlanPolicy
+        try:
+            plan_policy = EntryPlanPolicy(
+                risk_budget_quote=args.plan_risk_quote,
+                max_notional_quote=args.plan_max_notional_quote,
+                fee_bps=settings.fee_bps,
+                slippage_bps=settings.slippage_bps,
+            )
+        except ValueError as exc:
+            parser.error(f"invalid candidate-plan sizing policy: {exc}")
     state = StateStore(args.db)
-    policy = RuntimePolicy(bar=args.bar)
+    policy = RuntimePolicy(bar=args.bar, entry_plan_policy=plan_policy)
     runtime = ReadOnlyRuntime(client, state, policy=policy)
     emit_result(result_json(runtime.run_once()))
 

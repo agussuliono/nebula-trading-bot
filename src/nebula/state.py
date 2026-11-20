@@ -45,6 +45,8 @@ class StateStore:
                 db.execute("ALTER TABLE intents ADD COLUMN last_update TEXT")
             if "position_client_order_id" not in columns:
                 db.execute("ALTER TABLE intents ADD COLUMN position_client_order_id TEXT")
+            if "risk_plan_json" not in columns:
+                db.execute("ALTER TABLE intents ADD COLUMN risk_plan_json TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS idx_intents_status ON intents(status)")
             db.execute("""CREATE TABLE IF NOT EXISTS order_snapshots (
                 client_order_id TEXT PRIMARY KEY REFERENCES intents(client_order_id),
@@ -148,10 +150,47 @@ class StateStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def reserve_entry_intent(self, client_order_id: str, instrument: str, candle_ts: int, side: str) -> bool:
+    def get_entry_risk_plan(self, client_order_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT risk_plan_json FROM intents WHERE client_order_id=?",
+                (client_order_id,),
+            ).fetchone()
+            if not row or not row["risk_plan_json"]:
+                return None
+            try:
+                value = json.loads(row["risk_plan_json"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Persisted entry risk plan is corrupt") from exc
+            if not isinstance(value, dict):
+                raise ValueError("Persisted entry risk plan is not an object")
+            return value
+
+    def reserve_entry_intent(self, client_order_id: str, instrument: str, candle_ts: int,
+                             side: str, risk_plan: dict[str, Any] | None = None) -> bool:
         """Atomically reserve the sole position slot and the entry intent."""
         if side != "buy":
             raise ValueError("entry intents must be Spot buy orders")
+        encoded_plan = None
+        if risk_plan is not None:
+            from decimal import Decimal, InvalidOperation
+            try:
+                if not isinstance(risk_plan, dict) or risk_plan.get("instrument") != instrument:
+                    raise ValueError("Risk plan instrument does not match entry intent")
+                values = {
+                    field: Decimal(str(risk_plan[field]))
+                    for field in ("size", "entry_price", "stop_loss", "take_profit", "risk_to_stop_quote")
+                }
+                if not all(value.is_finite() and value > 0 for value in values.values()):
+                    raise ValueError("Risk plan values must be finite and positive")
+                if not values["stop_loss"] < values["entry_price"] < values["take_profit"]:
+                    raise ValueError("Risk plan stop/entry/target ordering is invalid")
+            except (KeyError, TypeError, InvalidOperation) as exc:
+                raise ValueError("Risk plan is incomplete or invalid") from exc
+            encoded_plan = json.dumps({
+                "instrument": instrument,
+                **{key: str(value) for key, value in values.items()},
+            }, sort_keys=True, separators=(",", ":"))
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT 1 FROM intents WHERE client_order_id=?", (client_order_id,)).fetchone()
@@ -162,8 +201,8 @@ class StateStore:
                 raise RuntimeError(f"Single-position slot is occupied by {lock['owner_client_order_id']} ({lock['instrument']})")
             db.execute("INSERT INTO position_lock(singleton,owner_client_order_id,instrument) VALUES(1,?,?)",
                        (client_order_id, instrument))
-            db.execute("INSERT INTO intents(client_order_id,instrument,candle_ts,side,status) VALUES(?,?,?,?,'reserved')",
-                       (client_order_id, instrument, candle_ts, side))
+            db.execute("INSERT INTO intents(client_order_id,instrument,candle_ts,side,status,risk_plan_json) VALUES(?,?,?,?,'reserved',?)",
+                       (client_order_id, instrument, candle_ts, side, encoded_plan))
             return True
 
     def reserve_exit_intent(self, client_order_id: str, instrument: str, candle_ts: int,
@@ -215,14 +254,22 @@ class StateStore:
 
     def release_rejected_entry_lock(self, client_order_id: str) -> bool:
         """Release only when the exchange/local adapter definitively rejected the entry."""
+        from decimal import Decimal, InvalidOperation
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             intent = db.execute("SELECT status,side FROM intents WHERE client_order_id=?", (client_order_id,)).fetchone()
             snapshot = db.execute("SELECT cumulative_fill_size FROM order_snapshots WHERE client_order_id=?", (client_order_id,)).fetchone()
             if not intent or intent["side"] != "buy" or intent["status"] != "rejected":
                 return False
-            if snapshot and float(snapshot["cumulative_fill_size"]) > 0:
-                return False
+            if snapshot:
+                try:
+                    cumulative = Decimal(str(snapshot["cumulative_fill_size"]))
+                except (InvalidOperation, TypeError, ValueError):
+                    return False
+                # Exact Decimal comparison: never release a position lock because
+                # float conversion rounded a tiny partial fill down to zero.
+                if not cumulative.is_finite() or cumulative != 0:
+                    return False
             cursor = db.execute("DELETE FROM position_lock WHERE singleton=1 AND owner_client_order_id=?", (client_order_id,))
             return cursor.rowcount == 1
 
@@ -387,7 +434,7 @@ class StateStore:
     def update_protection_intent(self, entry_client_order_id: str, status: str,
                                  exchange_algo_id: str | None = None,
                                  error_type: str | None = None) -> dict[str, Any]:
-        allowed={"submitting","submission_unknown","active","triggered","canceled","failed"}
+        allowed={"submitting","submission_unknown","active","triggered","partially_failed","canceled","failed"}
         if status not in allowed:
             raise ValueError("Unsupported protection state")
         with self._connect() as db:
@@ -398,9 +445,9 @@ class StateStore:
                 raise ValueError("Unknown protection intent")
             # OCO lifecycle is monotonic once active/terminal; stale reads cannot
             # move a triggered/canceled/failed intent back into an earlier state.
-            if row["status"] in {"active", "triggered", "canceled", "failed"} and status in {"submitting", "submission_unknown"}:
+            if row["status"] in {"active", "triggered", "partially_failed", "canceled", "failed"} and status in {"submitting", "submission_unknown"}:
                 raise ValueError("Cannot resubmit a terminal or active OCO intent")
-            if row["status"] in {"triggered", "canceled", "failed"} and status != row["status"]:
+            if row["status"] in {"triggered", "partially_failed", "canceled", "failed"} and status != row["status"]:
                 raise ValueError("Cannot regress or overwrite a terminal OCO state")
             db.execute("""UPDATE protection_intents SET status=?,
                 exchange_algo_id=COALESCE(?,exchange_algo_id),last_error_type=?,updated_at=CURRENT_TIMESTAMP
@@ -409,6 +456,31 @@ class StateStore:
             db.execute("INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
                        ("protection_state_updated",entry_client_order_id,
                         json.dumps({"status":status,"exchange_algo_id":exchange_algo_id,"error_type":error_type},sort_keys=True)))
+            return dict(db.execute("SELECT * FROM protection_intents WHERE entry_client_order_id=?",
+                                   (entry_client_order_id,)).fetchone())
+
+
+    def defer_protection_intent(self, entry_client_order_id: str,
+                                error_type: str | None = None) -> dict[str, Any]:
+        """Return a definitely-not-submitted OCO intent to reserved after local rejection.
+
+        This transition is allowed only from submitting. It must never be used
+        after a network attempt whose outcome could be unknown.
+        """
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM protection_intents WHERE entry_client_order_id=?",
+                             (entry_client_order_id,)).fetchone()
+            if not row:
+                raise ValueError("Unknown protection intent")
+            if row["status"] != "submitting":
+                raise ValueError("Only a locally blocked OCO submission can be deferred")
+            db.execute("""UPDATE protection_intents SET status='reserved',last_error_type=?,
+                updated_at=CURRENT_TIMESTAMP WHERE entry_client_order_id=?""",
+                (error_type, entry_client_order_id))
+            db.execute("INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
+                       ("protection_submission_deferred", entry_client_order_id,
+                        json.dumps({"status": "reserved", "error_type": error_type}, sort_keys=True)))
             return dict(db.execute("SELECT * FROM protection_intents WHERE entry_client_order_id=?",
                                    (entry_client_order_id,)).fetchone())
 

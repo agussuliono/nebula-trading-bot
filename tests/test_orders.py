@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 from nebula.orders import DemoOrderManager, OrderManagerError
 from nebula.exchange import OkxError
@@ -25,15 +27,28 @@ class FakeClient:
         return self.order or []
     def get_pending_orders(self, inst_type="SPOT"):
         return self.pending
+    def get_account_config(self):
+        return [{"acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+                 "perm": "read_only,trade", "uid": "test-demo-account-uid"}]
+    def get_balance(self):
+        return [{"uTime": "1800000000000", "details": [
+            {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]}]
+    def get_tickers(self):
+        return [{"instId": "BTC-USDT", "bidPx": "49999.95", "askPx": "50000",
+                 "bidSz": "100", "askSz": "100", "ts": "1800000000000"}]
+    def get_pending_algo_orders(self, ord_type):
+        return []
+    def get_account_bills(self, *, begin=None, end=None, limit=100):
+        return []
 
 
 def setup(tmp_path, client):
     return DemoOrderManager(client, StateStore(str(tmp_path / "state.db")))
 
 
-def submit(manager, cid="NB123"):
+def submit(manager, cid="NB123", candle_ts=123):
     return manager.submit_limit(inst_id="BTC-USDT", side="buy", size="0.01",
-                                price="50000", client_order_id=cid, candle_ts=123)
+                                price="50000", client_order_id=cid, candle_ts=candle_ts)
 
 
 def test_submit_reserves_and_persists_ack(tmp_path):
@@ -221,3 +236,260 @@ def test_circuit_breaker_blocks_new_buy_before_exchange_access(tmp_path, monkeyp
                              client_order_id="NB_BLOCKED", candle_ts=999)
     assert client.place_calls == 0
     assert store.get_intent("NB_BLOCKED") is None
+
+
+
+def test_real_okx_client_requires_portfolio_risk_authorization(tmp_path):
+    from nebula.config import Settings
+    client = FakeClient()
+    client.settings = Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
+    )
+    manager = setup(tmp_path, client)
+    with pytest.raises(OrderManagerError, match="No integrated PortfolioRiskAuthorizer"):
+        submit(manager, "NBRISK_REQUIRED")
+    assert client.place_calls == 0
+    assert manager.state.get_intent("NBRISK_REQUIRED") is None
+
+
+def test_real_okx_client_accepts_only_concrete_portfolio_authorizer(tmp_path):
+    from nebula.config import Settings
+    from nebula.risk_authorizer import PortfolioRiskAuthorizer
+
+    client = FakeClient()
+    settings = Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=20, max_position_quote=1000,
+        market_data_max_age_ms=30_000,
+    )
+    client.settings = settings
+    state = StateStore(str(tmp_path / "authorized.db"))
+    authorizer = PortfolioRiskAuthorizer(
+        client,
+        state,
+        settings,
+        plan_provider=lambda **kwargs: {
+            "instrument": kwargs["instrument"],
+            "size": kwargs["size"],
+            "entry_price": kwargs["entry_price"],
+            "signal_action": "buy",
+            "candle_closed": True,
+            "candle_ts": kwargs["candle_ts"],
+            "stop_loss": "49000",
+            "take_profit": "52000",
+        },
+        clock_ms=lambda: 1_800_000_000_000,
+    )
+    manager = DemoOrderManager(client, state, risk_authorizer=authorizer)
+    result = submit(manager, "NBRISK_OK", candle_ts=1_799_996_400_000)
+
+    assert result["status"] == "acknowledged"
+    assert client.place_calls == 1
+    assert manager.state.get_intent("NBRISK_OK")["status"] == "acknowledged"
+    persisted_plan = manager.state.get_entry_risk_plan("NBRISK_OK")
+    assert persisted_plan["stop_loss"] == "49000"
+    assert persisted_plan["take_profit"] == "52000"
+    assert Decimal(persisted_plan["risk_to_stop_quote"]) > 0
+    assert Decimal(persisted_plan["risk_to_stop_quote"]) <= Decimal("20")
+
+
+def test_real_okx_entry_rejects_authorization_without_protective_levels(tmp_path):
+    from nebula.config import Settings
+    from nebula.risk_authorizer import PortfolioRiskAuthorizer
+
+    client = FakeClient()
+    settings = Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=20, max_position_quote=1000,
+    )
+    client.settings = settings
+    authorizer = PortfolioRiskAuthorizer(
+        client,
+        StateStore(str(tmp_path / "missing-protection-plan.db")),
+        settings,
+        plan_provider=lambda **kwargs: {
+            "instrument": kwargs["instrument"],
+            "size": kwargs["size"],
+            "entry_price": kwargs["entry_price"],
+            "signal_action": "buy",
+            "candle_closed": True,
+            "candle_ts": kwargs["candle_ts"],
+            "risk_to_stop_quote": "1",
+        },
+        clock_ms=lambda: 1_800_000_000_000,
+    )
+    state = StateStore(str(tmp_path / "missing-protection-state.db"))
+    manager = DemoOrderManager(client, state, risk_authorizer=authorizer)
+
+    with pytest.raises(OrderManagerError, match="Portfolio risk authorization failed"):
+        submit(manager, "NBMISSING_PROTECTION")
+    assert client.place_calls == 0
+    assert state.get_position_lock() is None
+
+
+def test_authorizer_subclass_cannot_fabricate_approval(tmp_path):
+    from nebula.config import Settings
+    from nebula.risk_authorizer import PortfolioRiskAuthorizer
+
+    class FabricatedApproval(PortfolioRiskAuthorizer):
+        def __call__(self, **kwargs):
+            return {
+                "entry_allowed": True,
+                "planned_entry": {
+                    "instrument": "BTC-USDT", "size": "0.01",
+                    "entry_price": "50000", "stop_loss": "49000",
+                    "take_profit": "52000", "risk_to_stop_quote": "1",
+                },
+            }
+
+    client = FakeClient()
+    client.settings = Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
+    )
+    manager = DemoOrderManager(
+        client, StateStore(str(tmp_path / "subclass.db")),
+        risk_authorizer=FabricatedApproval.__new__(FabricatedApproval),
+    )
+
+    with pytest.raises(OrderManagerError, match="No integrated PortfolioRiskAuthorizer"):
+        submit(manager, "NBSUBCLASS")
+    assert client.place_calls == 0
+
+
+def test_real_okx_client_rejects_generic_callable_that_fabricates_approval(tmp_path):
+    from nebula.config import Settings
+    client = FakeClient()
+    client.settings = Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
+    )
+    manager = DemoOrderManager(client, StateStore(str(tmp_path / "mismatch.db")),
+        risk_authorizer=lambda **kwargs: {
+            "entry_allowed": True,
+            "planned_entry": {
+                "instrument": "BTC-USDT", "size": "0.01",
+                "entry_price": "50000", "risk_to_stop_quote": "1.5",
+            },
+        })
+    with pytest.raises(OrderManagerError, match="No integrated PortfolioRiskAuthorizer"):
+        submit(manager, "NBRISK_MISMATCH")
+    assert client.place_calls == 0
+
+def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp_path):
+    from nebula.config import Settings
+    from nebula.risk_authorizer import PortfolioRiskAuthorizer
+    from nebula.state import StateStore
+
+    settings = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
+        max_risk_quote=2, max_position_quote=100, market_data_max_age_ms=30000)
+    class SnapshotClient:
+        def get_spot_instrument(self, inst_id):
+            return {"instType": "SPOT", "instId": inst_id, "baseCcy": "AAA",
+                    "quoteCcy": "USDT", "tickSz": "0.1", "lotSz": "0.001",
+                    "minSz": "0.001", "state": "live"}
+        def get_account_config(self):
+            return [{"acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+                     "perm": "read_only,trade", "uid": "test-demo-account-uid"}]
+        def get_balance(self):
+            return [{"uTime": "1800000000000", "details": [
+                {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]}]
+        def get_tickers(self):
+            return [{"instId": "AAA-USDT", "bidPx": "99.95", "askPx": "100",
+                     "bidSz": "100", "askSz": "100", "ts": "1800000000000"}]
+        def get_pending_orders(self, inst_type):
+            return []
+        def get_pending_algo_orders(self, ord_type):
+            return []
+        def get_account_bills(self, *, begin=None, end=None, limit=100):
+            return []
+    authorizer = PortfolioRiskAuthorizer(
+        SnapshotClient(), StateStore(str(tmp_path / "auth.db")), settings,
+        plan_provider=lambda **kwargs: {
+            "instrument": kwargs["instrument"], "size": kwargs["size"],
+            "entry_price": kwargs["entry_price"],
+            "signal_action": "buy", "candle_closed": True, "candle_ts": 1799996400000,
+            "stop_loss": "90", "take_profit": "120",
+        },
+        clock_ms=lambda: 1800000000000,
+    )
+    result = authorizer(instrument="AAA-USDT", requested_size="0.1",
+                        requested_price="100", candle_ts=1799996400000)
+    assert result["entry_allowed"] is True
+    assert result["planned_entry"]["stop_loss"] == "90"
+    assert Decimal(result["planned_entry"]["risk_to_stop_quote"]) <= Decimal("2")
+
+
+def test_portfolio_authorizer_rejects_unconfirmed_candle_before_private_snapshot(tmp_path):
+    from nebula.config import Settings
+    from nebula.risk_authorizer import PortfolioRiskAuthorizer, RiskAuthorizationError
+    from nebula.state import StateStore
+
+    settings = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
+        max_risk_quote=2, max_position_quote=100)
+    class NeverReadClient:
+        def get_account_config(self):
+            raise AssertionError("private snapshot must not be fetched")
+    authorizer = PortfolioRiskAuthorizer(
+        NeverReadClient(), StateStore(str(tmp_path / "unclosed.db")), settings,
+        plan_provider=lambda **kwargs: {
+            "signal_action": "buy", "candle_closed": False, "candle_ts": 123,
+            "stop_loss": "90", "take_profit": "120",
+        },
+        clock_ms=lambda: 1800000000000,
+    )
+    with pytest.raises(RiskAuthorizationError, match="closed-candle"):
+        authorizer(instrument="AAA-USDT", requested_size="0.1",
+                   requested_price="100", candle_ts=123)
+
+
+
+@pytest.mark.parametrize("terminal_state", ["canceled", "mmp_canceled"])
+def test_reconcile_releases_position_lock_after_terminal_zero_fill(terminal_state, tmp_path):
+    client = FakeClient(order=[{
+        "ordId": "123",
+        "clOrdId": "NBZERO",
+        "state": terminal_state,
+        "sz": "0.010",
+        "accFillSz": "0",
+        "avgPx": "",
+        "fee": "0",
+        "feeCcy": "USDT",
+    }])
+    manager = setup(tmp_path, client)
+
+    submit(manager, "NBZERO")
+    result = manager.reconcile("NBZERO")
+
+    assert result["status"] == terminal_state
+    assert manager.state.get_order_snapshot("NBZERO")["cumulative_fill_size"] == "0"
+    assert manager.state.get_position_lock() is None
+
+
+def test_reconcile_keeps_position_lock_after_canceled_partial_fill(tmp_path):
+    client = FakeClient(order=[{
+        "ordId": "123",
+        "clOrdId": "NBPARTIAL",
+        "state": "canceled",
+        "sz": "0.010",
+        "accFillSz": "0.002",
+        "avgPx": "49900",
+        "fee": "-0.01",
+        "feeCcy": "USDT",
+    }])
+    manager = setup(tmp_path, client)
+
+    submit(manager, "NBPARTIAL")
+    result = manager.reconcile("NBPARTIAL")
+
+    assert result["status"] == "canceled"
+    assert manager.state.get_order_snapshot("NBPARTIAL")["cumulative_fill_size"] == "0.002"
+    assert manager.state.get_position_lock()["owner_client_order_id"] == "NBPARTIAL"

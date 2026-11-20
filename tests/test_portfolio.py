@@ -13,12 +13,12 @@ def _snapshot(*, bid="110", balance_qty="1", balance_ts=None, ticker_ts=None,
               acct_lv="1", auto_loan=False, stop="90", realized="0"):
     return {
         "account_config": [{"acctLv": acct_lv, "autoLoan": auto_loan,
-                            "enableSpotBorrow": False, "perm": "read_only"}],
+                            "enableSpotBorrow": False, "perm": "read_only,trade"}],
         "balance": [{"uTime": str(balance_ts or NOW), "details": [
             {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"},
             {"ccy": "AAA", "eq": balance_qty, "availBal": balance_qty, "frozenBal": "0"},
         ]}],
-        "tickers": [{"instId": "AAA-USDT", "bidPx": bid, "askPx": str(Decimal(bid) + 1), "bidSz": "10", "askSz": "10",
+        "tickers": [{"instId": "AAA-USDT", "bidPx": bid, "askPx": str(Decimal(bid) + Decimal("0.1")), "bidSz": "10", "askSz": "10",
                      "ts": str(ticker_ts or NOW)}],
         "position_lock": {"owner_client_order_id": "entry1", "instrument": "AAA-USDT"},
         "position_fills": [{"side": "buy", "fill_size": "1", "fill_price": "100",
@@ -93,9 +93,29 @@ def test_balance_ledger_mismatch_blocks_entry():
 
 def test_unrealized_loss_counts_toward_daily_limit():
     data = _snapshot(bid="40", stop="90", realized="-10")
-    report = _engine().evaluate(**data, now_ms=NOW)
+    report = _engine().evaluate(**data, now_ms=NOW, daily_unrealized_pnl_quote="-60")
     assert Decimal(report["daily_combined_pnl_quote"]) < Decimal("-50")
     assert "daily_loss_including_unrealized_limit_reached" in report["blockers"]
+
+
+def test_open_position_without_utc_daily_mark_fails_closed_instead_of_using_lifetime_unrealized():
+    data = _snapshot(bid="90", stop="80", realized="0")
+    report = _engine().evaluate(**data, now_ms=NOW)
+    assert report["daily_unrealized_pnl_quote"] is None
+    assert report["daily_unrealized_pnl_baseline_available"] is False
+    assert report["daily_combined_pnl_quote"] == "0"
+    assert "daily_unrealized_pnl_baseline_missing" in report["blockers"]
+    assert report["valuation_complete"] is True
+    assert report["entry_allowed"] is False
+
+
+def test_daily_pnl_uses_daily_mark_delta_not_lifetime_inventory_unrealized():
+    data = _snapshot(bid="90", stop="80", realized="-2")
+    report = _engine().evaluate(**data, now_ms=NOW, daily_unrealized_pnl_quote="10")
+    assert report["daily_unrealized_pnl_quote"] == "10"
+    assert report["daily_unrealized_pnl_baseline_available"] is True
+    assert Decimal(report["daily_combined_pnl_quote"]) == Decimal("8")
+    assert Decimal(report["position"]["unrealized_pnl_net_quote"]) < Decimal("0")
 
 
 def test_non_spot_or_auto_borrow_blocks_entry():
@@ -141,7 +161,7 @@ def test_flat_or_missing_position_inventory_fails_closed():
 
 
 def test_planned_entry_risk_includes_entry_exit_fee_and_slippage():
-    data = _snapshot()
+    data = _snapshot(bid="100.9")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
@@ -163,7 +183,7 @@ def test_planned_entry_risk_includes_entry_exit_fee_and_slippage():
 
 
 def test_planned_entry_risk_over_limit_blocks_entry():
-    data = _snapshot()
+    data = _snapshot(bid="100.9")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
@@ -182,7 +202,7 @@ def test_planned_entry_risk_over_limit_blocks_entry():
 
 
 def test_planned_entry_must_have_stop_below_entry_and_target_above():
-    data = _snapshot()
+    data = _snapshot(bid="100.9")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
@@ -208,6 +228,18 @@ def test_spot_borrow_or_withdraw_permission_blocks_entry():
     assert "spot_borrow_enabled" in report["blockers"]
     assert "api_key_withdraw_permission_forbidden" in report["blockers"]
     assert report["entry_allowed"] is False
+
+
+@pytest.mark.parametrize("permission", ["transfer", "loan", "earn", "onchain", "future_scope"])
+def test_execution_key_rejects_permissions_beyond_read_and_trade(permission):
+    data = _snapshot()
+    data["account_config"][0]["perm"] = "read_only,trade," + permission
+    report = _engine().evaluate(**data, now_ms=NOW)
+    assert report["entry_allowed"] is False
+    if permission == "future_scope":
+        assert "api_key_unrecognized_or_unapproved_permission" in report["blockers"]
+    else:
+        assert "api_key_" + permission + "_permission_forbidden" in report["blockers"]
 
 
 def test_unknown_spot_borrow_permission_blocks_entry():
@@ -241,7 +273,7 @@ def test_missing_read_permission_blocks_entry():
 
 
 def test_planned_entry_requires_available_quote_balance():
-    data = _snapshot()
+    data = _snapshot(bid="100.9")
     data["position_lock"] = None
     data["position_fills"] = []
     data["position_context"] = None
@@ -363,3 +395,65 @@ def test_per_position_risk_cannot_exceed_daily_loss_limit():
         PortfolioPolicy(max_daily_loss_quote=Decimal("5"),
                         max_position_risk_quote=Decimal("10"),
                         max_position_notional_quote=Decimal("100"))
+
+
+
+def test_valuation_can_be_complete_while_entry_is_blocked_by_policy():
+    data = _snapshot()
+    report = _engine().evaluate(**data, now_ms=NOW)
+    assert report["valuation_complete"] is True
+    assert report["entry_allowed"] is False
+    assert "position_already_active" in report["blockers"]
+    assert "planned_entry_not_provided" in report["blockers"]
+
+
+
+def test_entry_fill_sync_failure_marks_valuation_incomplete_and_blocks_entry():
+    data = _snapshot()
+    report = _engine().evaluate(
+        **data, now_ms=NOW, position_fill_sync_error="Timeout"
+    )
+    assert "position_fill_sync_failed:Timeout" in report["blockers"]
+    assert report["valuation_complete"] is False
+    assert report["entry_allowed"] is False
+
+
+def test_api_key_must_have_read_and_trade_but_never_withdraw_permission():
+    data = _snapshot()
+    data["position_lock"] = None
+    data["position_fills"] = []
+    data["position_context"] = None
+    data["protection_intent"] = None
+    data["open_algo_orders"] = []
+    data["tickers"] = [{"instId": "AAA-USDT", "bidPx": "100.95", "askPx": "101", "bidSz": "10", "askSz": "10", "ts": str(NOW)}]
+    data["account_config"][0]["perm"] = "read_only"
+    report = _engine().evaluate(**data, now_ms=NOW, planned_entry={
+        "instrument": "AAA-USDT", "size": "1", "entry_price": "101",
+        "stop_loss": "90", "take_profit": "120"})
+    assert "api_key_trade_permission_missing" in report["blockers"]
+    assert report["entry_allowed"] is False
+
+
+
+def test_daily_account_equity_pnl_is_authoritative_and_not_double_counted():
+    data = _snapshot(bid="90", stop="80", realized="-2")
+    report = _engine().evaluate(
+        **data, now_ms=NOW, daily_unrealized_pnl_quote="10",
+        daily_account_pnl_quote="-60", require_daily_account_pnl=True,
+    )
+    assert report["daily_account_pnl_quote"] == "-60"
+    assert report["daily_combined_pnl_quote"] == "-60"
+    assert "daily_loss_including_unrealized_limit_reached" in report["blockers"]
+
+
+def test_required_daily_account_pnl_missing_blocks_new_entry():
+    data = _snapshot()
+    data["position_lock"] = None
+    data["position_fills"] = []
+    data["position_context"] = None
+    data["protection_intent"] = None
+    data["open_algo_orders"] = []
+    report = _engine().evaluate(**data, now_ms=NOW, require_daily_account_pnl=True)
+    assert report["daily_account_pnl_quote"] is None
+    assert "daily_account_pnl_baseline_missing" in report["blockers"]
+    assert report["entry_allowed"] is False
