@@ -287,6 +287,47 @@ def test_real_okx_client_accepts_only_concrete_portfolio_authorizer(tmp_path):
     assert result["status"] == "acknowledged"
     assert client.place_calls == 1
     assert manager.state.get_intent("NBRISK_OK")["status"] == "acknowledged"
+    persisted_plan = manager.state.get_entry_risk_plan("NBRISK_OK")
+    assert persisted_plan["stop_loss"] == "49000"
+    assert persisted_plan["take_profit"] == "52000"
+    assert persisted_plan["risk_to_stop_quote"] == "1.5"
+
+
+def test_real_okx_entry_rejects_authorization_without_protective_levels(tmp_path):
+    from nebula.config import Settings
+    from nebula.risk_authorizer import PortfolioRiskAuthorizer
+
+    client = FakeClient()
+    settings = Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=20, max_position_quote=1000,
+    )
+    client.settings = settings
+
+    class Authorizer(PortfolioRiskAuthorizer):
+        def __init__(self):
+            pass
+
+        def __call__(self, **kwargs):
+            return {
+                "entry_allowed": True,
+                "planned_entry": {
+                    "instrument": kwargs["instrument"],
+                    "size": kwargs["requested_size"],
+                    "entry_price": kwargs["requested_price"],
+                    "risk_to_stop_quote": "1",
+                },
+            }
+
+    manager = DemoOrderManager(
+        client, StateStore(str(tmp_path / "missing-protection-plan.db")),
+        risk_authorizer=Authorizer(),
+    )
+    with pytest.raises(OrderManagerError, match="protective levels"):
+        submit(manager, "NBMISSING_PROTECTION")
+    assert client.place_calls == 0
+    assert manager.state.get_position_lock() is None
 
 
 def test_real_okx_client_rejects_generic_callable_that_fabricates_approval(tmp_path):
