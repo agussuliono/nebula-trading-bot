@@ -295,7 +295,7 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
     from nebula.state import StateStore
 
     settings = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
         max_risk_quote=2, max_position_quote=100, market_data_max_age_ms=30000)
     class SnapshotClient:
         def get_spot_instrument(self, inst_id):
