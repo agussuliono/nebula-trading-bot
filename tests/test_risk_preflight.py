@@ -58,6 +58,7 @@ class SnapshotClient:
             "autoLoan": False,
             "enableSpotBorrow": False,
             "perm": "read_only,trade",
+            "uid": "test-demo-account-uid",
         }]
 
     def get_balance(self):
@@ -82,6 +83,10 @@ class SnapshotClient:
             "askSz": "100",
             "ts": str(NOW_MS),
         }]
+
+    def get_account_bills(self, *, begin=None, end=None, limit=100):
+        self.read_calls.append("account_bills")
+        return []
 
     def get_pending_orders(self, inst_type):
         self.read_calls.append("pending_regular")
@@ -135,7 +140,7 @@ def test_candidate_preflight_uses_private_reads_without_enabling_writes(tmp_path
     assert Decimal(result["authorization"]["planned_entry"]["risk_to_stop_quote"]) <= Decimal("2")
     assert client.read_calls == [
         "instrument_rules", "account_config", "balance", "tickers",
-        "pending_regular", "pending_oco", "pending_conditional",
+        "pending_regular", "pending_oco", "pending_conditional", "account_bills",
     ]
     assert any(
         event["event_type"] == "entry_risk_preflight_approved"
