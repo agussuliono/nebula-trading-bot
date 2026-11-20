@@ -434,7 +434,7 @@ class StateStore:
     def update_protection_intent(self, entry_client_order_id: str, status: str,
                                  exchange_algo_id: str | None = None,
                                  error_type: str | None = None) -> dict[str, Any]:
-        allowed={"submitting","submission_unknown","active","triggered","canceled","failed"}
+        allowed={"submitting","submission_unknown","active","triggered","partially_failed","canceled","failed"}
         if status not in allowed:
             raise ValueError("Unsupported protection state")
         with self._connect() as db:
@@ -445,9 +445,9 @@ class StateStore:
                 raise ValueError("Unknown protection intent")
             # OCO lifecycle is monotonic once active/terminal; stale reads cannot
             # move a triggered/canceled/failed intent back into an earlier state.
-            if row["status"] in {"active", "triggered", "canceled", "failed"} and status in {"submitting", "submission_unknown"}:
+            if row["status"] in {"active", "triggered", "partially_failed", "canceled", "failed"} and status in {"submitting", "submission_unknown"}:
                 raise ValueError("Cannot resubmit a terminal or active OCO intent")
-            if row["status"] in {"triggered", "canceled", "failed"} and status != row["status"]:
+            if row["status"] in {"triggered", "partially_failed", "canceled", "failed"} and status != row["status"]:
                 raise ValueError("Cannot regress or overwrite a terminal OCO state")
             db.execute("""UPDATE protection_intents SET status=?,
                 exchange_algo_id=COALESCE(?,exchange_algo_id),last_error_type=?,updated_at=CURRENT_TIMESTAMP
