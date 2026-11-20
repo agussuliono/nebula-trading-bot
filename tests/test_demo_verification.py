@@ -134,3 +134,30 @@ def test_private_read_timeout_fails_closed_without_retry_or_writes():
     assert result["account_snapshot"] == "incomplete"
     assert result["exchange_writes"] == 0
     assert client.calls.count("get_balance") == 1
+
+
+
+def test_tiny_non_quote_balance_is_not_lost_to_float_underflow():
+    client = ReadOnlyDemoStub(balances=[{"details": [
+        {"ccy": "USDT", "availBal": "100", "frozenBal": "0"},
+        {"ccy": "BTC", "availBal": "1e-1000", "frozenBal": "0"},
+    ]}])
+    result = verify_demo_read_only(client, credentials())
+
+    assert result["status"] == "connected_but_not_ready"
+    assert result["non_quote_holdings"] == ["BTC"]
+    assert "non_quote_asset_balances_present" in result["blockers"]
+
+
+def test_malformed_pending_order_snapshot_fails_closed():
+    class MalformedOrders(ReadOnlyDemoStub):
+        def get_pending_orders(self, inst_type):
+            self.calls.append("get_pending_orders")
+            return {"unexpected": "object"}
+
+    client = MalformedOrders()
+    result = verify_demo_read_only(client, credentials())
+
+    assert result["status"] == "blocked"
+    assert result["account_snapshot"] == "incomplete"
+    assert result["exchange_writes"] == 0
