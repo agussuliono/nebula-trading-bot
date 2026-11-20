@@ -106,7 +106,7 @@ def test_preflight_orchestrator_does_not_read_private_data_without_candidate(
 
     report = run_read_only_preflight(
         client, state, settings_read_only(),
-        bar="1H", entry_plan_policy=policy(),
+        bar="1H", entry_plan_policy=policy(), clock_ms=lambda: NOW_MS,
     )
 
     assert report["status"] == "no_candidate"
@@ -177,7 +177,7 @@ def test_preflight_orchestrator_uses_selected_four_hour_candle_interval(
 
     report = run_read_only_preflight(
         client, state, settings_read_only(),
-        bar="4H", entry_plan_policy=policy(),
+        bar="4H", entry_plan_policy=policy(), clock_ms=lambda: NOW_MS,
     )
 
     assert report["status"] == "approved"
