@@ -59,7 +59,7 @@ def test_append_rejects_wrong_symbol_and_missing_manifest(tmp_path, monkeypatch)
     path, _ = existing_dataset(tmp_path, monkeypatch)
     new = Candle(PROSPECTIVE_CUTOFF_TS + HOUR, 101, 103, 100, 102, 100, True)
     with pytest.raises(BacktestError, match="[Ss]ymbol"):
-        append_prospective_candles(path, "ETH-USDT", "1H", [new])
+        append_prospective_candles(path, "DOGE-USDT", "1H", [new])
     path.with_suffix(".csv.manifest.json").unlink()
     with pytest.raises(FileNotFoundError):
         append_prospective_candles(path, "BTC-USDT", "1H", [new])
