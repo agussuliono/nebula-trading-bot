@@ -94,3 +94,9 @@ This does not yet connect preflight output to automated order submission. It is 
 - GitHub Actions run #190 on `7c89f92482e565341f5d483bd45db9f519ace7b4` completed successfully: **280 tests passed in 2.44s**. Compileall, explicit Demo-off/emergency-stop-on checks, and fail-closed defaults passed; pip cache restored successfully.
 
 The CLI preflight is still an evaluation only. It does not call the order manager or submit any order. The account-exclusivity flag is a user attestation, not an automated exchange guarantee; account-wide P&L reconciliation remains required before production-like risk decisions.
+
+## Order reconciliation correction — 2026-11-20
+
+- Fixed a lifecycle mismatch in `DemoOrderManager.reconcile`: after an exchange-confirmed `canceled`/ `mmp_canceled` order with zero cumulative fill, the manager previously called the local-rejection lock-release method. That method correctly refuses non-`rejected` intents, so the single-position lock remained stuck.
+- Reconciliation now calls `release_terminal_zero_fill_entry_lock`, which independently checks the persisted terminal exchange state and exact zero fill before releasing the lock. Local rejection handling remains separate.
+- Regression coverage checks both canceled terminal states release a zero-fill slot and that a canceled partial fill retains the slot. No order was submitted; tests use local fake clients and SQLite.
