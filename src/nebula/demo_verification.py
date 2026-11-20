@@ -63,7 +63,6 @@ def verify_demo_read_only(client, settings) -> dict:
         report["account_mode"] = (
             "spot" if str(config.get("acctLv")) == "1" else "not_spot_or_unknown"
         )
-        report["api_permissions"] = "present"
         permissions = {
             value.strip().lower()
             for value in str(config.get("perm", "")).split(",")
@@ -75,10 +74,14 @@ def verify_demo_read_only(client, settings) -> dict:
             report["blockers"].append("auto_loan_enabled_or_unknown")
         if config.get("enableSpotBorrow") is not False:
             report["blockers"].append("spot_borrow_enabled_or_unknown")
+        permission_blocked = False
         if not {"read_only", "trade"}.issubset(permissions):
             report["blockers"].append("api_key_missing_read_or_trade_permission")
+            permission_blocked = True
         if "withdraw" in permissions:
             report["blockers"].append("api_key_has_withdraw_permission")
+            permission_blocked = True
+        report["api_permissions"] = "not_compliant" if permission_blocked else "compliant"
 
         balances = client.get_balance()
         regular = client.get_pending_orders("SPOT")
