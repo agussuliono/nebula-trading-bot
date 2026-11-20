@@ -384,3 +384,20 @@ def test_entry_fill_sync_failure_marks_valuation_incomplete_and_blocks_entry():
     assert "position_fill_sync_failed:Timeout" in report["blockers"]
     assert report["valuation_complete"] is False
     assert report["entry_allowed"] is False
+
+
+def test_api_key_must_have_read_and_trade_but_never_withdraw_permission():
+    data = _snapshot()
+    data["position_lock"] = None
+    data["position_fills"] = []
+    data["position_context"] = None
+    data["protection_intent"] = None
+    data["open_algo_orders"] = []
+    data["tickers"] = [{"instId": "AAA-USDT", "bidPx": "100", "askPx": "101", "bidSz": "10", "askSz": "10", "ts": str(NOW)}]
+    data["account_config"][0]["perm"] = "read_only"
+    report = _engine().evaluate(**data, now_ms=NOW, planned_entry={
+        "instrument": "AAA-USDT", "size": "1", "entry_price": "101",
+        "stop_loss": "90", "take_profit": "120"})
+    assert "api_key_trade_permission_missing" in report["blockers"]
+    assert report["entry_allowed"] is False
+
