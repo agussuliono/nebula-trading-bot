@@ -30,14 +30,16 @@ def rank_candidates(items: list[MarketCandidate], *, min_quote_volume: float,
             or min_data_points < 1):
         raise ValueError("Invalid scanner thresholds")
     eligible = []
-    seen = set()
+    counts = {}
+    for item in items:
+        if isinstance(item, MarketCandidate):
+            counts[item.inst_id] = counts.get(item.inst_id, 0) + 1
     for x in items:
         if not isinstance(x, MarketCandidate) or not SYMBOL_RE.fullmatch(str(x.inst_id)):
             continue
-        if x.inst_id in seen:
+        if counts.get(x.inst_id, 0) != 1:
             # Duplicate instrument records are ambiguous; exclude the symbol.
             continue
-        seen.add(x.inst_id)
         values = (x.quote_volume, x.spread_pct, x.volatility_pct)
         if (not all(math.isfinite(v) for v in values)
                 or isinstance(x.listing_age_days, bool) or not isinstance(x.listing_age_days, int)
