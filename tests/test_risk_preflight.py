@@ -32,11 +32,12 @@ def candidate(**overrides):
 
 
 class SnapshotClient:
-    def __init__(self, ask="100", min_size="0.001", bid_offset="0.05"):
+    def __init__(self, ask="100", min_size="0.001", bid_offset="0.05", bills=None):
         self.ask = ask
         self.min_size = min_size
         self.bid_offset = bid_offset
         self.read_calls = []
+        self.bills = bills or []
 
     def get_spot_instrument(self, inst_id):
         self.read_calls.append("instrument_rules")
@@ -309,3 +310,39 @@ def test_preflight_refuses_unconfirmed_demo_account_exclusivity_before_reads(tmp
     assert result["status"] == "rejected"
     assert "exclusivity" in result["reason"].lower()
     assert client.read_calls == []
+
+
+
+def test_daily_baseline_refuses_to_start_after_account_activity(tmp_path):
+    client = SnapshotClient(bills=[{
+        "billId": "123", "ccy": "USDT", "balChg": "-1", "bal": "999",
+        "type": "2", "subType": "1", "ts": str(NOW_MS - 1000),
+        "instId": "AAA-USDT",
+    }])
+    state = StateStore(str(tmp_path / "activity-before-baseline.sqlite3"))
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, read_only_settings(),
+        plan_provider=lambda **kwargs: pytest.fail("candidate plan should not be reached"),
+        clock_ms=lambda: NOW_MS,
+    )
+    result = CandidateRiskPreflight(authorizer, state).evaluate(candidate())
+    assert result["status"] == "rejected"
+    assert "baseline missing after account activity" in result["reason"].lower()
+    assert client.read_calls.count("account_bills") == 1
+
+
+def test_non_spot_or_transfer_bill_blocks_authorization(tmp_path):
+    client = SnapshotClient(bills=[{
+        "billId": "124", "ccy": "USDT", "balChg": "100", "bal": "1100",
+        "type": "1", "subType": "11", "ts": str(NOW_MS - 1000),
+        "instId": "",
+    }])
+    state = StateStore(str(tmp_path / "transfer-bill.sqlite3"))
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, read_only_settings(),
+        plan_provider=lambda **kwargs: pytest.fail("candidate plan should not be reached"),
+        clock_ms=lambda: NOW_MS,
+    )
+    result = CandidateRiskPreflight(authorizer, state).evaluate(candidate())
+    assert result["status"] == "rejected"
+    assert "baseline missing after account activity" in result["reason"].lower()
