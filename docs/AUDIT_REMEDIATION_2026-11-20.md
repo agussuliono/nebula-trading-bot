@@ -82,3 +82,15 @@ This milestone is a local/fake-backed integration boundary only. No API credenti
 - All tests used local fakes and SQLite. No actual OKX credentials, private account requests, or exchange write requests were used in this development session.
 
 This does not yet connect preflight output to automated order submission. It is a risk decision only; Demo order lifecycle, OCO protection, partial-fill reconciliation, and restart recovery remain separate blocked milestones.
+
+## Read-only CLI orchestration and final preflight hardening
+
+- Added `preflight-once`, requiring explicit paired `--plan-risk-quote` and `--plan-max-notional-quote` limits. It runs the public market scan, selects the highest-ranked buy candidate, and then performs read-only portfolio preflight. If no valid candidate exists, it does not call private account endpoints.
+- The orchestrator passes the selected bar interval into candle freshness validation (1H/4H/1D); this avoids treating 4H/1D candles as 1H candles.
+- Corrected the `RuntimePolicy` default `min_data_points` from 50 to 51 so the default is consistent with the required `slow_ema + 1` data points.
+- Added `NEBULA_DEMO_ACCOUNT_EXCLUSIVE`, default false. Risk authorization refuses approval unless the user explicitly confirms that the Demo account is dedicated to NEBULA and has a clean local P&L baseline. This is necessary because daily realized P&L is currently tracked in the local NEBULA ledger, not reconstructed from every account-wide exchange bill/fill. Do not set this true if the account is also used manually/by another bot or has untracked same-day activity.
+- Tightened `DemoOrderManager`: exchange-backed buys now require a concrete `PortfolioRiskAuthorizer` instance, not an arbitrary callback that could fabricate an approval.
+- Regression tests cover CLI flag validation, no-candidate private-read avoidance, read-only preflight approval, 4H candle age, account exclusivity default/gate, and concrete-authorizer enforcement.
+- GitHub Actions run #190 on `7c89f92482e565341f5d483bd45db9f519ace7b4` completed successfully: **280 tests passed in 2.44s**. Compileall, explicit Demo-off/emergency-stop-on checks, and fail-closed defaults passed; pip cache restored successfully.
+
+The CLI preflight is still an evaluation only. It does not call the order manager or submit any order. The account-exclusivity flag is a user attestation, not an automated exchange guarantee; account-wide P&L reconciliation remains required before production-like risk decisions.
