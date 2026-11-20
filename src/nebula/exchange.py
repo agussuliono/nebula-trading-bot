@@ -9,7 +9,10 @@ from urllib.parse import urlencode
 
 import requests
 
+from decimal import Decimal
+
 from .config import DEMO_FLAG, DEMO_REST_URL, Settings, SafetyError
+from .instruments import InstrumentRuleError, SpotInstrument
 
 
 class OkxError(RuntimeError):
@@ -42,13 +45,23 @@ class OkxDemoClient:
         ("POST", "/api/v5/trade/cancel-algos"),
     }
 
+    @property
+    def base_url(self) -> str:
+        """Expose the fixed Demo host as a read-only compatibility property."""
+        return DEMO_REST_URL
+
     def __init__(self, settings: Settings, session=None, timeout: float = 10.0):
-        if timeout <= 0:
-            raise ValueError("timeout must be positive")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise ValueError("timeout must be a finite positive number")
+        try:
+            timeout_value = float(timeout)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("timeout must be a finite positive number") from exc
+        if not math.isfinite(timeout_value) or timeout_value <= 0:
+            raise ValueError("timeout must be a finite positive number")
         self.settings = settings
         self.session = session or requests.Session()
-        self.timeout = timeout
-        self.base_url = DEMO_REST_URL
+        self.timeout = timeout_value
         self._startup_entry_permit = None
         self._startup_entry_state = None
 
@@ -115,7 +128,7 @@ class OkxDemoClient:
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False) if payload is not None else ""
         try:
             response = self.session.request(
-                method.upper(), self.base_url + request_path,
+                method.upper(), DEMO_REST_URL + request_path,
                 headers=self._headers(method, request_path, body, private),
                 data=body or None, timeout=self.timeout,
                 # Never let requests replay authenticated OKX headers to a redirect
@@ -320,26 +333,58 @@ class OkxDemoClient:
             raise OkxError(f"OKX algo cancel rejected {result[0].get('sCode')}: {result[0].get('sMsg', '')}")
         return result
 
+    def _get_validated_spot_instrument(self, inst_id: str) -> SpotInstrument:
+        """Fetch and validate current rules for a live USDT-quoted Spot market."""
+        if not isinstance(inst_id, str) or not inst_id.endswith("-USDT"):
+            raise ValueError("V1 orders require a USDT-quoted Spot instrument")
+        try:
+            spec = SpotInstrument.from_okx(self.get_spot_instrument(inst_id))
+        except (InstrumentRuleError, AttributeError, TypeError) as exc:
+            raise ValueError("OKX Spot instrument specification is invalid") from exc
+        if spec.inst_id != inst_id or spec.quote_ccy != "USDT":
+            raise ValueError("Instrument does not match the requested USDT Spot market")
+        return spec
+
+    @staticmethod
+    def _validate_spot_order_values(spec: SpotInstrument, *, side: str,
+                                    size: str, price: str) -> tuple[str, str]:
+        """Reject values requiring normalization; never silently alter an order."""
+        try:
+            normalized_size, normalized_price = spec.normalize_order(side, size, price)
+        except InstrumentRuleError as exc:
+            raise ValueError(str(exc)) from exc
+        if Decimal(str(size)) != Decimal(normalized_size):
+            raise ValueError("Order size does not comply with OKX lotSz")
+        if Decimal(str(price)) != Decimal(normalized_price):
+            raise ValueError("Order price does not comply with OKX tickSz")
+        return normalized_size, normalized_price
+
     def place_spot_oco_exit(self, *, inst_id: str, size: str, take_profit: str,
                             stop_loss: str, algo_client_order_id: str):
         """Place a Spot sell OCO for already-filled base-asset quantity only."""
         self.settings.validate_order_permission()
-        from decimal import Decimal, InvalidOperation
-        if not inst_id or not inst_id.endswith("-USDT"):
-            raise ValueError("V1 protective exits require a USDT-quoted Spot instrument")
         if not algo_client_order_id or len(algo_client_order_id) > 32 or not algo_client_order_id.isalnum():
             raise ValueError("algo_client_order_id must be 1..32 alphanumeric characters")
         try:
-            qty, tp, sl = map(lambda x: Decimal(str(x)), (size, take_profit, stop_loss))
+            qty, tp, sl = map(Decimal, (str(size), str(take_profit), str(stop_loss)))
         except (InvalidOperation, TypeError, ValueError) as exc:
             raise ValueError("OCO quantity and prices must be valid decimals") from exc
         if not all(x.is_finite() for x in (qty, tp, sl)) or qty <= 0 or sl <= 0 or tp <= sl:
             raise ValueError("OCO requires finite positive quantity/prices and take_profit > stop_loss")
+        spec = self._get_validated_spot_instrument(inst_id)
+        validated_size, validated_tp = self._validate_spot_order_values(
+            spec, side="sell", size=size, price=take_profit
+        )
+        validated_size_sl, validated_sl = self._validate_spot_order_values(
+            spec, side="sell", size=size, price=stop_loss
+        )
+        if validated_size != validated_size_sl:
+            raise ValueError("OCO quantity normalization is inconsistent")
         payload = {
             "instId": inst_id, "tdMode": "cash", "side": "sell", "ordType": "oco",
-            "sz": format(qty, "f"), "algoClOrdId": algo_client_order_id,
-            "tpTriggerPx": format(tp, "f"), "tpOrdPx": "-1", "tpTriggerPxType": "last",
-            "slTriggerPx": format(sl, "f"), "slOrdPx": "-1", "slTriggerPxType": "last",
+            "sz": validated_size, "algoClOrdId": algo_client_order_id,
+            "tpTriggerPx": validated_tp, "tpOrdPx": "-1", "tpTriggerPxType": "last",
+            "slTriggerPx": validated_sl, "slOrdPx": "-1", "slTriggerPxType": "last",
         }
         result = self.request("POST", "/api/v5/trade/order-algo", payload=payload, private=True)
         if result and result[0].get("sCode", "0") != "0":
@@ -352,15 +397,13 @@ class OkxDemoClient:
             raise ValueError("side must be buy or sell")
         if not client_order_id or len(client_order_id) > 32 or not client_order_id.isalnum():
             raise ValueError("client_order_id must be 1..32 alphanumeric characters")
-        try:
-            numeric_size, numeric_price = float(size), float(price)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("size and price must be numeric") from exc
-        if not math.isfinite(numeric_size) or not math.isfinite(numeric_price) or numeric_size <= 0 or numeric_price <= 0:
-            raise ValueError("size and price must be finite and positive")
+        spec = self._get_validated_spot_instrument(inst_id)
+        validated_size, validated_price = self._validate_spot_order_values(
+            spec, side=side, size=size, price=price
+        )
         payload = {
             "instId": inst_id, "tdMode": "cash", "side": side,
-            "ordType": "limit", "sz": str(size), "px": str(price),
+            "ordType": "limit", "sz": validated_size, "px": validated_price,
             "clOrdId": client_order_id,
         }
         # No retry here. A timeout can occur after exchange acceptance.
