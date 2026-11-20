@@ -58,3 +58,14 @@ A subsequent review of the authenticated HTTP boundary, persistent OCO state tra
 Added regression tests cover 302/307 redirects on private GET/POST, retry of a locally blocked OCO after explicit safety-gate correction, refusal to reset an ambiguous OCO, and exact tiny-fill lock retention. All exchange interactions in these tests use local fakes; no API credential or exchange write request is used.
 
 Verification for branch head `22b398f4e1edce0b569bc55d6327fef3d148badc`: GitHub Actions run #143 completed successfully. `pytest -q` reported **257 passed in 2.27s**; compileall, explicit Demo-off/emergency-stop-on checks, and fail-closed default checks all passed. The pip cache restored successfully (`Cache hit`). Tests used no OKX credentials and submitted no exchange write request.
+
+## Risk preflight orchestration — next milestone
+
+- Added `CandidateRiskPreflight` as a separate boundary between a read-only ATR candidate and `PortfolioRiskAuthorizer`. It validates a confirmed buy candidate, positive finite size/prices, stop < entry < target, exact zero submitted orders, and records approved/rejected outcomes in the local audit ledger.
+- The preflight calls only the portfolio authorizer's private-read path. It has no order manager and does not expose submit/cancel methods.
+- Separated authenticated private-read permission from the Demo write gate. A user can inspect risk using a Demo read/trade key while `NEBULA_ENABLE_DEMO_ORDERS=false` and the emergency stop remains active. The order-manager authorization path still requires the full Demo write gate.
+- Strengthened the order authorizer so the provider's instrument, size, and entry price must exactly match the normalized order; stop/target must be finite and ordered.
+- Strengthened portfolio checks so a candidate price must be at or above the latest ask and no more than the configured slippage allowance above it. A candidate based on a stale/moved market is rejected.
+- Added regression tests for approved read-only preflight, malformed candidate rejection before private reads, stale-price rejection, boolean order-count rejection, mismatched provider instrument, and the unchanged Demo write gate.
+
+This milestone is a local/fake-backed integration boundary only. No API credentials, private OKX account reads, or exchange writes were used in this development session. Real Demo private-read verification remains a later separately authorized step.
