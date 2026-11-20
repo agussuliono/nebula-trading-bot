@@ -86,5 +86,6 @@ def test_preflight_once_accepts_paired_limits_and_invokes_read_only_orchestrator
     assert calls["state"] == "state"
     assert calls["settings"] is settings
     assert calls["bar"] == "1H"
-    assert str(calls["risk_budget"]) == "5"
-    assert str(calls["max_notional"]) == "100"
+    from decimal import Decimal
+    assert Decimal(str(calls["risk_budget"])) == Decimal("5")
+    assert Decimal(str(calls["max_notional"])) == Decimal("100")
