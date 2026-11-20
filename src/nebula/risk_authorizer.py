@@ -130,9 +130,16 @@ class PortfolioRiskAuthorizer:
         ledger.save_bills(bills)
         for bill in bills:
             inst_id = str(bill.get("instId") or "")
+            instrument_parts = inst_id.split("-")
+            # type=2 means "trade", not necessarily Spot. OKX also records
+            # margin/derivative trade bills under type=2, so require the
+            # documented instType field explicitly before treating the bill
+            # as an internal Spot trade with no external cash flow.
             if (str(bill.get("type")) != "2"
-                    or len(inst_id.split("-")) != 2
-                    or not inst_id.endswith("-USDT")):
+                    or str(bill.get("instType") or "").upper() != "SPOT"
+                    or len(instrument_parts) != 2
+                    or not instrument_parts[0]
+                    or instrument_parts[1] != "USDT"):
                 raise RiskAuthorizationError(
                     "Account bill contains transfer, non-Spot, or unclassified activity"
                 )
