@@ -91,6 +91,8 @@ class AccountLedger:
             balance = _decimal(bill["bal"], "bal")
             ts = int(_decimal(bill["ts"], "ts", positive=True))
             raw = json.dumps(bill, sort_keys=True, separators=(",", ":"))
+            economic = (str(bill["ccy"]), str(change), str(balance), str(bill["type"]),
+                        str(bill["subType"]), ts)
             with self.state._connect() as db:
                 old = db.execute("SELECT raw_json FROM account_bills WHERE bill_id=?",
                                  (bill_id,)).fetchone()
