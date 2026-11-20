@@ -38,3 +38,9 @@ Working branch: `audit/fix-safety-gates-2026-11-20`
 ## Verification
 
 New tests cover API key permission requirements and risk authorizer allow/deny behavior. The latest branch head must receive a completed GitHub Actions run before this remediation batch is marked verified; no test count is inferred from commit creation.
+
+
+## Additional strategy-input hardening
+- The EMA signal component now validates the exact nine-field OKX candle shape, strictly newest-first unique timestamps, finite positive OHLC values, internally consistent high/low ranges, and confirmation flags limited to 0/1.
+- EMA inputs must be finite positive prices; periods must be integer values satisfying 0 < fast < slow <= 500.
+- This is input-integrity hardening only. It does not improve or establish strategy profitability, and the EMA strategy remains research-only and not approved for automated orders.
