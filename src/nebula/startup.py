@@ -120,6 +120,33 @@ class StartupRecovery:
                 if not lock or lock["owner_client_order_id"] != cid:
                     errors.append("active_entry_without_position_lock:" + cid)
 
+        fills = db.execute(
+            "SELECT instrument,exchange_order_id,client_order_id,side FROM fills"
+        ).fetchall()
+        for fill in fills:
+            intent_matches = db.execute(
+                "SELECT client_order_id,instrument,side FROM intents WHERE exchange_order_id=?",
+                (fill["exchange_order_id"],),
+            ).fetchall()
+            child_matches = db.execute(
+                "SELECT instrument FROM exit_child_orders WHERE exchange_order_id=?",
+                (fill["exchange_order_id"],),
+            ).fetchall()
+            if len(intent_matches) + len(child_matches) != 1:
+                errors.append("fill_order_link_missing_or_ambiguous:" + fill["exchange_order_id"])
+                continue
+            if intent_matches:
+                parent = intent_matches[0]
+                if (parent["instrument"] != fill["instrument"]
+                        or parent["side"] != fill["side"]
+                        or (fill["client_order_id"]
+                            and fill["client_order_id"] != parent["client_order_id"])):
+                    errors.append("fill_order_link_mismatch:" + fill["exchange_order_id"])
+            else:
+                child = child_matches[0]
+                if child["instrument"] != fill["instrument"] or fill["side"] != "sell":
+                    errors.append("fill_child_order_link_mismatch:" + fill["exchange_order_id"])
+
         protections = db.execute(
             "SELECT entry_client_order_id,instrument FROM protection_intents"
         ).fetchall()
