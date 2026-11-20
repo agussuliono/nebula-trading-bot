@@ -58,7 +58,7 @@ def test_append_rejects_manifest_hash_mismatch(tmp_path, monkeypatch):
 def test_append_rejects_wrong_symbol_and_missing_manifest(tmp_path, monkeypatch):
     path, _ = existing_dataset(tmp_path, monkeypatch)
     new = Candle(PROSPECTIVE_CUTOFF_TS + HOUR, 101, 103, 100, 102, 100, True)
-    with pytest.raises(BacktestError, match="symbol"):
+    with pytest.raises(BacktestError, match="[Ss]ymbol"):
         append_prospective_candles(path, "ETH-USDT", "1H", [new])
     path.with_suffix(".csv.manifest.json").unlink()
     with pytest.raises(FileNotFoundError):
