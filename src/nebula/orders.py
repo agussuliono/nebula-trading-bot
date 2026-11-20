@@ -183,8 +183,13 @@ class DemoOrderManager:
             return self.state.get_intent(client_order_id)
 
         self.state.update_intent(client_order_id, status, order.get("ordId"))
-        if intent["side"] == "buy" and status == "canceled" and snapshot["cumulative_fill_size"] == "0":
-            self.state.release_rejected_entry_lock(client_order_id)
+        if (intent["side"] == "buy"
+                and status in {"canceled", "mmp_canceled"}
+                and snapshot["cumulative_fill_size"] == "0"):
+            # This is an exchange-confirmed terminal zero-fill, not a local
+            # rejection. Use the state transition that validates both the
+            # persisted intent and terminal exchange snapshot before unlocking.
+            self.state.release_terminal_zero_fill_entry_lock(client_order_id)
         self.state.record_event("order_reconciled", client_order_id,
                                 {"state": status, "acc_fill_sz": snapshot["cumulative_fill_size"],
                                  "avg_px": snapshot["average_fill_price"], "fee": snapshot["fee"],
