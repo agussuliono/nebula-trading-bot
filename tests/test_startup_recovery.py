@@ -156,6 +156,8 @@ def test_active_protection_must_match_fresh_exchange_snapshot(tmp_path):
             ]}]
 
         def get_pending_algo_orders(self, ord_type="oco"):
+            if ord_type != "oco":
+                return []
             return [{
                 "instId": "BTC-USDT", "algoClOrdId": "NBPSTARTUP",
                 "algoId": "90001", "state": "live",
