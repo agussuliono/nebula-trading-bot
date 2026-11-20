@@ -1,13 +1,16 @@
 """Read-only, one-cycle market runtime for NEBULA V1.
 
-This module intentionally does not import or call an order manager. It can only
-fetch public market data, evaluate confirmed candles, and persist analysis events.
+This module intentionally does not import or call an order manager. It fetches
+public market data, evaluates confirmed candles, and may produce a candidate
+entry plan. It never authorizes or submits an exchange order.
 """
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import math
 
+from .entry_plan import EntryPlanPolicy, build_entry_plan
+from .instruments import SpotInstrument
 from .scanner import build_candidates, candle_range_volatility, rank_candidates
 from .strategy import trend_signal, closed_candles
 
@@ -27,6 +30,7 @@ class RuntimePolicy:
     slow_ema: int = 50
     max_candle_age_intervals: int = 2
     max_ticker_age_ms: int = 30_000
+    entry_plan_policy: EntryPlanPolicy | None = None
 
     def __post_init__(self):
         if self.bar not in {"1H", "4H", "1D"}:
@@ -46,8 +50,15 @@ class RuntimePolicy:
             raise ValueError("invalid scanner thresholds")
         if self.min_listing_age_days < 0 or self.min_data_points < self.slow_ema + 1:
             raise ValueError("invalid listing age or data point minimum")
-        if self.max_candle_age_intervals < 1 or isinstance(self.max_ticker_age_ms, bool) or not isinstance(self.max_ticker_age_ms, int) or self.max_ticker_age_ms <= 0:
+        if (isinstance(self.max_candle_age_intervals, bool)
+                or not isinstance(self.max_candle_age_intervals, int)
+                or self.max_candle_age_intervals < 1
+                or isinstance(self.max_ticker_age_ms, bool)
+                or not isinstance(self.max_ticker_age_ms, int)
+                or self.max_ticker_age_ms <= 0):
             raise ValueError("candle age intervals and ticker age must be positive")
+        if self.entry_plan_policy is not None and not isinstance(self.entry_plan_policy, EntryPlanPolicy):
+            raise ValueError("entry_plan_policy must be an EntryPlanPolicy or None")
 
 
 class RuntimeErrorSafe(RuntimeError):
@@ -55,7 +66,7 @@ class RuntimeErrorSafe(RuntimeError):
 
 
 class ReadOnlyRuntime:
-    """Runs one public-data-only scan/signal cycle; never sends orders."""
+    """Runs one public-data-only scan/signal/plan cycle; never sends orders."""
 
     BAR_MS = {"1H": 3_600_000, "4H": 14_400_000, "1D": 86_400_000}
 
@@ -95,6 +106,23 @@ class ReadOnlyRuntime:
                                      "action": action, "reason": reason})
         return inserted
 
+    def _candidate_plan(self, *, instrument_row, ticker, candles, signal, now_ms):
+        if self.policy.entry_plan_policy is None:
+            return None, "disabled_not_configured"
+        try:
+            spec = SpotInstrument.from_okx(instrument_row)
+            ask = ticker.get("askPx")
+            if ask in (None, ""):
+                raise ValueError("fresh ticker ask price is missing")
+            plan = build_entry_plan(
+                candles=candles, signal=signal, entry_price=ask,
+                instrument=spec, policy=self.policy.entry_plan_policy,
+                now_ms=now_ms, bar_ms=self.BAR_MS[self.policy.bar],
+            )
+            return plan, "candidate_only_not_authorized"
+        except Exception as exc:
+            return None, "rejected:" + type(exc).__name__
+
     def run_once(self) -> dict:
         now = self._now()
         now_ms = int(now.timestamp() * 1000)
@@ -111,6 +139,8 @@ class ReadOnlyRuntime:
         raw_candidates = build_candidates(instruments, tickers, now_ms=now_ms,
                                            max_ticker_age_ms=self.policy.max_ticker_age_ms)
         tick_by_id = {x.get("instId"): x for x in tickers if isinstance(x, dict) and x.get("instId")}
+        instrument_by_id = {x.get("instId"): x for x in instruments
+                            if isinstance(x, dict) and x.get("instId")}
         enriched = []
         candles_by_id = {}
         stale = []
@@ -145,7 +175,7 @@ class ReadOnlyRuntime:
                                                 candidate.listing_age_days, points))
             except Exception as exc:
                 errors.append({"instrument": candidate.inst_id,
-                               "error_type": type(exc).__name__})
+                               "error_type": type(exc).__name__, "stage": "candles"})
 
         ranked = rank_candidates(
             enriched, min_quote_volume=self.policy.min_quote_volume,
@@ -161,6 +191,7 @@ class ReadOnlyRuntime:
         for candidate in ranked:
             try:
                 candles = candles_by_id[candidate.inst_id]
+                ticker = tick_by_id[candidate.inst_id]
                 signal = trend_signal(candles, self.policy.fast_ema, self.policy.slow_ema)
                 if signal.candle_ts <= 0:
                     continue
@@ -171,9 +202,18 @@ class ReadOnlyRuntime:
                     blocked_reason = "position_already_active"
                 elif signal.action == "buy" and breaker_status and breaker_status["halted"]:
                     blocked_reason = "risk_circuit_breaker_halted"
+
+                candidate_plan = None
+                plan_status = "not_applicable"
+                if signal.action == "buy" and not blocked_reason:
+                    candidate_plan, plan_status = self._candidate_plan(
+                        instrument_row=instrument_by_id.get(candidate.inst_id),
+                        ticker=ticker, candles=candles, signal=signal, now_ms=now_ms,
+                    )
+
                 reports.append({
                     "instrument": candidate.inst_id,
-                    "last_price": tick_by_id.get(candidate.inst_id, {}).get("last"),
+                    "last_price": ticker.get("last"),
                     "quote_volume_24h": candidate.quote_volume,
                     "spread_pct": candidate.spread_pct,
                     "volatility_pct": candidate.volatility_pct,
@@ -184,11 +224,14 @@ class ReadOnlyRuntime:
                     "reason": signal.reason,
                     "new_signal": is_new,
                     "blocked_reason": blocked_reason,
+                    "candidate_entry_plan": candidate_plan,
+                    "entry_plan_status": plan_status,
+                    "authorization": "not_requested_read_only_runtime",
                     "execution": "not_submitted_read_only_runtime",
                 })
             except Exception as exc:
                 errors.append({"instrument": candidate.inst_id,
-                               "error_type": type(exc).__name__, "stage": "signal"})
+                               "error_type": type(exc).__name__, "stage": "signal_or_plan"})
 
         result = {
             "mode": "read_only_analysis",
