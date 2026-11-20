@@ -48,6 +48,17 @@ class OkxDemoClient:
         self.session = session or requests.Session()
         self.timeout = timeout
         self.base_url = DEMO_REST_URL
+        self._startup_entry_permit = None
+        self._startup_entry_state = None
+
+    def install_startup_entry_permit(self, permit, state_store):
+        from .entry_gate import StartupEntryPermit
+        if not isinstance(permit, StartupEntryPermit):
+            raise SafetyError("A valid StartupRecovery permit is required")
+        if self._startup_entry_permit is not None:
+            raise SafetyError("A startup permit is already bound to this client")
+        self._startup_entry_permit = permit
+        self._startup_entry_state = state_store
 
     @staticmethod
     def _timestamp() -> str:
@@ -85,6 +96,15 @@ class OkxDemoClient:
                 self.settings.validate_cancel_permission()
             else:
                 self.settings.validate_order_permission()
+            # Final HTTP-boundary check prevents bypass through request() itself.
+            if path == "/api/v5/trade/order" and payload.get("side") == "buy":
+                permit = self._startup_entry_permit
+                if permit is None:
+                    raise SafetyError("Spot entry blocked: clean startup recovery permit is missing")
+                try:
+                    permit.authorize_request(self, payload)
+                except Exception as exc:
+                    raise SafetyError("Spot entry blocked by startup recovery gate") from exc
         else:
             raise SafetyError("Endpoint is not allowlisted for NEBULA V1: " + method + " " + path)
         query = f"?{urlencode(params, doseq=True)}" if params else ""
