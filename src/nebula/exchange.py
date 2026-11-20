@@ -95,7 +95,13 @@ class OkxDemoClient:
                 method.upper(), self.base_url + request_path,
                 headers=self._headers(method, request_path, body, private),
                 data=body or None, timeout=self.timeout,
+                # Never let requests replay authenticated OKX headers to a redirect
+                # target or transparently resubmit an order after a 307/308 response.
+                allow_redirects=False,
             )
+            status_code = getattr(response, "status_code", None)
+            if isinstance(status_code, int) and 300 <= status_code < 400:
+                raise OkxError("Unexpected HTTP redirect; automatic redirects are disabled")
             response.raise_for_status()
             data = response.json()
         except requests.Timeout as exc:
