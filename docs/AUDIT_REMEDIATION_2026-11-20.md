@@ -119,3 +119,11 @@ The CLI preflight is still an evaluation only. It does not call the order manage
 - Exchange-backed OCO preparation now synchronizes all entry trade-level fills, requires their gross sum to reconcile exactly with the order snapshot, and calculates net base inventory after base-currency fees. The OCO quantity is based on that net inventory.
 - The protection gate also validates the fee-adjusted average inventory cost against the approved stop/target. Missing, incomplete, conflicting, unsupported-fee-currency, or non-reconciling fill ledgers block OCO preparation.
 - Added fake-backed regression tests for base-fee net quantity and incomplete fill-history blocking. No exchange writes were used.
+
+## OCO partial-state and pre-submit inventory gate
+
+- Reviewed OKX V5 Algo Order Details documentation. It explicitly distinguishes `partially_effective` and `partially_failed` from `live`, `effective`, and `order_failed`; it also exposes spawned child order IDs through `ordIdList`. Reference: https://www.okx.com/docs-v5/en/ (Algo Trading → GET / Algo order details).
+- Corrected reconciliation so `partially_effective` is no longer mislabeled as a fully live OCO. It enters the triggered/child-reconciliation path and keeps the position lock if no child order is visible yet.
+- Added a durable `partially_failed` protection state. It cannot be resubmitted or regressed to active, but the bot continues read-only reconciliation because some child orders may already exist.
+- Added a last-moment exchange-backed pre-submit gate: fetch fresh Spot balance and regular/algo pending orders; require available base balance to cover the exact OCO size and no existing orders for that instrument. Any read failure, insufficient balance, or outstanding order blocks the OCO POST and leaves the durable intent reserved.
+- Added regression tests for both partial algo states, monotonic state transitions, insufficient available base, and outstanding orders. No exchange writes were executed.
