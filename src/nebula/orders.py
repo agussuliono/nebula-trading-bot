@@ -53,7 +53,7 @@ class DemoOrderManager:
             # controls. Real exchange clients must use the concrete fail-closed
             # authorizer that owns the private snapshot and risk-evaluation path.
             from .risk_authorizer import PortfolioRiskAuthorizer
-            if not isinstance(self.risk_authorizer, PortfolioRiskAuthorizer):
+            if type(self.risk_authorizer) is not PortfolioRiskAuthorizer:
                 raise OrderManagerError(
                     "No integrated PortfolioRiskAuthorizer; refusing Spot entry"
                 )
