@@ -190,6 +190,20 @@ class DemoProtectionManager:
             cursor = next_cursor
         raise ProtectionManagerError("Fill history exceeds safe pagination limit; ledger is incomplete")
 
+    def sync_entry_fills(self, entry_client_order_id: str) -> int:
+        """Synchronize entry executions before portfolio inventory is valued."""
+        lock = self.state.get_position_lock()
+        if not lock or lock.get("owner_client_order_id") != entry_client_order_id:
+            raise ProtectionManagerError("Entry does not own the active position lock")
+        entry = self.state.get_intent(entry_client_order_id)
+        snapshot = self.state.get_order_snapshot(entry_client_order_id)
+        if not entry or entry.get("side") != "buy" or not snapshot:
+            raise ProtectionManagerError("A reconciled Spot entry and order snapshot are required")
+        order_id = snapshot.get("exchange_order_id") or entry.get("exchange_order_id")
+        if not order_id or not str(order_id).isdigit():
+            raise ProtectionManagerError("Entry exchange order ID is unavailable")
+        return self._ingest_order_fills(entry["instrument"], str(order_id))
+
     def reconcile_exit_children(self, entry_client_order_id: str, *,
                                 child_order_ids: list[str] | None = None,
                                 dust_limit: str = "0") -> dict:
