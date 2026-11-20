@@ -77,14 +77,16 @@ def build_candidates(instruments: list[dict], tickers: list[dict], *, now_ms: in
             ticker_groups.setdefault(str(inst_id), []).append(row)
 
     out = []
-    seen_instruments = set()
+    instrument_groups = {}
+    for inst in instruments:
+        if isinstance(inst, dict) and inst.get("instId"):
+            instrument_groups.setdefault(str(inst["instId"]), []).append(inst)
     for inst in instruments:
         if not isinstance(inst, dict):
             continue
         inst_id = str(inst.get("instId") or "")
-        if not SYMBOL_RE.fullmatch(inst_id) or inst_id in seen_instruments:
+        if not SYMBOL_RE.fullmatch(inst_id) or len(instrument_groups.get(inst_id, [])) != 1:
             continue
-        seen_instruments.add(inst_id)
         matches = ticker_groups.get(inst_id, [])
         # Duplicate tickers are ambiguous; never select one arbitrarily.
         if len(matches) != 1:
