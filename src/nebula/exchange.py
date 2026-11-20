@@ -17,6 +17,30 @@ class OkxError(RuntimeError):
 
 
 class OkxDemoClient:
+    # Explicit endpoint/method allowlist. New API paths require review here.
+    _PUBLIC_READS = {
+        ("GET", "/api/v5/public/instruments"),
+        ("GET", "/api/v5/market/tickers"),
+        ("GET", "/api/v5/market/candles"),
+        ("GET", "/api/v5/market/history-candles"),
+    }
+    _PRIVATE_READS = {
+        ("GET", "/api/v5/account/config"),
+        ("GET", "/api/v5/account/balance"),
+        ("GET", "/api/v5/trade/order"),
+        ("GET", "/api/v5/trade/fills-history"),
+        ("GET", "/api/v5/trade/orders-pending"),
+        ("GET", "/api/v5/trade/orders-algo-pending"),
+        ("GET", "/api/v5/trade/order-algo"),
+        ("GET", "/api/v5/trade/orders-algo-history"),
+    }
+    _PRIVATE_WRITES = {
+        ("POST", "/api/v5/trade/order"),
+        ("POST", "/api/v5/trade/order-algo"),
+        ("POST", "/api/v5/trade/cancel-order"),
+        ("POST", "/api/v5/trade/cancel-algos"),
+    }
+
     def __init__(self, settings: Settings, session=None, timeout: float = 10.0):
         if timeout <= 0:
             raise ValueError("timeout must be positive")
@@ -46,8 +70,23 @@ class OkxDemoClient:
         return headers
 
     def request(self, method: str, path: str, params=None, payload=None, private=False):
-        if not path.startswith("/api/v5/") or ".." in path:
-            raise ValueError("Only fixed OKX V5 API paths are allowed")
+        method = str(method).upper()
+        endpoint = (method, path)
+        if endpoint in self._PUBLIC_READS:
+            if private or payload is not None:
+                raise SafetyError("Public market endpoints are read-only")
+        elif endpoint in self._PRIVATE_READS:
+            if not private or payload is not None:
+                raise SafetyError("Private read endpoint requires authenticated GET only")
+        elif endpoint in self._PRIVATE_WRITES:
+            if not private or params is not None or payload is None:
+                raise SafetyError("Private write endpoint requires authenticated POST with a body")
+            if path == "/api/v5/trade/cancel-order":
+                self.settings.validate_cancel_permission()
+            else:
+                self.settings.validate_order_permission()
+        else:
+            raise SafetyError("Endpoint is not allowlisted for NEBULA V1: " + method + " " + path)
         query = f"?{urlencode(params, doseq=True)}" if params else ""
         request_path = f"{path}{query}"
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False) if payload is not None else ""
@@ -136,8 +175,8 @@ class OkxDemoClient:
         return self.request("GET", "/api/v5/trade/fills-history", params, private=True)
 
     def cancel_order(self, *, inst_id: str, order_id: str):
-        """Cancel an incomplete regular order; caller must verify terminal state afterwards."""
-        self.settings.validate_order_permission()
+        """Cancel an incomplete regular order, including while emergency stop is active."""
+        self.settings.validate_cancel_permission()
         if not inst_id or not order_id or not str(order_id).isdigit():
             raise ValueError("Valid instrument and numeric order_id are required")
         result = self.request("POST", "/api/v5/trade/cancel-order",
