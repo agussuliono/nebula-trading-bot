@@ -9,7 +9,7 @@ class ReadOnlyDemoStub:
                  conditional=None, private_error=None):
         self.config = config or {
             "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
-            "perm": "read_only,trade", "uid": "redacted-test-id",
+            "perm": "read_only", "uid": "redacted-test-id",
         }
         self.balances = balances if balances is not None else [{
             "details": [{"ccy": "USDT", "availBal": "1000", "frozenBal": "0"}]
@@ -98,6 +98,18 @@ def test_missing_read_permission_is_a_blocker():
     assert result["status"] == "connected_but_not_ready"
     assert "api_key_missing_read_permission" in result["blockers"]
 
+
+def test_trade_permission_is_rejected_for_read_only_verification():
+    client = ReadOnlyDemoStub(config={
+        "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+        "perm": "read_only,trade",
+    })
+    result = verify_demo_read_only(client, credentials())
+
+    assert result["status"] == "connected_but_not_ready"
+    assert result["api_permissions"] == "not_compliant"
+    assert "api_key_has_trade_permission" in result["blockers"]
+    assert result["exchange_writes"] == 0
 
 def test_withdraw_permission_is_a_blocker_and_no_write_is_possible():
     client = ReadOnlyDemoStub(config={
