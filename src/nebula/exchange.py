@@ -55,8 +55,10 @@ class OkxDemoClient:
         from .entry_gate import StartupEntryPermit
         if not isinstance(permit, StartupEntryPermit):
             raise SafetyError("A valid StartupRecovery permit is required")
-        if self._startup_entry_permit is not None:
-            raise SafetyError("A startup permit is already bound to this client")
+        if permit._client is not self or permit._state is not state_store:
+            raise SafetyError("Startup permit is bound to a different client or state store")
+        # A fresh successful recovery may replace an older unused/consumed permit.
+        # Managers holding the old object cannot authorize through this client.
         self._startup_entry_permit = permit
         self._startup_entry_state = state_store
 
