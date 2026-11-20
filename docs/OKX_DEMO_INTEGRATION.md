@@ -28,6 +28,12 @@ both Read and Trade permissions but no Withdraw permission. It reports
 non-USDT balances and outstanding orders as blockers for a clean initial
 integration.
 
+Pending regular and algo order lists are read with the documented 100-record
+page size and `after` cursors until the complete snapshot is obtained.
+Repeated/missing cursors or a page-limit overflow fail closed rather than
+treating a partial list as an empty account. Balance amounts are validated
+with exact decimal arithmetic.
+
 It never submits, cancels, amends, transfers, or adjusts funds. It does not
 print API keys, secrets, passphrases, account UIDs, or balance amounts.
 
