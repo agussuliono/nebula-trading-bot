@@ -42,10 +42,10 @@ def append_prospective_candles(
     target = Path(path)
     manifest_path = target.with_suffix(target.suffix + ".manifest.json")
     normalized = str(symbol).strip().upper()
-    if not SYMBOL_RE.fullmatch(normalized) or bar not in BAR_MS:
-        raise BacktestError("Invalid prospective symbol or bar")
-    if isinstance(cutoff_ts, bool) or not isinstance(cutoff_ts, int) or cutoff_ts <= 0:
-        raise BacktestError("cutoff_ts must be a positive integer")
+    if not SYMBOL_RE.fullmatch(normalized) or bar != "1H":
+        raise BacktestError("Prospective research currently supports only the frozen 1H basket")
+    if isinstance(cutoff_ts, bool) or not isinstance(cutoff_ts, int) or cutoff_ts != PROSPECTIVE_CUTOFF_TS:
+        raise BacktestError("The prospective cutoff is frozen and cannot be changed")
     if not target.is_file() or not manifest_path.is_file():
         raise FileNotFoundError("Existing CSV and manifest are both required")
     if not isinstance(new_candles, list) or not new_candles:
