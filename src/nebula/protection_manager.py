@@ -97,7 +97,8 @@ class DemoProtectionManager:
                                  "cancel_ack_error_type": type(cancel_error).__name__ if cancel_error else None})
         return {"status": state, "filled_size": new_snapshot["cumulative_fill_size"]}
 
-    def prepare(self, *, entry_client_order_id: str, take_profit: str, stop_loss: str) -> dict:
+    def prepare(self, *, entry_client_order_id: str,
+                take_profit: str | None = None, stop_loss: str | None = None) -> dict:
         entry = self.state.get_intent(entry_client_order_id)
         snapshot = self.state.get_order_snapshot(entry_client_order_id)
         if not entry or entry["side"] != "buy" or not snapshot:
@@ -112,6 +113,29 @@ class DemoProtectionManager:
         lock = self.state.get_position_lock()
         if not lock or lock["owner_client_order_id"] != entry_client_order_id:
             raise ProtectionManagerError("Entry no longer owns the single-position lock")
+
+        # For exchange-backed entries, protection must use the exact stop/target
+        # that passed portfolio authorization before the entry was submitted.
+        # Never accept a newly supplied, unreviewed OCO price pair.
+        try:
+            approved_plan = self.state.get_entry_risk_plan(entry_client_order_id)
+        except ValueError as exc:
+            raise ProtectionManagerError("Persisted entry risk plan is corrupt; protection is blocked") from exc
+        if approved_plan is None and hasattr(self.client, "settings"):
+            raise ProtectionManagerError("No persisted portfolio-approved stop/target for this entry")
+        if approved_plan is not None:
+            if (approved_plan.get("instrument") != entry["instrument"]
+                    or Decimal(str(approved_plan.get("size"))) <= 0
+                    or Decimal(str(approved_plan.get("entry_price"))) <= 0):
+                raise ProtectionManagerError("Persisted approved entry plan does not match the position")
+            approved_tp = str(approved_plan.get("take_profit") or "")
+            approved_sl = str(approved_plan.get("stop_loss") or "")
+            if ((take_profit is not None and Decimal(str(take_profit)) != Decimal(approved_tp))
+                    or (stop_loss is not None and Decimal(str(stop_loss)) != Decimal(approved_sl))):
+                raise ProtectionManagerError("Requested OCO levels differ from the portfolio-approved entry plan")
+            take_profit, stop_loss = approved_tp, approved_sl
+        if take_profit is None or stop_loss is None:
+            raise ProtectionManagerError("Approved take-profit and stop-loss are required")
         try:
             spec = SpotInstrument.from_okx(self.client.get_spot_instrument(entry["instrument"]))
             quantity = Decimal(filled)
