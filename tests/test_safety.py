@@ -219,3 +219,44 @@ def test_history_candles_uses_public_endpoint_and_validates_cursor():
         client.get_history_candles("BTC-USDT", limit=101)
     with pytest.raises(ValueError):
         client.get_history_candles("BTC-USDT", after="not-a-timestamp")
+
+
+
+def test_unreviewed_endpoint_is_blocked_before_network_io():
+    from nebula.config import SafetyError
+    class NeverCallSession:
+        def request(self, *args, **kwargs):
+            raise AssertionError("network must not be called")
+    client = OkxDemoClient(Settings(), session=NeverCallSession())
+    with pytest.raises(SafetyError, match="not allowlisted"):
+        client.request("POST", "/api/v5/account/set-position-mode",
+                       payload={"posMode": "long_short_mode"}, private=True)
+
+
+def test_write_endpoint_cannot_bypass_demo_order_gate():
+    from nebula.config import SafetyError
+    class NeverCallSession:
+        def request(self, *args, **kwargs):
+            raise AssertionError("network must not be called")
+    client = OkxDemoClient(Settings(), session=NeverCallSession())
+    with pytest.raises(SafetyError, match="disabled"):
+        client.request("POST", "/api/v5/trade/order",
+                       payload={"instId": "BTC-USDT"}, private=True)
+
+
+def test_regular_order_cancel_remains_available_during_emergency_stop():
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"code": "0", "data": [{"ordId": "123", "sCode": "0"}]}
+    class Session:
+        def __init__(self): self.calls = 0
+        def request(self, *args, **kwargs):
+            self.calls += 1
+            return Response()
+    settings = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        enable_demo_orders=True, kill_switch=True, max_daily_loss_quote=20,
+        max_risk_quote=2, max_position_quote=100)
+    session = Session()
+    client = OkxDemoClient(settings, session=session)
+    assert client.cancel_order(inst_id="BTC-USDT", order_id="123")[0]["sCode"] == "0"
+    assert session.calls == 1
