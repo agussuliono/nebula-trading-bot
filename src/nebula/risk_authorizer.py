@@ -193,7 +193,8 @@ class CandidateRiskPreflight:
         candle_ts = candidate.get("candle_ts")
         if isinstance(candle_ts, bool) or not isinstance(candle_ts, int) or candle_ts <= 0:
             raise RiskAuthorizationError("Candidate candle timestamp is invalid")
-        if candidate.get("orders_submitted") != 0:
+        submitted = candidate.get("orders_submitted")
+        if isinstance(submitted, bool) or not isinstance(submitted, int) or submitted != 0:
             raise RiskAuthorizationError("Candidate plan must be read-only and have zero submitted orders")
         instrument = str(candidate.get("instrument") or "")
         if not instrument or not instrument.endswith("-USDT"):
