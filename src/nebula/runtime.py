@@ -26,6 +26,7 @@ class RuntimePolicy:
     fast_ema: int = 20
     slow_ema: int = 50
     max_candle_age_intervals: int = 2
+    max_ticker_age_ms: int = 30_000
 
     def __post_init__(self):
         if self.bar not in {"1H", "4H", "1D"}:
@@ -45,8 +46,8 @@ class RuntimePolicy:
             raise ValueError("invalid scanner thresholds")
         if self.min_listing_age_days < 0 or self.min_data_points < self.slow_ema + 1:
             raise ValueError("invalid listing age or data point minimum")
-        if self.max_candle_age_intervals < 1:
-            raise ValueError("max_candle_age_intervals must be positive")
+        if self.max_candle_age_intervals < 1 or isinstance(self.max_ticker_age_ms, bool) or not isinstance(self.max_ticker_age_ms, int) or self.max_ticker_age_ms <= 0:
+            raise ValueError("candle age intervals and ticker age must be positive")
 
 
 class RuntimeErrorSafe(RuntimeError):
@@ -107,7 +108,8 @@ class ReadOnlyRuntime:
         if not isinstance(instruments, list) or not isinstance(tickers, list):
             raise RuntimeErrorSafe("Invalid public market response shape")
 
-        raw_candidates = build_candidates(instruments, tickers, now_ms=now_ms)
+        raw_candidates = build_candidates(instruments, tickers, now_ms=now_ms,
+                                           max_ticker_age_ms=self.policy.max_ticker_age_ms)
         tick_by_id = {x.get("instId"): x for x in tickers if isinstance(x, dict) and x.get("instId")}
         enriched = []
         candles_by_id = {}
