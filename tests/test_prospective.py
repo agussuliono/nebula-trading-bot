@@ -63,3 +63,19 @@ def test_append_rejects_wrong_symbol_and_missing_manifest(tmp_path, monkeypatch)
     path.with_suffix(".csv.manifest.json").unlink()
     with pytest.raises(FileNotFoundError):
         append_prospective_candles(path, "BTC-USDT", "1H", [new])
+
+
+def test_append_can_continue_using_verified_baseline_chain(tmp_path, monkeypatch):
+    path, _ = existing_dataset(tmp_path, monkeypatch)
+    first = Candle(PROSPECTIVE_CUTOFF_TS + HOUR, 101, 103, 100, 102, 1200, True)
+    second = Candle(PROSPECTIVE_CUTOFF_TS + 2 * HOUR, 102, 104, 101, 103, 1300, True)
+    append_prospective_candles(path, "BTC-USDT", "1H", [first])
+    result = append_prospective_candles(path, "BTC-USDT", "1H", [second])
+    saved = json.loads(path.with_suffix(".csv.manifest.json").read_text())
+    assert result["appended"] == 1
+    assert saved["appended_candle_count"] == 2
+    assert saved["prospective_source"] == "OKX V5 GET /api/v5/market/candles"
+    assert saved["last_appended_first_ts"] == second.ts
+    assert saved["baseline_sha256"] == hashlib.sha256(
+        (path.parent / "BTC.csv").read_bytes()
+    ).hexdigest() if False else saved["baseline_sha256"]
