@@ -314,13 +314,13 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
     authorizer = PortfolioRiskAuthorizer(
         SnapshotClient(), StateStore(str(tmp_path / "auth.db")), settings,
         plan_provider=lambda **kwargs: {
-            "signal_action": "buy", "candle_closed": True, "candle_ts": 123,
+            "signal_action": "buy", "candle_closed": True, "candle_ts": 1799996400000,
             "stop_loss": "90", "take_profit": "120",
         },
         clock_ms=lambda: 1800000000000,
     )
     result = authorizer(instrument="AAA-USDT", requested_size="0.1",
-                        requested_price="100", candle_ts=123)
+                        requested_price="100", candle_ts=1799996400000)
     assert result["entry_allowed"] is True
     assert result["planned_entry"]["stop_loss"] == "90"
     assert Decimal(result["planned_entry"]["risk_to_stop_quote"]) <= Decimal("2")
