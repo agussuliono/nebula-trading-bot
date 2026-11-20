@@ -12,7 +12,7 @@ from .portfolio import PortfolioPolicy, PortfolioRiskEngine
 
 def main():
     parser = argparse.ArgumentParser(prog="nebula")
-    parser.add_argument("command", choices=["check-demo-public", "analyze-once", "portfolio-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "audit-data"])
+    parser.add_argument("command", choices=["check-demo-public", "analyze-once", "portfolio-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
     parser.add_argument("--db", default=os.getenv("NEBULA_DB_PATH", "nebula.sqlite3"))
     parser.add_argument("--bar", default="1H")
     parser.add_argument("--data", help="Local ascending OHLCV CSV for offline backtest or dataset audit")
@@ -47,6 +47,28 @@ def main():
         manifest = save_dataset(args.output, args.symbol.strip().upper(), args.bar, candles, meta, overwrite=args.overwrite)
         emit_result(json.dumps({"csv": args.output, "manifest": args.output + ".manifest.json",
                           "dataset": manifest, "orders_submitted": 0}, indent=2, sort_keys=True))
+        return
+    if args.command == "collect-prospective":
+        if not args.symbol:
+            parser.error("collect-prospective requires --symbol BTC-USDT")
+        if args.bar != "1H":
+            parser.error("The frozen prospective research protocol currently supports 1H only")
+        from .backtest import Candle, load_csv
+        from .prospective import append_prospective_candles
+        # Settings() has no credentials; this command uses only the public candles endpoint.
+        client = OkxDemoClient(Settings())
+        existing = load_csv(args.output)
+        rows = client.get_candles(args.symbol.strip().upper(), bar=args.bar, limit=300)
+        parsed = [Candle.from_okx(row) for row in rows]
+        fresh = sorted((c for c in parsed if c.confirmed and c.ts > existing[-1].ts),
+                       key=lambda c: c.ts)
+        if not fresh:
+            emit_result(json.dumps({"symbol": args.symbol.strip().upper(), "bar": args.bar,
+                                    "appended": 0, "reason": "no_new_confirmed_candles",
+                                    "orders_submitted": 0, "private_api_calls": 0}, indent=2))
+            return
+        report = append_prospective_candles(args.output, args.symbol, args.bar, fresh)
+        emit_result(json.dumps(report, indent=2, sort_keys=True))
         return
     if args.command == "audit-data":
         if not args.data:
