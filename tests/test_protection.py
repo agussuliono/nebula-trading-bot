@@ -38,7 +38,7 @@ def test_oco_payload_is_demo_marked_and_uses_market_exit():
     class Session:
         def __init__(self): self.call=None
         def request(self, *a, **kw): self.call=(a,kw); return Response()
-    settings=Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True,
+    settings=Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True, kill_switch=False,
                       max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=50)
     session=Session(); client=OkxDemoClient(settings, session=session)
     result=client.place_spot_oco_exit(inst_id="BTC-USDT", size="0.004", take_profit="52000",
