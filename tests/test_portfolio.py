@@ -433,3 +433,27 @@ def test_api_key_must_have_read_and_trade_but_never_withdraw_permission():
     assert "api_key_trade_permission_missing" in report["blockers"]
     assert report["entry_allowed"] is False
 
+
+
+def test_daily_account_equity_pnl_is_authoritative_and_not_double_counted():
+    data = _snapshot(bid="90", stop="80", realized="-2")
+    report = _engine().evaluate(
+        **data, now_ms=NOW, daily_unrealized_pnl_quote="10",
+        daily_account_pnl_quote="-60", require_daily_account_pnl=True,
+    )
+    assert report["daily_account_pnl_quote"] == "-60"
+    assert report["daily_combined_pnl_quote"] == "-60"
+    assert "daily_loss_including_unrealized_limit_reached" in report["blockers"]
+
+
+def test_required_daily_account_pnl_missing_blocks_new_entry():
+    data = _snapshot()
+    data["position_lock"] = None
+    data["position_fills"] = []
+    data["position_context"] = None
+    data["protection_intent"] = None
+    data["open_algo_orders"] = []
+    report = _engine().evaluate(**data, now_ms=NOW, require_daily_account_pnl=True)
+    assert report["daily_account_pnl_quote"] is None
+    assert "daily_account_pnl_baseline_missing" in report["blockers"]
+    assert report["entry_allowed"] is False

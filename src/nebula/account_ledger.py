@@ -66,6 +66,14 @@ class AccountLedger:
             raise AccountLedgerError("timestamp_ms must be a positive millisecond timestamp")
         return datetime.fromtimestamp(int(timestamp_ms) / 1000, timezone.utc).date().isoformat()
 
+    def get_daily_baseline(self, timestamp_ms):
+        day = self.utc_day(timestamp_ms)
+        with self.state._connect() as db:
+            row = db.execute(
+                "SELECT * FROM daily_equity_baselines WHERE trading_day=?", (day,)
+            ).fetchone()
+        return dict(row) if row else None
+
     def save_bills(self, bills):
         if not isinstance(bills, list):
             raise AccountLedgerError("bills must be a list")

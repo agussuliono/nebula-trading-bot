@@ -4,9 +4,11 @@ This module authorizes only an already-sized order whose plan includes a closed
 buy signal and precomputed stop/target. It never submits an order.
 """
 from decimal import Decimal
+import hashlib
 
 from .portfolio import PortfolioPolicy, PortfolioRiskEngine
 from .risk_controls import CircuitBreaker
+from .account_ledger import AccountLedger
 
 
 class RiskAuthorizationError(RuntimeError):
@@ -56,6 +58,78 @@ class PortfolioRiskAuthorizer:
             plan_override=candidate,
             require_order_gate=False,
         )
+
+    def _daily_account_pnl(self, *, account_config, balance, tickers,
+                           regular, oco, conditional, lock, unresolved, now_ms):
+        """Reconcile durable UTC equity baseline and every account bill since it."""
+        if getattr(self.settings, "demo_account_exclusive", False) is not True:
+            raise RiskAuthorizationError("Dedicated Demo account attestation is required")
+        if not isinstance(account_config, list) or len(account_config) != 1:
+            raise RiskAuthorizationError("Account identity snapshot is missing or ambiguous")
+        uid = str(account_config[0].get("uid") or "")
+        if not uid:
+            raise RiskAuthorizationError("OKX account UID is missing; cannot bind the daily baseline")
+        fingerprint = hashlib.sha256(uid.encode("utf-8")).hexdigest()
+        ledger = AccountLedger(self.state)
+        baseline = ledger.get_daily_baseline(now_ms)
+        policy = PortfolioPolicy(
+            max_snapshot_age_ms=self.settings.market_data_max_age_ms,
+            fee_bps=Decimal(str(self.settings.fee_bps)),
+            slippage_bps=Decimal(str(self.settings.slippage_bps)),
+            max_daily_loss_quote=Decimal(str(self.settings.max_daily_loss_quote)),
+            max_position_risk_quote=Decimal(str(self.settings.max_risk_quote)),
+            max_position_notional_quote=Decimal(str(self.settings.max_position_quote)),
+        )
+        preliminary = PortfolioRiskEngine(policy).evaluate(
+            account_config=account_config, balance=balance, tickers=tickers,
+            position_lock=lock, local_unresolved_intents=unresolved,
+            open_regular_orders=regular, open_algo_orders=[*oco, *conditional],
+            now_ms=now_ms, daily_realized_pnl_quote="0",
+        )
+        if not preliminary.get("valuation_complete"):
+            raise RiskAuthorizationError(
+                "Cannot mark daily equity from incomplete valuation: "
+                + ",".join(preliminary.get("blockers", []))
+            )
+        equity = preliminary.get("account_equity_usdt")
+        if baseline is None:
+            if lock or regular or oco or conditional or unresolved:
+                raise RiskAuthorizationError(
+                    "Daily baseline missing while account has existing exposure or unresolved state"
+                )
+            ledger.establish_daily_baseline(
+                equity_quote=equity, timestamp_ms=now_ms,
+                account_fingerprint=fingerprint,
+            )
+            baseline = ledger.get_daily_baseline(now_ms)
+        if baseline["account_fingerprint"] != fingerprint:
+            raise RiskAuthorizationError("Daily baseline belongs to a different OKX account")
+        age_ms = now_ms - int(baseline["opening_timestamp_ms"])
+        if age_ms < 0 or age_ms > 86_400_000:
+            raise RiskAuthorizationError("Daily baseline is outside the current UTC day")
+        # OKX /account/bills covers the last 7 days. A daily baseline is never older
+        # than 24h. Any non-Spot-trade bill is treated as an unreconciled cash flow.
+        bills = self.client.get_account_bills(
+            begin=str(baseline["opening_timestamp_ms"]), end=str(now_ms)
+        )
+        ledger.save_bills(bills)
+        for bill in bills:
+            inst_id = str(bill.get("instId") or "")
+            if (str(bill.get("type")) != "2"
+                    or len(inst_id.split("-")) != 2
+                    or not inst_id.endswith("-USDT")):
+                raise RiskAuthorizationError(
+                    "Account bill contains transfer, non-Spot, or unclassified activity"
+                )
+        ledger.record_equity_mark(
+            equity_quote=equity, timestamp_ms=now_ms,
+            account_fingerprint=fingerprint,
+        )
+        result = ledger.daily_equity_delta(
+            timestamp_ms=now_ms, external_flows_quote="0",
+            account_fingerprint=fingerprint,
+        )
+        return result["daily_pnl_quote"]
 
     def _authorize(self, *, instrument: str, requested_size: str,
                    requested_price: str, candle_ts: int,
@@ -145,6 +219,11 @@ class PortfolioRiskAuthorizer:
             conditional = self.client.get_pending_algo_orders("conditional")
             breaker = CircuitBreaker(self.state, self.settings.max_daily_loss_quote)
             daily_realized = breaker.status()["daily_realized_pnl_quote"]
+            daily_account_pnl = self._daily_account_pnl(
+                account_config=account_config, balance=balance, tickers=tickers,
+                regular=regular, oco=oco, conditional=conditional,
+                lock=lock, unresolved=unresolved, now_ms=now_ms,
+            )
             policy = PortfolioPolicy(
                 max_snapshot_age_ms=self.settings.market_data_max_age_ms,
                 fee_bps=Decimal(str(self.settings.fee_bps)),
@@ -159,6 +238,8 @@ class PortfolioRiskAuthorizer:
                 open_regular_orders=regular, open_algo_orders=[*oco, *conditional],
                 planned_entry=planned, now_ms=now_ms,
                 daily_realized_pnl_quote=daily_realized,
+                daily_account_pnl_quote=daily_account_pnl,
+                require_daily_account_pnl=True,
             )
             if report.get("valuation_complete") is not True or report.get("entry_allowed") is not True:
                 raise RiskAuthorizationError(

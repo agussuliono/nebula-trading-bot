@@ -74,3 +74,12 @@ def test_equity_mark_rejects_account_change_and_time_regression(tmp_path):
     with pytest.raises(AccountLedgerError, match="regressed"):
         ledger.record_equity_mark(equity_quote="1005", timestamp_ms=ts+1000,
                                   account_fingerprint="demo-account-hash")
+
+
+def test_daily_baseline_lookup_is_scoped_to_utc_day(tmp_path):
+    ledger = AccountLedger(StateStore(str(tmp_path / "equity.db")))
+    ts = 1795132800000
+    ledger.establish_daily_baseline(equity_quote="1000", timestamp_ms=ts,
+                                    account_fingerprint="demo-account-hash")
+    assert ledger.get_daily_baseline(ts)["opening_equity_quote"] == "1000"
+    assert ledger.get_daily_baseline(ts + 86_400_000) is None

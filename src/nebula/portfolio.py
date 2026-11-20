@@ -123,7 +123,8 @@ class PortfolioRiskEngine:
                  planned_entry: dict | None = None,
                  position_fill_sync_error: str | None = None,
                  now_ms: int, daily_realized_pnl_quote="0",
-                 daily_unrealized_pnl_quote=None) -> dict:
+                 daily_unrealized_pnl_quote=None, daily_account_pnl_quote=None,
+                 require_daily_account_pnl=False) -> dict:
         blockers = []
         if position_fill_sync_error:
             blockers.append("position_fill_sync_failed:" + str(position_fill_sync_error))
@@ -242,7 +243,13 @@ class PortfolioRiskEngine:
             _signed_d(daily_unrealized_pnl_quote, "daily unrealized P&L")
             if daily_unrealized_pnl_quote is not None else None
         )
-        if position_lock and daily_unrealized is None:
+        daily_account = (
+            _signed_d(daily_account_pnl_quote, "daily account P&L")
+            if daily_account_pnl_quote is not None else None
+        )
+        if require_daily_account_pnl and daily_account is None:
+            blockers.append("daily_account_pnl_baseline_missing")
+        if position_lock and daily_unrealized is None and daily_account is None:
             # Lifetime inventory P&L cannot be used as the current UTC day's P&L.
             # Until a durable daily opening mark exists, report incomplete and
             # block entry authorization rather than mixing incompatible periods.
@@ -401,7 +408,10 @@ class PortfolioRiskEngine:
                                   "risk_to_stop_quote": str(planned_risk)}
             except (AttributeError, ValueError, InvalidOperation) as exc:
                 blockers.append("planned_entry_invalid:" + type(exc).__name__)
-        combined_daily = realized + (daily_unrealized if daily_unrealized is not None else Decimal("0"))
+        # Account equity delta already includes realized trades, fees, and marked inventory.
+        # It is authoritative when present; never add the trade ledger a second time.
+        combined_daily = (daily_account if daily_account is not None else
+                          realized + (daily_unrealized if daily_unrealized is not None else Decimal("0")))
         if self.policy.max_daily_loss_quote > 0 and combined_daily <= -self.policy.max_daily_loss_quote:
             blockers.append("daily_loss_including_unrealized_limit_reached")
         projected_daily = combined_daily - planned_risk
@@ -434,6 +444,7 @@ class PortfolioRiskEngine:
             "position": position, "planned_entry": planned_report,
             "daily_realized_pnl_quote": str(realized),
             "daily_unrealized_pnl_quote": str(daily_unrealized) if daily_unrealized is not None else None,
+            "daily_account_pnl_quote": str(daily_account) if daily_account is not None else None,
             "daily_unrealized_pnl_baseline_available": daily_unrealized is not None,
             "daily_combined_pnl_quote": str(combined_daily),
             "projected_daily_pnl_after_planned_stop_quote": str(projected_daily),
