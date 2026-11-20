@@ -37,10 +37,14 @@ jobs:
       - name: Compile source and tests
         run: python -m compileall -q src tests
 
-      - name: Verify CLI and Demo order gate default
+      - name: Verify explicit CI safety settings
         env:
           NEBULA_ENABLE_DEMO_ORDERS: 'false'
           NEBULA_KILL_SWITCH: 'true'
         run: |
           python -m nebula.cli --help
           python -c "from nebula.config import Settings; s=Settings.from_env(); assert s.enable_demo_orders is False; assert s.kill_switch is True"
+
+      - name: Verify fail-closed defaults with variables unset
+        run: |
+          env -u NEBULA_ENABLE_DEMO_ORDERS -u NEBULA_KILL_SWITCH python -c "from nebula.config import Settings; s=Settings.from_env(); assert s.enable_demo_orders is False; assert s.kill_switch is True"
