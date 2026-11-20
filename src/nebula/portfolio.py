@@ -238,6 +238,15 @@ class PortfolioRiskEngine:
             blockers.append("unpriced_assets:" + ",".join(sorted(unpriced)))
 
         realized = _signed_d(daily_realized_pnl_quote, "daily realized P&L")
+        daily_unrealized = (
+            _signed_d(daily_unrealized_pnl_quote, "daily unrealized P&L")
+            if daily_unrealized_pnl_quote is not None else None
+        )
+        if position_lock and daily_unrealized is None:
+            # Lifetime inventory P&L cannot be used as the current UTC day's P&L.
+            # Until a durable daily opening mark exists, report incomplete and
+            # block entry authorization rather than mixing incompatible periods.
+            blockers.append("daily_unrealized_pnl_baseline_missing")
         position = None
         if position_lock:
             blockers.append("position_already_active")
@@ -392,7 +401,7 @@ class PortfolioRiskEngine:
                                   "risk_to_stop_quote": str(planned_risk)}
             except (AttributeError, ValueError, InvalidOperation) as exc:
                 blockers.append("planned_entry_invalid:" + type(exc).__name__)
-        combined_daily = realized + unrealized
+        combined_daily = realized + (daily_unrealized if daily_unrealized is not None else Decimal("0"))
         if self.policy.max_daily_loss_quote > 0 and combined_daily <= -self.policy.max_daily_loss_quote:
             blockers.append("daily_loss_including_unrealized_limit_reached")
         projected_daily = combined_daily - planned_risk
@@ -411,7 +420,7 @@ class PortfolioRiskEngine:
             "unresolved_oco", "local_unresolved_order_intents",
             "exchange_open_regular_orders", "exchange_oco_pending",
             "exchange_open_algo_orders", "untracked_non_usdt",
-            "position_fill_sync_failed",
+            "position_fill_sync_failed", "daily_unrealized_pnl_baseline_missing",
         )
         complete = not any(
             blocker.startswith(valuation_incomplete_prefixes) for blocker in blockers
@@ -424,6 +433,8 @@ class PortfolioRiskEngine:
             "holdings": holdings,
             "position": position, "planned_entry": planned_report,
             "daily_realized_pnl_quote": str(realized),
+            "daily_unrealized_pnl_quote": str(daily_unrealized) if daily_unrealized is not None else None,
+            "daily_unrealized_pnl_baseline_available": daily_unrealized is not None,
             "daily_combined_pnl_quote": str(combined_daily),
             "projected_daily_pnl_after_planned_stop_quote": str(projected_daily),
             "portfolio_risk_to_stop_quote": str(total_risk),
