@@ -252,51 +252,63 @@ def test_real_okx_client_requires_portfolio_risk_authorization(tmp_path):
     assert manager.state.get_intent("NBRISK_REQUIRED") is None
 
 
-def test_real_okx_client_accepts_only_matching_approved_risk_plan(tmp_path):
+def test_real_okx_client_accepts_only_concrete_portfolio_authorizer(tmp_path):
     from nebula.config import Settings
+    from nebula.risk_authorizer import PortfolioRiskAuthorizer
+
     client = FakeClient()
-    client.settings = Settings(
+    settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        enable_demo_orders=True, kill_switch=False,
-        max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=20, max_position_quote=1000,
+        market_data_max_age_ms=30_000,
     )
-    seen = {}
-    def authorize(**kwargs):
-        seen.update(kwargs)
-        return {
-            "entry_allowed": True,
-            "planned_entry": {
-                "instrument": "BTC-USDT", "size": "0.01",
-                "entry_price": "50000", "risk_to_stop_quote": "1.5",
-            },
-        }
-    manager = DemoOrderManager(client, StateStore(str(tmp_path / "authorized.db")),
-                               risk_authorizer=authorize)
-    result = submit(manager, "NBRISK_OK")
+    client.settings = settings
+    authorizer = PortfolioRiskAuthorizer(
+        client,
+        StateStore(str(tmp_path / "authorizer-state.db")),
+        settings,
+        plan_provider=lambda **kwargs: {
+            "instrument": kwargs["instrument"],
+            "size": kwargs["size"],
+            "entry_price": kwargs["entry_price"],
+            "signal_action": "buy",
+            "candle_closed": True,
+            "candle_ts": kwargs["candle_ts"],
+            "stop_loss": "49000",
+            "take_profit": "52000",
+        },
+        clock_ms=lambda: 1_800_000_000_000,
+    )
+    manager = DemoOrderManager(
+        client,
+        StateStore(str(tmp_path / "authorized.db")),
+        risk_authorizer=authorizer,
+    )
+    result = submit(manager, "NBRISK_OK", candle_ts=1_799_996_400_000)
+
     assert result["status"] == "acknowledged"
-    assert seen == {
-        "instrument": "BTC-USDT", "requested_size": "0.01",
-        "requested_price": "50000", "candle_ts": 123,
-    }
+    assert client.place_calls == 1
+    assert manager.state.get_intent("NBRISK_OK")["status"] == "acknowledged"
 
 
-def test_real_okx_client_rejects_risk_plan_mismatch(tmp_path):
+def test_real_okx_client_rejects_generic_callable_that_fabricates_approval(tmp_path):
     from nebula.config import Settings
     client = FakeClient()
     client.settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        enable_demo_orders=True, kill_switch=False,
+        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
     manager = DemoOrderManager(client, StateStore(str(tmp_path / "mismatch.db")),
         risk_authorizer=lambda **kwargs: {
             "entry_allowed": True,
             "planned_entry": {
-                "instrument": "BTC-USDT", "size": "0.02",
+                "instrument": "BTC-USDT", "size": "0.01",
                 "entry_price": "50000", "risk_to_stop_quote": "1.5",
             },
         })
-    with pytest.raises(OrderManagerError, match="does not match"):
+    with pytest.raises(OrderManagerError, match="No integrated PortfolioRiskAuthorizer"):
         submit(manager, "NBRISK_MISMATCH")
     assert client.place_calls == 0
 
