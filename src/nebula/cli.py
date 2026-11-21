@@ -142,13 +142,22 @@ def main():
             report = Backtester(config).run(candles)
         emit_result(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
         return
-    settings = Settings.from_env()
-    client = OkxDemoClient(settings)
     if args.command == "check-demo-public":
+        # This path must not inspect API key/secret/passphrase environment variables.
+        settings = Settings.from_public_env()
+        client = OkxDemoClient(settings)
         instruments = client.get_instruments()
         tickers = client.get_tickers()
         emit_result(f"OK: {len(instruments)} spot instruments; {len(tickers)} tickers (public market data). No orders sent.")
         return
+
+    # analyze-once only uses public market data; keep it independent of credentials.
+    settings = (
+        Settings.from_public_env()
+        if args.command == "analyze-once"
+        else Settings.from_env()
+    )
+    client = OkxDemoClient(settings)
     if args.command == "verify-demo-once":
         from .demo_verification import verify_demo_read_only
         report = verify_demo_read_only(client, settings)
