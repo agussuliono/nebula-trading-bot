@@ -7,20 +7,25 @@ import hashlib
 import hmac
 import json
 
+import pytest
+import requests
+
 from nebula.config import Settings
 from nebula.exchange import OkxDemoClient
 
 
 class Response:
-    status_code = 200
-
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200, headers=None):
         self.payload = payload
+        self.status_code = status_code
+        self.headers = headers or {"Content-Type": "application/json"}
 
     def raise_for_status(self):
         return None
 
     def json(self):
+        if isinstance(self.payload, BaseException):
+            raise self.payload
         return self.payload
 
 
@@ -33,7 +38,10 @@ class RecordingSession:
         self.calls.append((args, kwargs))
         if not self.responses:
             raise AssertionError("Unexpected extra HTTP request")
-        return self.responses.pop(0)
+        result = self.responses.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
 
 def enabled_settings():
