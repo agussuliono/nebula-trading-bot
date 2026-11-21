@@ -146,6 +146,7 @@ def test_candidate_preflight_uses_private_reads_without_enabling_writes(tmp_path
     assert client.read_calls == [
         "instrument_rules", "account_config", "balance", "tickers",
         "pending_regular", "pending_oco", "pending_conditional", "account_bills",
+        "account_bills",
     ]
     assert any(
         event["event_type"] == "entry_risk_preflight_approved"
