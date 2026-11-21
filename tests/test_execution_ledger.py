@@ -8,6 +8,8 @@ from nebula.state import StateStore
 def seed(tmp_path):
     store = StateStore(str(tmp_path / "ledger.db"))
     store.reserve_entry_intent("NBENTRY1", "BTC-USDT", 1, "buy")
+    store.update_intent("NBENTRY1", "submitting")
+    store.update_intent("NBENTRY1", "acknowledged", "100")
     store.update_intent("NBENTRY1", "filled", "100")
     store.save_order_snapshot("NBENTRY1", {"ordId":"100", "state":"filled", "sz":"0.01",
         "accFillSz":"0.01", "avgPx":"100", "fee":"-0.001", "feeCcy":"BTC"})
