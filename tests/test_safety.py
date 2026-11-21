@@ -107,18 +107,48 @@ def test_nan_order_size_rejected():
         client.place_spot_limit(inst_id="BTC-USDT", side="buy", size="nan", price="10", client_order_id="NB123")
 
 
-def test_timeout_is_reported_as_ambiguous_and_not_retried():
+def test_public_get_timeout_retries_are_bounded_and_reported(monkeypatch):
     import requests
     from nebula.exchange import OkxError
+
+    monkeypatch.setattr("nebula.exchange.time.sleep", lambda _delay: None)
+
     class TimeoutSession:
-        def __init__(self): self.calls = 0
+        def __init__(self):
+            self.calls = 0
+
         def request(self, *args, **kwargs):
             self.calls += 1
             raise requests.Timeout("timeout")
+
     session = TimeoutSession()
     client = OkxDemoClient(Settings(), session=session)
-    with pytest.raises(OkxError, match="reconcile before retry"):
-        client.request("GET", "/api/v5/market/tickers", {"instType":"SPOT"})
+    with pytest.raises(OkxError, match="public transport failed after 3 attempts"):
+        client.request("GET", "/api/v5/market/tickers", {"instType": "SPOT"})
+    assert session.calls == 3
+
+
+def test_write_timeout_is_ambiguous_and_never_retried(monkeypatch):
+    import requests
+    from nebula.exchange import OkxError
+
+    class TimeoutSession:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, *args, **kwargs):
+            self.calls += 1
+            raise requests.Timeout("timeout")
+
+    settings = Settings(
+        api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
+        enable_demo_orders=True, kill_switch=False,
+        max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
+    )
+    session = TimeoutSession()
+    client = OkxDemoClient(settings, session=session)
+    with pytest.raises(OkxError, match="outcome may be unknown; reconcile before retry"):
+        client.cancel_order(inst_id="BTC-USDT", order_id="12345")
     assert session.calls == 1
 
 
