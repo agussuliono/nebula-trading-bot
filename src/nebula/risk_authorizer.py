@@ -9,6 +9,7 @@ import hashlib
 from .portfolio import PortfolioPolicy, PortfolioRiskEngine
 from .risk_controls import CircuitBreaker
 from .account_ledger import AccountLedger
+from .bill_reconciliation import reconcile_spot_bills, BillReconciliationError
 
 
 class RiskAuthorizationError(RuntimeError):
@@ -125,30 +126,23 @@ class PortfolioRiskAuthorizer:
         age_ms = now_ms - int(baseline["opening_timestamp_ms"])
         if age_ms < 0 or age_ms > 86_400_000:
             raise RiskAuthorizationError("Daily baseline is outside the current UTC day")
-        # OKX /account/bills covers the last 7 days. A daily baseline is never older
-        # than 24h. Any non-Spot-trade bill is treated as an unreconciled cash flow.
+        # The OKX pager returns only after it has observed a terminal short page;
+        # an exhausted page cap or malformed/repeated cursor raises before here.
+        # Baselines are limited to the current UTC day, inside the 7-day endpoint.
         ledger.save_bills(bills)
-        for bill in bills:
-            inst_id = str(bill.get("instId") or "")
-            instrument_parts = inst_id.split("-")
-            # type=2 means "trade", not necessarily Spot. OKX also records
-            # margin/derivative trade bills under type=2, so require the
-            # documented instType field explicitly before treating the bill
-            # as an internal Spot trade with no external cash flow.
-            if (str(bill.get("type")) != "2"
-                    or str(bill.get("instType") or "").upper() != "SPOT"
-                    or len(instrument_parts) != 2
-                    or not instrument_parts[0]
-                    or instrument_parts[1] != "USDT"):
-                raise RiskAuthorizationError(
-                    "Account bill contains transfer, non-Spot, or unclassified activity"
-                )
+        try:
+            reconciliation = reconcile_spot_bills(
+                bills, account_fingerprint=fingerprint,
+                begin_ms=int(baseline["opening_timestamp_ms"]), end_ms=now_ms,
+            )
+        except BillReconciliationError as exc:
+            raise RiskAuthorizationError("Account bills are not fully reconciled: " + str(exc)) from exc
         ledger.record_equity_mark(
             equity_quote=equity, timestamp_ms=now_ms,
             account_fingerprint=fingerprint,
         )
         result = ledger.daily_equity_delta(
-            timestamp_ms=now_ms, external_flows_quote="0",
+            timestamp_ms=now_ms, reconciliation=reconciliation,
             account_fingerprint=fingerprint,
         )
         return result["daily_pnl_quote"]
