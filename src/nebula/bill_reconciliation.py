@@ -1,10 +1,13 @@
 """Evidence-bound reconciliation of OKX Spot account bills."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
 
 class BillReconciliationError(ValueError):
     pass
+
+
+_VERIFICATION_SEAL = object()
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,7 @@ class VerifiedBillReconciliation:
     external_flows_quote: str
     complete: bool
     source: str = "okx_account_bills"
+    _seal: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if not self.account_fingerprint or len(self.account_fingerprint) > 128:
@@ -35,6 +39,8 @@ class VerifiedBillReconciliation:
             raise BillReconciliationError("Invalid external cash flow") from exc
         if not flows.is_finite() or flows != 0:
             raise BillReconciliationError("Unsupported external cash flow for Spot-trade-only reconciliation")
+        if self._seal is not _VERIFICATION_SEAL:
+            raise BillReconciliationError("Bill reconciliation evidence was not produced by the validator")
 
 
 def reconcile_spot_bills(bills, *, account_fingerprint, begin_ms, end_ms):
@@ -90,5 +96,5 @@ def reconcile_spot_bills(bills, *, account_fingerprint, begin_ms, end_ms):
         account_fingerprint=str(account_fingerprint), begin_ms=int(begin_ms),
         end_ms=int(end_ms), bill_count=len(bills),
         last_bill_id=str(bills[-1]["billId"]) if bills else None,
-        external_flows_quote="0", complete=True,
+        external_flows_quote="0", complete=True, _seal=_VERIFICATION_SEAL,
     )
