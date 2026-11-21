@@ -310,3 +310,21 @@ def test_fill_history_rejects_non_list_page_and_invalid_pagination_bounds(tmp_pa
         manager._ingest_order_fills("BTC-USDT", "41001", page_limit=2, max_pages=3)
     with pytest.raises(ProtectionManagerError, match="bounds"):
         manager._ingest_order_fills("BTC-USDT", "41001", page_limit=0, max_pages=3)
+
+
+def test_restart_rejects_reserved_entry_without_exchange_reads_or_writes(tmp_path):
+    class NoExchangeCalls:
+        def __getattr__(self, name):
+            raise AssertionError(f"Reserved pre-submit recovery must not call {name}")
+
+    store = StateStore(str(tmp_path / "reserved-recovery.db"))
+    store.reserve_entry_intent("NBRESERVED", "BTC-USDT", 123, "buy")
+    manager = DemoOrderManager(NoExchangeCalls(), store)
+
+    result = manager.reconcile("NBRESERVED")
+
+    assert result["status"] == "rejected"
+    assert store.get_position_lock() is None
+    event = store.list_events(limit=1)[0]
+    assert event["event_type"] == "reserved_intent_recovered_without_submission"
+    assert event["details"] == {"exchange_reads": 0, "exchange_writes": 0}
