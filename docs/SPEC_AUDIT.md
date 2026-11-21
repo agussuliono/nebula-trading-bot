@@ -135,3 +135,14 @@ Earlier conversational figures such as a Rp210,000 position cap, Rp2,000 target 
 - Dataset audit rejects duplicate/out-of-order timestamps, invalid OHLC and interval mismatches; missing intervals are reported and never interpolated.
 - Tests: 183 pass. Real OKX connectivity is unverified because the build environment could not resolve the host DNS. No market data performance conclusions can be drawn.
 - Remaining: add listing/universe history to mitigate survivorship bias; calibrate spread/fees/slippage using Demo observations; assess multi-asset correlation and execution realism.
+
+
+## v0.16.8 audit — exchange order snapshot identity and lifecycle
+
+- Durable order snapshots now bind returned identity fields to the original local intent whenever OKX supplies them: instrument, side, product type, trade mode, and client order ID.
+- An exchange order ID cannot change after it has been persisted or conflict with the order ID already acknowledged on the intent. Requested size is immutable because V1 does not amend regular orders.
+- Cumulative fill size remains monotonic. Order lifecycle transitions from live/partially_filled are constrained to documented Spot states; once filled/canceled/mmp_canceled is observed, a stale response cannot regress the persisted terminal state.
+- Added regressions for mismatched client/instrument/product/mode/side identity, changed order ID, changed requested size, terminal-state regression, and valid partial-fill-to-canceled progression.
+- CI on commit 557fb7584457effa339380623ceb98a8e3418cf8: 454 tests passed in 3.69 seconds; compile and both explicit/default safety checks passed.
+- Identity fields are checked when present to retain compatibility with older offline fixtures. Production OKX order-detail responses are expected to include these fields; strict real-Demo response-shape verification remains part of the pending read-only integration test.
+- No credentials, authenticated OKX request, exchange write, or Demo/live order was used.
