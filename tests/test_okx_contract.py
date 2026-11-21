@@ -262,7 +262,7 @@ def test_public_403_non_json_response_has_safe_structured_diagnostics_and_no_ret
     response = Response(
         ValueError("SECRET_RESPONSE_BODY_MUST_NOT_LEAK"),
         status_code=403,
-        headers={"Content-Type": "text/html; charset=UTF-8", "Server": "cloudflare"},
+        headers={"Content-Type": "text/html; charset=UTF-8", "Server": "cloudflare", "CF-Ray": "abc123-SIN", "Via": "edge-proxy"},
     )
     response.text = "SECRET_RESPONSE_BODY_MUST_NOT_LEAK"
     session = RecordingSession(
@@ -277,6 +277,9 @@ def test_public_403_non_json_response_has_safe_structured_diagnostics_and_no_ret
     diagnostic = caught.value.diagnostic()
     assert diagnostic["http_status"] == 403
     assert diagnostic["content_type"] == "text/html"
+    assert diagnostic["server"] == "cloudflare"
+    assert diagnostic["cf_ray"] == "abc123-SIN"
+    assert diagnostic["via"] == "edge-proxy"
     assert "SECRET_RESPONSE_BODY_MUST_NOT_LEAK" not in str(caught.value)
     assert "SECRET_RESPONSE_BODY_MUST_NOT_LEAK" not in repr(diagnostic)
     assert len(session.calls) == 1
