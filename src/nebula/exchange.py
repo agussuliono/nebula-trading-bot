@@ -198,18 +198,27 @@ class OkxDemoClient:
 
     def get_account_bills(self, *, begin: str | None = None, end: str | None = None,
                           limit: int = 100):
-        """Read all account bills for a bounded time window (maximum 7 days).
+        """Read complete account bills for a bounded window inside OKX's 7-day retention.
 
-        The API is read-only. Pagination uses the OKX billId cursor and fails
-        closed on malformed, repeated, or non-advancing pages.
+        The API is read-only. Pagination follows OKX's newest-first billId cursor:
+        each after cursor must move strictly toward older bill IDs. Incomplete,
+        malformed, out-of-window, or over-cap results fail closed.
         """
-        if isinstance(limit, bool) or not 1 <= int(limit) <= 100:
-            raise ValueError("Account bill page limit must be between 1 and 100")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("Account bill page limit must be an integer between 1 and 100")
         for name, value in (("begin", begin), ("end", end)):
-            if value is not None and not str(value).isdigit():
-                raise ValueError(f"{name} must be a millisecond timestamp")
-        if begin is not None and end is not None and int(begin) > int(end):
+            if value is not None:
+                text_value = str(value)
+                if isinstance(value, bool) or not text_value.isascii() or not text_value.isdigit():
+                    raise ValueError(f"{name} must be a millisecond timestamp")
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        oldest_supported_ms = now_ms - 7 * 24 * 60 * 60 * 1000
+        effective_begin = int(begin) if begin is not None else oldest_supported_ms
+        effective_end = int(end) if end is not None else now_ms
+        if effective_begin > effective_end:
             raise ValueError("begin must not be later than end")
+        if effective_begin < oldest_supported_ms or effective_end > now_ms:
+            raise ValueError("Account bills window must be fully inside the last 7 days")
         rows_all, seen, cursor = [], set(), None
         for _page in range(100):
             params = {"limit": str(limit)}
@@ -220,15 +229,23 @@ class OkxDemoClient:
             if cursor is not None:
                 params["after"] = cursor
             page = self.request("GET", "/api/v5/account/bills", params, private=True)
-            if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+            if (not isinstance(page, list) or len(page) > limit
+                    or any(not isinstance(row, dict) for row in page)):
                 raise OkxError("OKX account-bills page is malformed")
+            previous_id = None
             for row in page:
                 bill_id = str(row.get("billId") or "")
-                if not bill_id or bill_id in seen:
-                    raise OkxError("OKX account-bills pagination has a missing or duplicate billId")
+                if not bill_id.isascii() or not bill_id.isdigit() or bill_id in seen:
+                    raise OkxError("OKX account-bills pagination has a missing, invalid, or duplicate billId")
+                numeric_id = int(bill_id)
+                if previous_id is not None and numeric_id >= previous_id:
+                    raise OkxError("OKX account-bills page is not in descending billId order")
+                if cursor is not None and numeric_id >= int(cursor):
+                    raise OkxError("OKX account-bills after cursor did not advance to older bills")
+                previous_id = numeric_id
                 seen.add(bill_id)
                 rows_all.append(row)
-            if len(page) < int(limit):
+            if len(page) < limit:
                 return rows_all
             next_cursor = str(page[-1].get("billId") or "")
             if not next_cursor or next_cursor == cursor:
