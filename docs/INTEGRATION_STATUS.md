@@ -255,3 +255,29 @@ This release is not an autonomous trading bot. Order submission remains disabled
 - The three-month endpoint retention is not a substitute for durable local backups. If an active position's fill history falls outside exchange retention or cannot be retrieved, reconciliation must remain blocked.
 - The CI fixtures are synthetic. They verify local validation and pagination logic, not actual response ordering/behavior on an OKX Demo account.
 - The 14-day forward test has not begun. No strategy profitability claim is made.
+
+
+## v0.16.11 — public API diagnostics and bounded resilience (2026-11-21)
+
+### Implemented in the review branch
+
+- Added Settings.from_public_env(); check-demo-public and analyze-once no longer call Settings.from_env() and do not read API key, secret, passphrase, or order-gate environment variables.
+- HTTP failures retain sanitized status, content type and numeric API error code when available. Non-JSON 403 responses are reported as HTTP failures without exposing body, headers, URL or credentials.
+- API error messages redact any configured key, secret and passphrase before they can reach diagnostics.
+- Public unauthenticated GET only: at most 3 attempts for transient connection errors, HTTP 429 and HTTP 5xx, with bounded 250/500 ms backoff.
+- Public market-data circuit breaker opens after 3 exhausted transient calls, cools down for 15 seconds, then permits one half-open probe.
+- HTTP 403 and other 4xx, redirects, invalid JSON and exchange-level API errors are not retried. Private GET and all POST operations are single-attempt. Order submission remains non-retryable.
+- The fixed Demo REST host and x-simulated-trading: 1 header remain mandatory; redirects remain disabled.
+
+### External connectivity status — unresolved
+
+- Prior public endpoint tests from outside the sandbox received HTTP 403 for both Spot instruments and tickers. The responses were not retained, so the rejecting layer (OKX, CDN/WAF, or an upstream intermediary) cannot be identified.
+- DNS resolution succeeded outside the sandbox; earlier sandbox DNS failures were consistent with sandbox network restrictions.
+- This code change improves diagnostics and protects against transient failures; it does not bypass or claim to resolve HTTP 403.
+- No additional OKX request, account authentication, API credential read, or exchange write was performed as part of this patch.
+
+### Verification boundary
+
+- Automated CI uses mocked HTTP responses and verifies the local retry, circuit-breaker, diagnostics, host and credential-isolation contracts.
+- A passing CI run cannot establish that OKX will permit requests from the user's network. Real public connectivity and authenticated Demo read-only verification remain separate gates.
+- No Demo order, live order, cancel, transfer, withdrawal, or money movement is enabled by this change.
