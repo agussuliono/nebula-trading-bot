@@ -136,6 +136,12 @@ def test_bill_reconciliation_rejects_unknown_or_unlinked_bill(tmp_path):
             bill_count=1, last_bill_id="1001", external_flows_quote="50",
             complete=True,
         )
+    with pytest.raises(BillReconciliationError, match="validator"):
+        VerifiedBillReconciliation(
+            account_fingerprint="demo-account-hash", begin_ms=ts, end_ms=ts+1000,
+            bill_count=0, last_bill_id=None, external_flows_quote="0",
+            complete=True,
+        )
     with pytest.raises(BillReconciliationError, match="unknown"):
         reconcile_spot_bills([{**valid,"subType":"999"}],
             account_fingerprint="demo-account-hash", begin_ms=ts, end_ms=ts+1000)
