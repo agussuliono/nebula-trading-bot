@@ -407,7 +407,7 @@ def test_public_nonretryable_transport_errors_count_toward_circuit_breaker(monke
 
     monkeypatch.setattr("nebula.exchange.time.sleep", lambda _delay: None)
     session = RecordingSession(*[
-        requests.InvalidURL("invalid-url") for _ in range(3)
+        requests.exceptions.InvalidURL("invalid-url") for _ in range(3)
     ])
     client = OkxDemoClient(Settings(), session=session)
 
