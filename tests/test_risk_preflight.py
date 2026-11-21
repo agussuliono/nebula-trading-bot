@@ -87,7 +87,11 @@ class SnapshotClient:
 
     def get_account_bills(self, *, begin=None, end=None, limit=100):
         self.read_calls.append("account_bills")
-        return self.bills
+        from nebula.bill_reconciliation import _create_complete_account_bills_snapshot
+        return _create_complete_account_bills_snapshot(
+            self.bills, begin_ms=int(begin), end_ms=int(end),
+            page_count=1, terminal_page_seen=True,
+        )
 
     def get_pending_orders(self, inst_type):
         self.read_calls.append("pending_regular")
