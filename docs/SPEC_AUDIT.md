@@ -173,7 +173,7 @@ Earlier conversational figures such as a Rp210,000 position cap, Rp2,000 target 
 ## v0.16.11 audit — public API isolation, diagnostics and resilience
 
 - Public-only CLI commands check-demo-public and analyze-once now use a settings loader that reads only non-secret market-data assumptions. It never accesses API credentials or order-gate environment variables.
-- HTTP errors expose bounded diagnostic fields only: status code, sanitized content type, numeric API error code, and a short sanitized message. Non-JSON responses are identified without including response bodies, request URLs, or headers.
+- HTTP errors expose bounded diagnostic fields only: status code, sanitized content type, numeric API error code, a short sanitized message, and allowlisted Server/Via/CF-Ray metadata with IP literals redacted. Non-JSON responses are identified without including response bodies, arbitrary headers, or request URLs.
 - Exchange-provided error messages redact configured API key, secret and passphrase values.
 - Public unauthenticated GET requests retry only transient network failures, HTTP 429 and HTTP 5xx, for at most three attempts with bounded exponential delays (250 ms, 500 ms). No retry is performed for 403/other 4xx, redirects, invalid JSON, or API business errors.
 - Public-market circuit breaker trips after three exhausted transient calls, stays open for 15 seconds, then allows a single half-open probe. Definitive HTTP/API responses reset the transport breaker.
