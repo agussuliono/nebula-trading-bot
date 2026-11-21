@@ -177,6 +177,20 @@ class DemoOrderManager:
             raise OrderManagerError("Unknown client_order_id")
         if intent["status"] in TERMINAL_STATES:
             return intent
+        if intent["status"] == "reserved":
+            # The durable protocol marks an intent submitting before any HTTP
+            # order write. A crash that leaves it reserved therefore proves no
+            # exchange submission was attempted; close it locally, never query
+            # or retry it as an ambiguous order.
+            self.state.update_intent(client_order_id, "rejected")
+            if intent["side"] == "buy":
+                self.state.release_rejected_entry_lock(client_order_id)
+            self.state.record_event(
+                "reserved_intent_recovered_without_submission",
+                client_order_id,
+                {"exchange_reads": 0, "exchange_writes": 0},
+            )
+            return self.state.get_intent(client_order_id)
         try:
             result = self.client.get_order(intent["instrument"], client_order_id)
         except Exception as exc:
