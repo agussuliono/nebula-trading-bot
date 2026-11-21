@@ -209,7 +209,8 @@ def test_active_protection_must_match_fresh_exchange_snapshot(tmp_path):
                 "instId": instrument, "ordId": order_id, "tradeId": "70001",
                 "clOrdId": "NBSTARTUPENTRY", "side": "buy", "fillSz": "0.01",
                 "fillPx": "50000", "fee": "-0.001", "feeCcy": "BTC",
-                "fillTime": "1000",
+                "fillTime": "1000", "billId": "70001", "instType": "SPOT",
+                "subType": "1", "tradeQuoteCcy": "USDT", "ts": "1001",
             }]
 
         def get_algo_order(self, algo_client_order_id):
