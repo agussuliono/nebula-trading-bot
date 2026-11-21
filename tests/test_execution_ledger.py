@@ -138,7 +138,8 @@ def test_reconcile_triggered_algo_discovers_child_order_ids(tmp_path):
                     "fillSz":"0.01","fillPx":"100","fee":"-0.001","feeCcy":"BTC","fillTime":"1000",
                     "billId":"1001","instType":"SPOT","subType":"1","tradeQuoteCcy":"USDT","ts":"1001"}]
             return [{"instId":inst_id,"ordId":"200","tradeId":"2","side":"sell",
-                "fillSz":"0.009","fillPx":"110","fee":"-0.09","feeCcy":"USDT","fillTime":"2000"}]
+                "fillSz":"0.009","fillPx":"110","fee":"-0.09","feeCcy":"USDT","fillTime":"2000",
+                "billId":"1002","instType":"SPOT","subType":"2","tradeQuoteCcy":"USDT","ts":"2001"}]
     store = seed(tmp_path)
     result = DemoProtectionManager(Client(), store).reconcile("NBENTRY1")
     assert result["status"] == "triggered"
