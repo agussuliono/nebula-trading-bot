@@ -31,3 +31,24 @@ def test_demo_account_exclusivity_requires_explicit_environment_confirmation(mon
 
     monkeypatch.setenv("NEBULA_DEMO_ACCOUNT_EXCLUSIVE", "true")
     assert Settings.from_env().demo_account_exclusive is True
+
+
+def test_public_settings_loader_does_not_read_credentials_or_order_flags(monkeypatch):
+    import os
+
+    original_getenv = os.getenv
+    forbidden = {"OKX_API_KEY", "OKX_SECRET_KEY", "OKX_PASSPHRASE",
+                 "NEBULA_ENABLE_DEMO_ORDERS", "NEBULA_KILL_SWITCH"}
+
+    def guarded_getenv(name, default=None):
+        if name in forbidden:
+            raise AssertionError(f"public settings attempted to read {name}")
+        return original_getenv(name, default)
+
+    monkeypatch.setattr("nebula.config.os.getenv", guarded_getenv)
+    settings = Settings.from_public_env()
+    assert settings.api_key == ""
+    assert settings.secret_key == ""
+    assert settings.passphrase == ""
+    assert settings.enable_demo_orders is False
+    assert settings.kill_switch is True

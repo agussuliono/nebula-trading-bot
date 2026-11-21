@@ -59,6 +59,20 @@ class Settings:
     market_data_max_age_ms: int = 30_000
 
     @classmethod
+    def from_public_env(cls) -> "Settings":
+        """Load non-secret market-data settings without reading API credentials.
+
+        Public-only commands deliberately cannot inspect OKX key variables or
+        execution permissions. Credential fields and order gates retain their
+        safe dataclass defaults.
+        """
+        return cls(
+            fee_bps=_finite_float("NEBULA_FEE_BPS", "10"),
+            slippage_bps=_finite_float("NEBULA_SLIPPAGE_BPS", "10"),
+            market_data_max_age_ms=_positive_int("NEBULA_MARKET_DATA_MAX_AGE_MS", "30000"),
+        )
+
+    @classmethod
     def from_env(cls) -> "Settings":
         return cls(
             api_key=os.getenv("OKX_API_KEY", ""),
