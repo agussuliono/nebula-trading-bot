@@ -370,3 +370,28 @@ def test_public_request_host_and_demo_header_ignore_environment_override(monkeyp
     assert args[1].startswith("https://openapi.okx.com/")
     assert kwargs["headers"]["x-simulated-trading"] == "1"
     assert kwargs["allow_redirects"] is False
+
+
+def test_exchange_error_message_redacts_any_configured_credentials():
+    from nebula.exchange import OkxError
+
+    settings = Settings(
+        api_key="api-secret-sentinel",
+        secret_key="hmac-secret-sentinel",
+        passphrase="passphrase-sentinel",
+    )
+    session = RecordingSession(Response({
+        "code": "50113",
+        "msg": "rejected api-secret-sentinel hmac-secret-sentinel passphrase-sentinel",
+        "data": [],
+    }))
+    client = OkxDemoClient(settings, session=session)
+
+    with pytest.raises(OkxError) as caught:
+        client.get_instruments()
+
+    message = str(caught.value)
+    assert "api-secret-sentinel" not in message
+    assert "hmac-secret-sentinel" not in message
+    assert "passphrase-sentinel" not in message
+    assert message.count("[REDACTED]") == 3
