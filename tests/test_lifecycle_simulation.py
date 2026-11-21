@@ -80,11 +80,19 @@ class LifecycleFakeExchange:
 
     def get_order_by_id(self, inst_id, order_id):
         assert inst_id == "BTC-USDT"
-        assert order_id == CHILD_ORDER_ID
-        return [{
-            "ordId": CHILD_ORDER_ID, "state": self.child_state,
-            "sz": "0.009", "accFillSz": self.child_fill, "avgPx": "110",
-        }]
+        if order_id == ENTRY_ORDER_ID:
+            return [{
+                "ordId": ENTRY_ORDER_ID, "clOrdId": ENTRY_ID,
+                "state": self.entry_state, "sz": "0.01",
+                "accFillSz": self.entry_fill, "avgPx": "100",
+                "fee": "-0.001", "feeCcy": "BTC",
+            }]
+        if order_id == CHILD_ORDER_ID:
+            return [{
+                "ordId": CHILD_ORDER_ID, "state": self.child_state,
+                "sz": "0.009", "accFillSz": self.child_fill, "avgPx": "110",
+            }]
+        raise AssertionError(f"Unexpected fake order ID: {order_id}")
 
     def get_fills_history(self, inst_id, order_id, limit=100, after=None):
         assert inst_id == "BTC-USDT"
