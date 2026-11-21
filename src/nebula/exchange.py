@@ -173,9 +173,17 @@ class OkxDemoClient:
             return "unknown"
         return value[:80]
 
+    def _safe_api_message(self, value):
+        message = " ".join(str(value).split())
+        for secret in (self.settings.api_key, self.settings.secret_key, self.settings.passphrase):
+            if secret:
+                message = message.replace(secret, "[REDACTED]")
+        return message[:160]
+
     @staticmethod
-    def _safe_api_message(value):
-        return " ".join(str(value).split())[:160]
+    def _safe_error_code(value):
+        text = str(value)
+        return text if text.isascii() and text.isdigit() else "unknown"
 
     def _request_once(self, method, request_path, body, private):
         return self.session.request(
@@ -259,7 +267,8 @@ class OkxDemoClient:
                 ) from exc
 
             if not isinstance(data, dict) or data.get("code") != "0":
-                code = data.get("code", "unknown") if isinstance(data, dict) else "invalid_response"
+                raw_code = data.get("code", "unknown") if isinstance(data, dict) else "invalid_response"
+                code = self._safe_error_code(raw_code)
                 msg = self._safe_api_message(data.get("msg", "")) if isinstance(data, dict) else ""
                 detail = f"OKX API error {code}"
                 if msg:
