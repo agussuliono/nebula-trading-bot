@@ -314,6 +314,11 @@ def test_fill_history_rejects_non_list_page_and_invalid_pagination_bounds(tmp_pa
 
 def test_restart_rejects_reserved_entry_without_exchange_reads_or_writes(tmp_path):
     class NoExchangeCalls:
+        settings = type("SettingsStub", (), {"max_daily_loss_quote": 0})()
+
+        def install_startup_entry_permit(self, *args):
+            pass
+
         def __getattr__(self, name):
             raise AssertionError(f"Reserved pre-submit recovery must not call {name}")
 
