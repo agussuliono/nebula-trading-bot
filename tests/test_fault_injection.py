@@ -81,6 +81,8 @@ class AccountReadFailureClient:
 
 def reserve_partial_entry(store):
     store.reserve_entry_intent(ENTRY_ID, "BTC-USDT", 123, "buy")
+    store.update_intent(ENTRY_ID, "submitting")
+    store.update_intent(ENTRY_ID, "acknowledged", "41001")
     store.update_intent(ENTRY_ID, "partially_filled", "41001")
     store.save_order_snapshot(ENTRY_ID, {
         "ordId": "41001", "state": "partially_filled", "sz": "0.010",
