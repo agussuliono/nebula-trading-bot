@@ -226,3 +226,85 @@ def test_fresh_account_read_failure_blocks_final_unlock(tmp_path):
 
     assert store.get_position_lock()["owner_client_order_id"] == ENTRY_ID
     assert store.get_protection_intent(ENTRY_ID)["status"] == "triggered"
+
+
+def _fill_row(bill_id, trade_id, *, inst_id="BTC-USDT", order_id="41001",
+              inst_type="SPOT", side="buy", subtype="1"):
+    return {
+        "billId": str(bill_id), "tradeId": str(trade_id), "instId": inst_id,
+        "ordId": order_id, "instType": inst_type, "side": side,
+        "subType": subtype, "tradeQuoteCcy": "USDT",
+        "fillSz": "0.001", "fillPx": "50000", "fee": "-0.000001",
+        "feeCcy": "BTC", "fillTime": "1795132800000", "ts": "1795132800001",
+    }
+
+
+class FillHistoryClient:
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.calls = []
+
+    def get_fills_history(self, instrument, order_id, *, limit, after):
+        self.calls.append((instrument, order_id, limit, after))
+        if not self.pages:
+            raise AssertionError("unexpected extra fill-history page request")
+        return self.pages.pop(0)
+
+
+def test_fill_history_pagination_validates_all_pages_and_uses_oldest_bill_cursor(tmp_path):
+    store = StateStore(str(tmp_path / "fill-pages.db"))
+    client = FillHistoryClient([
+        [_fill_row(104, 14), _fill_row(103, 13)],
+        [_fill_row(102, 12), _fill_row(101, 11)],
+        [_fill_row(100, 10)],
+    ])
+    manager = DemoProtectionManager(client, store)
+
+    inserted = manager._ingest_order_fills("BTC-USDT", "41001", page_limit=2, max_pages=3)
+
+    assert inserted == 5
+    assert len(store.list_fills("BTC-USDT", ["41001"])) == 5
+    assert [call[3] for call in client.calls] == [None, "103", "101"]
+
+
+def test_fill_history_pagination_rejects_repeated_or_non_older_cursor(tmp_path):
+    store = StateStore(str(tmp_path / "fill-cursor.db"))
+    client = FillHistoryClient([
+        [_fill_row(104, 14), _fill_row(103, 13)],
+        [_fill_row(103, 12)],
+    ])
+    manager = DemoProtectionManager(client, store)
+
+    with pytest.raises(ProtectionManagerError, match="strictly toward older"):
+        manager._ingest_order_fills("BTC-USDT", "41001", page_limit=2, max_pages=3)
+
+    assert len(store.list_fills("BTC-USDT", ["41001"])) == 2
+
+
+@pytest.mark.parametrize("row", [
+    _fill_row(103, 13, order_id="99999"),
+    _fill_row(103, 13, inst_type="MARGIN"),
+    _fill_row(103, 13, inst_id="ETH-USDT"),
+    _fill_row(103, 13, side="sell", subtype="1"),
+    {**_fill_row(103, 13), "billId": ""},
+    {**_fill_row(103, 13), "fillTime": ""},
+    {**_fill_row(103, 13), "fee": "NaN"},
+])
+def test_fill_history_rejects_mismatched_or_malformed_records_before_page_insert(tmp_path, row):
+    store = StateStore(str(tmp_path / "fill-invalid.db"))
+    manager = DemoProtectionManager(FillHistoryClient([[row]]), store)
+
+    with pytest.raises(ProtectionManagerError):
+        manager._ingest_order_fills("BTC-USDT", "41001", page_limit=2, max_pages=3)
+
+    assert store.list_fills("BTC-USDT", ["41001"]) == []
+
+
+def test_fill_history_rejects_non_list_page_and_invalid_pagination_bounds(tmp_path):
+    store = StateStore(str(tmp_path / "fill-shape.db"))
+    manager = DemoProtectionManager(FillHistoryClient([None]), store)
+
+    with pytest.raises(ProtectionManagerError, match="malformed"):
+        manager._ingest_order_fills("BTC-USDT", "41001", page_limit=2, max_pages=3)
+    with pytest.raises(ProtectionManagerError, match="bounds"):
+        manager._ingest_order_fills("BTC-USDT", "41001", page_limit=0, max_pages=3)
