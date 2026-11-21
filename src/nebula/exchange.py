@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import json
 import math
+import threading
+import time
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
@@ -17,7 +19,72 @@ from .bill_reconciliation import _create_complete_account_bills_snapshot
 
 
 class OkxError(RuntimeError):
+    """Sanitized exchange error with optional non-secret HTTP diagnostics."""
+
+    def __init__(self, message, *, status_code=None, error_code=None,
+                 content_type=None, retryable=False):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+        self.content_type = content_type
+        self.retryable = bool(retryable)
+
+    def diagnostic(self):
+        """Return safe metadata only; never include URL, headers, or response body."""
+        result = {"error_type": type(self).__name__, "message": str(self)}
+        if self.status_code is not None:
+            result["http_status"] = self.status_code
+        if self.error_code is not None:
+            result["api_error_code"] = self.error_code
+        if self.content_type is not None:
+            result["content_type"] = self.content_type
+        if self.retryable:
+            result["retryable"] = True
+        return result
+
+
+class _RetryablePublicFailure(OkxError):
     pass
+
+
+class _PublicApiCircuitBreaker:
+    """Small per-client breaker for idempotent public market-data GETs only."""
+
+    def __init__(self, *, failure_threshold=3, cooldown_seconds=15.0):
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self._clock = time.monotonic
+        self._lock = threading.Lock()
+        self._failures = 0
+        self._open_until = None
+        self._probe_in_progress = False
+
+    def before_request(self):
+        with self._lock:
+            if self._open_until is None:
+                return
+            now = self._clock()
+            if now < self._open_until:
+                raise OkxError("Public market-data circuit breaker is open; retry after cooldown")
+            if self._probe_in_progress:
+                raise OkxError("Public market-data circuit breaker probe is already in progress")
+            self._probe_in_progress = True
+
+    def record_success(self):
+        with self._lock:
+            self._failures = 0
+            self._open_until = None
+            self._probe_in_progress = False
+
+    def record_transient_failure(self):
+        with self._lock:
+            if self._probe_in_progress:
+                self._failures = self.failure_threshold
+            else:
+                self._failures += 1
+            self._probe_in_progress = False
+            if self._failures >= self.failure_threshold:
+                self._open_until = self._clock() + self.cooldown_seconds
 
 
 class OkxDemoClient:
@@ -65,6 +132,7 @@ class OkxDemoClient:
         self.timeout = timeout_value
         self._startup_entry_permit = None
         self._startup_entry_state = None
+        self._public_circuit = _PublicApiCircuitBreaker()
 
     def install_startup_entry_permit(self, permit, state_store):
         from .entry_gate import StartupEntryPermit
@@ -97,10 +165,117 @@ class OkxDemoClient:
             })
         return headers
 
+    @staticmethod
+    def _response_content_type(response):
+        raw = getattr(response, "headers", {}).get("Content-Type", "")
+        value = str(raw).split(";", 1)[0].strip().lower()
+        if not value or any(not (char.isalnum() or char in "/.+-") for char in value):
+            return "unknown"
+        return value[:80]
+
+    @staticmethod
+    def _safe_api_message(value):
+        return " ".join(str(value).split())[:160]
+
+    def _request_once(self, method, request_path, body, private):
+        return self.session.request(
+            method, DEMO_REST_URL + request_path,
+            headers=self._headers(method, request_path, body, private),
+            data=body or None, timeout=self.timeout,
+            # Never replay authenticated headers or resubmit a write through redirects.
+            allow_redirects=False,
+        )
+
+    def _request_with_policy(self, method, request_path, body, private, public_read):
+        # Only idempotent, unauthenticated public GETs are retried. Private reads and
+        # every POST are single-attempt because exchange outcomes must be reconciled.
+        max_attempts = 3 if public_read else 1
+        for attempt in range(max_attempts):
+            try:
+                response = self._request_once(method, request_path, body, private)
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                if public_read and attempt + 1 < max_attempts:
+                    time.sleep(min(0.25 * (2 ** attempt), 0.75))
+                    continue
+                if public_read:
+                    raise _RetryablePublicFailure(
+                        f"OKX public transport failed after {attempt + 1} attempts: {type(exc).__name__}",
+                        retryable=True,
+                    ) from exc
+                if method == "POST":
+                    raise OkxError(
+                        "OKX write transport failed; outcome may be unknown; reconcile before retry"
+                    ) from exc
+                raise OkxError(f"OKX transport error: {type(exc).__name__}") from exc
+            except requests.RequestException as exc:
+                raise OkxError(f"OKX transport error: {type(exc).__name__}") from exc
+
+            status_code = getattr(response, "status_code", None)
+            content_type = self._response_content_type(response)
+            if isinstance(status_code, int) and 300 <= status_code < 400:
+                raise OkxError(
+                    "Unexpected HTTP redirect; automatic redirects are disabled",
+                    status_code=status_code, content_type=content_type,
+                )
+
+            if isinstance(status_code, int) and (status_code == 429 or 500 <= status_code <= 599):
+                if public_read and attempt + 1 < max_attempts:
+                    time.sleep(min(0.25 * (2 ** attempt), 0.75))
+                    continue
+                message = f"OKX HTTP {status_code}: transient server/rate-limit response"
+                if public_read:
+                    raise _RetryablePublicFailure(
+                        message, status_code=status_code, content_type=content_type, retryable=True,
+                    )
+                if method == "POST":
+                    message += "; write outcome must be reconciled before any retry"
+                raise OkxError(message, status_code=status_code, content_type=content_type)
+
+            if isinstance(status_code, int) and status_code >= 400:
+                error_code = None
+                api_message = ""
+                if "json" in content_type:
+                    try:
+                        error_data = response.json()
+                    except ValueError:
+                        error_data = None
+                    if isinstance(error_data, dict):
+                        error_code = error_data.get("code")
+                        api_message = self._safe_api_message(error_data.get("msg", ""))
+                detail = f"API code {error_code}" if error_code not in (None, "") else f"non-success response (content-type={content_type})"
+                if api_message:
+                    detail += f": {api_message}"
+                raise OkxError(
+                    f"OKX HTTP {status_code}: {detail}",
+                    status_code=status_code, error_code=error_code, content_type=content_type,
+                )
+
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise OkxError(
+                    f"OKX returned invalid JSON (HTTP {status_code}; content-type={content_type})",
+                    status_code=status_code, content_type=content_type,
+                ) from exc
+
+            if not isinstance(data, dict) or data.get("code") != "0":
+                code = data.get("code", "unknown") if isinstance(data, dict) else "invalid_response"
+                msg = self._safe_api_message(data.get("msg", "")) if isinstance(data, dict) else ""
+                detail = f"OKX API error {code}"
+                if msg:
+                    detail += f": {msg}"
+                raise OkxError(
+                    detail, status_code=status_code, error_code=code, content_type=content_type,
+                )
+            return data.get("data", [])
+
+        raise OkxError("Public request retry policy ended unexpectedly")
+
     def request(self, method: str, path: str, params=None, payload=None, private=False):
         method = str(method).upper()
         endpoint = (method, path)
-        if endpoint in self._PUBLIC_READS:
+        public_read = endpoint in self._PUBLIC_READS
+        if public_read:
             if private or payload is not None:
                 raise SafetyError("Public market endpoints are read-only")
         elif endpoint in self._PRIVATE_READS:
@@ -124,35 +299,27 @@ class OkxDemoClient:
                     raise SafetyError("Spot entry blocked by startup recovery gate") from exc
         else:
             raise SafetyError("Endpoint is not allowlisted for NEBULA V1: " + method + " " + path)
+
         query = f"?{urlencode(params, doseq=True)}" if params else ""
         request_path = f"{path}{query}"
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False) if payload is not None else ""
+        if public_read:
+            self._public_circuit.before_request()
         try:
-            response = self.session.request(
-                method.upper(), DEMO_REST_URL + request_path,
-                headers=self._headers(method, request_path, body, private),
-                data=body or None, timeout=self.timeout,
-                # Never let requests replay authenticated OKX headers to a redirect
-                # target or transparently resubmit an order after a 307/308 response.
-                allow_redirects=False,
-            )
-            status_code = getattr(response, "status_code", None)
-            if isinstance(status_code, int) and 300 <= status_code < 400:
-                raise OkxError("Unexpected HTTP redirect; automatic redirects are disabled")
-            response.raise_for_status()
-            data = response.json()
-        except requests.Timeout as exc:
-            # Especially important for POST: caller must reconcile clOrdId before any retry.
-            raise OkxError("OKX request timed out; outcome may be unknown; reconcile before retry") from exc
-        except requests.RequestException as exc:
-            raise OkxError(f"OKX transport error: {type(exc).__name__}") from exc
-        except ValueError as exc:
-            raise OkxError("OKX returned invalid JSON") from exc
-        if not isinstance(data, dict) or data.get("code") != "0":
-            code = data.get("code", "unknown") if isinstance(data, dict) else "invalid_response"
-            msg = data.get("msg", "") if isinstance(data, dict) else ""
-            raise OkxError(f"OKX error {code}: {msg}")
-        return data.get("data", [])
+            result = self._request_with_policy(method, request_path, body, private, public_read)
+        except _RetryablePublicFailure:
+            self._public_circuit.record_transient_failure()
+            raise
+        except OkxError:
+            # A definitive HTTP/API response (including 403) proves the transport
+            # is reachable; it must not poison the transient-network circuit.
+            if public_read:
+                self._public_circuit.record_success()
+            raise
+        else:
+            if public_read:
+                self._public_circuit.record_success()
+            return result
 
     def get_instruments(self):
         return self.request("GET", "/api/v5/public/instruments", {"instType": "SPOT"})
