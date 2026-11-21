@@ -28,6 +28,8 @@ class CleanAccount:
 
 def seed_filled_position(state, entry_id="NBSTARTUPENTRY"):
     state.reserve_entry_intent(entry_id, "BTC-USDT", 123, "buy")
+    state.update_intent(entry_id, "submitting")
+    state.update_intent(entry_id, "acknowledged", "10001")
     state.update_intent(entry_id, "filled", "10001")
     state.save_order_snapshot(entry_id, {
         "ordId": "10001", "state": "filled", "sz": "0.01",
