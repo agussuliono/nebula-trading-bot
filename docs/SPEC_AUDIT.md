@@ -146,3 +146,14 @@ Earlier conversational figures such as a Rp210,000 position cap, Rp2,000 target 
 - CI on commit 557fb7584457effa339380623ceb98a8e3418cf8: 454 tests passed in 3.69 seconds; compile and both explicit/default safety checks passed.
 - Identity fields are checked when present to retain compatibility with older offline fixtures. Production OKX order-detail responses are expected to include these fields; strict real-Demo response-shape verification remains part of the pending read-only integration test.
 - No credentials, authenticated OKX request, exchange write, or Demo/live order was used.
+
+
+## v0.16.9 audit — monotonic intent state machine and crash-before-submit recovery
+
+- Replaced unrestricted intent updates with an explicit forward-only state transition table. Unknown states, skipped transitions, terminal-state rewrites, and changes to an already persisted exchange order ID are rejected.
+- Valid submission path is reserved → submitting → acknowledged/submission_unknown → exchange-observed live/partially_filled/terminal. Reconciliation may move ambiguous states only toward observed exchange states; terminal intents cannot be reopened.
+- Added recovery for a durable reserved intent. The order manager marks it rejected locally and releases a zero-fill buy reservation without any exchange read/write. This is safe because the submit protocol persists submitting before calling the exchange write method; a process crash while still reserved proves the network submission was not attempted.
+- A crash after submitting remains ambiguous and follows the read-only exchange reconciliation path; it is never automatically resubmitted.
+- Added tests for invalid/skipped transitions, unknown status, terminal rewrite, exchange order ID mutation, and recovery of a pre-submit reserved entry without exchange calls.
+- GitHub Actions run #345 / ID 44898364646 on commit c84b02a64baa4fdb82cf2396a08fe4db113adb3a: 457 tests passed in 4.06 seconds; compile, explicit Demo safety settings, and fail-closed defaults passed.
+- No credentials, authenticated OKX account call, exchange write, Demo/live order, or real money was used.
