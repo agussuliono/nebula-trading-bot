@@ -400,3 +400,22 @@ def test_exchange_error_message_redacts_any_configured_credentials():
     assert "hmac-secret-sentinel" not in message
     assert "passphrase-sentinel" not in message
     assert message.count("[REDACTED]") == 3
+
+
+def test_public_nonretryable_transport_errors_count_toward_circuit_breaker(monkeypatch):
+    from nebula.exchange import OkxError
+
+    monkeypatch.setattr("nebula.exchange.time.sleep", lambda _delay: None)
+    session = RecordingSession(*[
+        requests.InvalidURL("invalid-url") for _ in range(3)
+    ])
+    client = OkxDemoClient(Settings(), session=session)
+
+    for _ in range(3):
+        with pytest.raises(OkxError, match="public transport error"):
+            client.get_tickers()
+
+    assert len(session.calls) == 3
+    with pytest.raises(OkxError, match="circuit breaker is open"):
+        client.get_tickers()
+    assert len(session.calls) == 3
