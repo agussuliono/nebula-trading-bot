@@ -56,6 +56,9 @@ def reconcile_spot_bills(bills, *, account_fingerprint, begin_ms, end_ms):
     for bill in bills:
         if not isinstance(bill, dict):
             raise BillReconciliationError("Malformed account bill")
+        if (str(bill.get("type")) != "2"
+                or str(bill.get("instType") or "").upper() != "SPOT"):
+            raise BillReconciliationError("Transfer or non-Spot bill classification")
         required = ("billId", "ccy", "balChg", "bal", "type", "subType",
                     "instType", "instId", "ordId", "tradeId", "ts")
         if any(bill.get(key) in (None, "") for key in required):
