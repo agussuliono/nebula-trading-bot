@@ -183,8 +183,11 @@ class AccountLedger:
                 raise AccountLedgerError("Conflicting equity mark at the same timestamp")
             return {"trading_day": day, "equity_quote": str(equity), "timestamp_ms": ts}
 
-    def daily_equity_delta(self, *, timestamp_ms, external_flows_quote=None,
+    def daily_equity_delta(self, *, timestamp_ms, reconciliation,
                            account_fingerprint=None):
+        """Calculate daily equity P&L only from interval-bound bill evidence."""
+        from .bill_reconciliation import VerifiedBillReconciliation
+
         ts = int(timestamp_ms)
         day = self.utc_day(ts)
         with self.state._connect() as db:
@@ -194,13 +197,20 @@ class AccountLedger:
             raise AccountLedgerError("Daily equity baseline or current mark is missing")
         if account_fingerprint != baseline["account_fingerprint"]:
             raise AccountLedgerError("Account fingerprint missing or changed")
+        if not isinstance(reconciliation, VerifiedBillReconciliation):
+            raise AccountLedgerError("Verified bill reconciliation evidence is required")
+        if (reconciliation.complete is not True
+                or reconciliation.account_fingerprint != baseline["account_fingerprint"]
+                or reconciliation.begin_ms != int(baseline["opening_timestamp_ms"])
+                or reconciliation.end_ms != ts
+                or reconciliation.source != "okx_account_bills"):
+            raise AccountLedgerError("Bill reconciliation evidence does not cover this account and interval")
         if int(latest["timestamp_ms"]) != ts:
             raise AccountLedgerError("A fresh equity mark for the requested timestamp is required")
-        if external_flows_quote is None:
-            raise AccountLedgerError("External cash flows have not been fully reconciled")
-        flows = _decimal(external_flows_quote, "external_flows_quote")
+        flows = _decimal(reconciliation.external_flows_quote, "external_flows_quote")
         pnl = Decimal(latest["equity_quote"]) - Decimal(baseline["opening_equity_quote"]) - flows
         return {"trading_day": day, "daily_pnl_quote": str(pnl),
                 "opening_equity_quote": baseline["opening_equity_quote"],
                 "current_equity_quote": latest["equity_quote"],
-                "external_flows_quote": str(flows), "complete": True}
+                "external_flows_quote": str(flows),
+                "reconciled_bill_count": reconciliation.bill_count, "complete": True}
