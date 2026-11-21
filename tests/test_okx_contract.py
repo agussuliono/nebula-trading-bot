@@ -254,3 +254,119 @@ def test_read_only_demo_verification_uses_only_demo_marked_get_requests():
     assert all(call[0][0] == "GET" for call in session.calls)
     assert all(call[1]["headers"]["x-simulated-trading"] == "1" for call in session.calls)
     assert all(call[1]["allow_redirects"] is False for call in session.calls)
+
+
+def test_public_403_non_json_response_has_safe_structured_diagnostics_and_no_retry():
+    from nebula.exchange import OkxError
+
+    response = Response(
+        ValueError("SECRET_RESPONSE_BODY_MUST_NOT_LEAK"),
+        status_code=403,
+        headers={"Content-Type": "text/html; charset=UTF-8", "Server": "cloudflare"},
+    )
+    response.text = "SECRET_RESPONSE_BODY_MUST_NOT_LEAK"
+    session = RecordingSession(
+        response,
+        Response({"code": "0", "msg": "", "data": []}),
+    )
+    client = OkxDemoClient(Settings(), session=session)
+
+    with pytest.raises(OkxError, match="HTTP 403") as caught:
+        client.get_instruments()
+
+    diagnostic = caught.value.diagnostic()
+    assert diagnostic["http_status"] == 403
+    assert diagnostic["content_type"] == "text/html"
+    assert "SECRET_RESPONSE_BODY_MUST_NOT_LEAK" not in str(caught.value)
+    assert "SECRET_RESPONSE_BODY_MUST_NOT_LEAK" not in repr(diagnostic)
+    assert len(session.calls) == 1
+
+    # A definitive 403 is not a transient transport failure and does not open
+    # the public circuit; a subsequent request is allowed.
+    assert client.get_instruments() == []
+    assert len(session.calls) == 2
+
+
+def test_public_get_retries_only_bounded_transient_http_statuses(monkeypatch):
+    delays = []
+    monkeypatch.setattr("nebula.exchange.time.sleep", delays.append)
+    session = RecordingSession(
+        Response({}, status_code=503),
+        Response({}, status_code=429),
+        Response({"code": "0", "msg": "", "data": []}),
+    )
+    client = OkxDemoClient(Settings(), session=session)
+
+    assert client.get_tickers() == []
+    assert len(session.calls) == 3
+    assert delays == [0.25, 0.5]
+    assert all(call[0][0] == "GET" for call in session.calls)
+    assert all(call[1]["allow_redirects"] is False for call in session.calls)
+
+
+def test_public_get_retries_transient_network_errors_but_private_reads_do_not(monkeypatch):
+    delays = []
+    monkeypatch.setattr("nebula.exchange.time.sleep", delays.append)
+    public_session = RecordingSession(
+        requests.Timeout("timeout"),
+        requests.ConnectionError("dns"),
+        Response({"code": "0", "msg": "", "data": []}),
+    )
+    assert OkxDemoClient(Settings(), session=public_session).get_instruments() == []
+    assert len(public_session.calls) == 3
+    assert delays == [0.25, 0.5]
+
+    private_session = RecordingSession(Response({}, status_code=503))
+    client = OkxDemoClient(enabled_settings(), session=private_session)
+    from nebula.exchange import OkxError
+    with pytest.raises(OkxError, match="HTTP 503"):
+        client.get_balance()
+    assert len(private_session.calls) == 1
+
+
+def test_public_circuit_breaker_opens_after_three_exhausted_calls_and_recovers(monkeypatch):
+    from nebula.exchange import OkxError
+
+    clock = [100.0]
+    monkeypatch.setattr("nebula.exchange.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nebula.exchange.time.sleep", lambda _delay: None)
+    session = RecordingSession(*[Response({}, status_code=503) for _ in range(9)])
+    client = OkxDemoClient(Settings(), session=session)
+
+    for _ in range(3):
+        with pytest.raises(OkxError, match="HTTP 503"):
+            client.get_instruments()
+    assert len(session.calls) == 9
+
+    with pytest.raises(OkxError, match="circuit breaker is open"):
+        client.get_instruments()
+    assert len(session.calls) == 9
+
+    clock[0] += 16
+    session.responses.append(Response({"code": "0", "msg": "", "data": []}))
+    assert client.get_instruments() == []
+    assert len(session.calls) == 10
+
+
+def test_private_cancel_write_is_never_retried_after_http_failure():
+    from nebula.exchange import OkxError
+
+    session = RecordingSession(Response({}, status_code=503))
+    client = OkxDemoClient(enabled_settings(), session=session)
+
+    with pytest.raises(OkxError, match="HTTP 503"):
+        client.cancel_order(inst_id="BTC-USDT", order_id="12345")
+    assert len(session.calls) == 1
+    assert session.calls[0][0][0] == "POST"
+
+
+def test_public_request_host_and_demo_header_ignore_environment_override(monkeypatch):
+    monkeypatch.setenv("OKX_BASE_URL", "https://www.okx.com")
+    session = RecordingSession(Response({"code": "0", "msg": "", "data": []}))
+    client = OkxDemoClient(Settings(), session=session)
+
+    assert client.get_tickers() == []
+    args, kwargs = session.calls[0]
+    assert args[1].startswith("https://openapi.okx.com/")
+    assert kwargs["headers"]["x-simulated-trading"] == "1"
+    assert kwargs["allow_redirects"] is False
