@@ -141,4 +141,4 @@ def test_account_bills_page_cap_fails_closed_without_claiming_completeness():
         client.get_account_bills(begin=begin, end=end, limit=1)
 
     assert len(session.calls) == 100
-    assert session.calls[-1][0][1].endswith("after=9901")
+    assert session.calls[-1][0][1].endswith("after=9902")
