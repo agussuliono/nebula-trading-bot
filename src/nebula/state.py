@@ -134,7 +134,7 @@ class StateStore:
     def update_intent(self, client_order_id: str, status: str, exchange_order_id: str | None = None) -> None:
         """Apply only forward, evidence-compatible order-intent transitions."""
         allowed = {
-            "reserved": {"submitting"},
+            "reserved": {"submitting", "rejected"},
             "submitting": {"acknowledged", "submission_unknown", "rejected"},
             "submission_unknown": {
                 "submission_unknown", "acknowledged", "live", "partially_filled",
