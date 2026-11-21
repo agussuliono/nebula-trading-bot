@@ -257,7 +257,8 @@ class OkxDemoClient:
                 message = f"OKX HTTP {status_code}: transient server/rate-limit response"
                 if public_read:
                     raise _RetryablePublicFailure(
-                        message, status_code=status_code, content_type=content_type, retryable=True,
+                        message, status_code=status_code, content_type=content_type,
+                        retryable=True, **response_meta,
                     )
                 if method == "POST":
                     message += "; write outcome must be reconciled before any retry"
@@ -299,7 +300,8 @@ class OkxDemoClient:
                 if msg:
                     detail += f": {msg}"
                 raise OkxError(
-                    detail, status_code=status_code, error_code=code, content_type=content_type,
+                    detail, status_code=status_code, error_code=code,
+                    content_type=content_type, **response_meta,
                 )
             return data.get("data", [])
 
