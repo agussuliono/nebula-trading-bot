@@ -39,7 +39,11 @@ class FakeClient:
     def get_pending_algo_orders(self, ord_type):
         return []
     def get_account_bills(self, *, begin=None, end=None, limit=100):
-        return []
+        from nebula.bill_reconciliation import _create_complete_account_bills_snapshot
+        return _create_complete_account_bills_snapshot(
+            [], begin_ms=int(begin), end_ms=int(end),
+            page_count=1, terminal_page_seen=True,
+        )
 
 
 def setup(tmp_path, client):
@@ -409,7 +413,11 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
         def get_pending_algo_orders(self, ord_type):
             return []
         def get_account_bills(self, *, begin=None, end=None, limit=100):
-            return []
+            from nebula.bill_reconciliation import _create_complete_account_bills_snapshot
+            return _create_complete_account_bills_snapshot(
+                [], begin_ms=int(begin), end_ms=int(end),
+                page_count=1, terminal_page_seen=True,
+            )
     authorizer = PortfolioRiskAuthorizer(
         SnapshotClient(), StateStore(str(tmp_path / "auth.db")), settings,
         plan_provider=lambda **kwargs: {
