@@ -4,6 +4,7 @@ This module stores evidence; it deliberately does not guess bill classifications
 or calculate P&L when external cash flows have not been reconciled.
 """
 import json
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -75,12 +76,13 @@ class AccountLedger:
         return dict(row) if row else None
 
     def save_bills(self, bills):
-        if not isinstance(bills, list):
-            raise AccountLedgerError("bills must be a list")
+        if not isinstance(bills, Sequence) or isinstance(bills, (str, bytes)):
+            raise AccountLedgerError("bills must be a sequence of bill records")
         inserted = 0
         for bill in bills:
-            if not isinstance(bill, dict):
+            if not hasattr(bill, "items"):
                 raise AccountLedgerError("bill row must be an object")
+            bill = dict(bill)
             required = ("billId", "ccy", "balChg", "bal", "type", "subType", "ts")
             if any(bill.get(key) in (None, "") for key in required):
                 raise AccountLedgerError("bill is missing required OKX fields")
