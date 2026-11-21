@@ -4,8 +4,23 @@ from decimal import Decimal
 import pytest
 
 from nebula.account_ledger import AccountLedger, AccountLedgerError
-from nebula.bill_reconciliation import reconcile_spot_bills, BillReconciliationError
+from nebula.bill_reconciliation import (reconcile_spot_bills, BillReconciliationError,
+    _create_complete_account_bills_snapshot)
 from nebula.state import StateStore
+
+
+def _reconcile(snapshot, fingerprint, begin_ms, end_ms):
+    return reconcile_spot_bills(
+        snapshot, account_fingerprint=fingerprint,
+        begin_ms=begin_ms, end_ms=end_ms,
+    )
+
+
+def _snapshot(rows, begin_ms, end_ms):
+    return _create_complete_account_bills_snapshot(
+        rows, begin_ms=begin_ms, end_ms=end_ms,
+        page_count=1, terminal_page_seen=True,
+    )
 
 
 def _bill(**overrides):
@@ -56,8 +71,7 @@ def test_daily_equity_baseline_is_immutable_and_survives_restart(tmp_path):
     restarted = AccountLedger(StateStore(path))
     assert restarted.record_equity_mark(equity_quote="1010", timestamp_ms=ts+60000,
                                         account_fingerprint="demo-account-hash")["equity_quote"] == "1010"
-    evidence = reconcile_spot_bills([], account_fingerprint="demo-account-hash",
-                                      begin_ms=ts, end_ms=ts+60000)
+    evidence = _reconcile(_snapshot([], ts, ts+60000), "demo-account-hash", ts, ts+60000)
     result = restarted.daily_equity_delta(timestamp_ms=ts+60000,
         reconciliation=evidence, account_fingerprint="demo-account-hash")
     assert Decimal(result["daily_pnl_quote"]) == Decimal("10")
@@ -107,13 +121,11 @@ def test_daily_equity_delta_rejects_evidence_for_wrong_account_or_interval(tmp_p
                                     account_fingerprint="demo-account-hash")
     ledger.record_equity_mark(equity_quote="1010", timestamp_ms=ts+1000,
                               account_fingerprint="demo-account-hash")
-    wrong_account = reconcile_spot_bills([], account_fingerprint="other-account",
-                                          begin_ms=ts, end_ms=ts+1000)
+    wrong_account = _reconcile(_snapshot([], ts, ts+1000), "other-account", ts, ts+1000)
     with pytest.raises(AccountLedgerError, match="does not cover"):
         ledger.daily_equity_delta(timestamp_ms=ts+1000,
             reconciliation=wrong_account, account_fingerprint="demo-account-hash")
-    wrong_interval = reconcile_spot_bills([], account_fingerprint="demo-account-hash",
-                                          begin_ms=ts+1, end_ms=ts+1000)
+    wrong_interval = _reconcile(_snapshot([], ts+1, ts+1000), "demo-account-hash", ts+1, ts+1000)
     with pytest.raises(AccountLedgerError, match="does not cover"):
         ledger.daily_equity_delta(timestamp_ms=ts+1000,
             reconciliation=wrong_interval, account_fingerprint="demo-account-hash")
@@ -124,8 +136,7 @@ def test_bill_reconciliation_rejects_unknown_or_unlinked_bill(tmp_path):
     valid = {"billId":"1001","ccy":"USDT","balChg":"-0.1","bal":"999.9",
              "type":"2","subType":"1","instType":"SPOT","instId":"BTC-USDT",
              "ordId":"2001","tradeId":"3001","ts":str(ts)}
-    evidence = reconcile_spot_bills([valid], account_fingerprint="demo-account-hash",
-                                    begin_ms=ts, end_ms=ts+1000)
+    evidence = _reconcile(_snapshot([valid], ts, ts+1000), "demo-account-hash", ts, ts+1000)
     assert evidence.complete is True
     assert evidence.bill_count == 1
     assert evidence.external_flows_quote == "0"
@@ -143,14 +154,11 @@ def test_bill_reconciliation_rejects_unknown_or_unlinked_bill(tmp_path):
             complete=True,
         )
     with pytest.raises(BillReconciliationError, match="unknown"):
-        reconcile_spot_bills([{**valid,"subType":"999"}],
-            account_fingerprint="demo-account-hash", begin_ms=ts, end_ms=ts+1000)
+        _reconcile(_snapshot([{**valid,"subType":"999"}], ts, ts+1000), "demo-account-hash", ts, ts+1000)
     with pytest.raises(BillReconciliationError, match="linkage"):
-        reconcile_spot_bills([{**valid,"tradeId":""}],
-            account_fingerprint="demo-account-hash", begin_ms=ts, end_ms=ts+1000)
+        _reconcile(_snapshot([{**valid,"tradeId":""}], ts, ts+1000), "demo-account-hash", ts, ts+1000)
     with pytest.raises(BillReconciliationError, match="outside"):
-        reconcile_spot_bills([valid], account_fingerprint="demo-account-hash",
-                             begin_ms=ts+1, end_ms=ts+1000)
+        _reconcile(_snapshot([valid], ts+1, ts+1000), "demo-account-hash", ts+1, ts+1000)
 
 
 def test_bill_reconciliation_rejects_duplicate_ids_and_non_spot(tmp_path):
@@ -159,8 +167,6 @@ def test_bill_reconciliation_rejects_duplicate_ids_and_non_spot(tmp_path):
              "type":"2","subType":"1","instType":"SPOT","instId":"BTC-USDT",
              "ordId":"2001","tradeId":"3001","ts":str(ts)}
     with pytest.raises(BillReconciliationError, match="duplicate"):
-        reconcile_spot_bills([valid,valid], account_fingerprint="demo-account-hash",
-                             begin_ms=ts, end_ms=ts+1000)
+        _reconcile(_snapshot([valid,valid], ts, ts+1000), "demo-account-hash", ts, ts+1000)
     with pytest.raises(BillReconciliationError, match="non-Spot"):
-        reconcile_spot_bills([{**valid,"instType":"MARGIN"}],
-            account_fingerprint="demo-account-hash", begin_ms=ts, end_ms=ts+1000)
+        _reconcile(_snapshot([{**valid,"instType":"MARGIN"}], ts, ts+1000), "demo-account-hash", ts, ts+1000)
