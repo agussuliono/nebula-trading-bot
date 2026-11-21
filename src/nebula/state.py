@@ -336,7 +336,9 @@ class StateStore:
             return result
 
     def save_order_snapshot(self, client_order_id: str, order: dict) -> dict[str, Any]:
-        """Persist cumulative execution facts; reject fill regressions and size overflow."""
+        """Persist cumulative execution facts; reject identity, state and fill regressions."""
+        if not isinstance(order, dict):
+            raise ValueError("Exchange order snapshot must be an object")
         from decimal import Decimal, InvalidOperation
         def dec(value, name):
             try:
@@ -367,8 +369,6 @@ class StateStore:
         if cumulative > 0 and average <= 0:
             raise ValueError("Filled order has no valid average price")
         state = str(order.get("state", "unknown"))
-        if not isinstance(order, dict):
-            raise ValueError("Exchange order snapshot must be an object")
         order_id = str(order.get("ordId") or "")
         if order_id and (not order_id.isascii() or not order_id.isdigit()):
             raise ValueError("Exchange order snapshot has an invalid order ID")
