@@ -271,7 +271,7 @@ def test_fill_history_pagination_rejects_repeated_or_non_older_cursor(tmp_path):
     store = StateStore(str(tmp_path / "fill-cursor.db"))
     client = FillHistoryClient([
         [_fill_row(104, 14), _fill_row(103, 13)],
-        [_fill_row(104, 12)],
+        [_fill_row(105, 12)],
     ])
     manager = DemoProtectionManager(client, store)
 
