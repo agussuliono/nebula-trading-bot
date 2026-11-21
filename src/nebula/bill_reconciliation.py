@@ -33,8 +33,8 @@ class VerifiedBillReconciliation:
             flows = Decimal(str(self.external_flows_quote))
         except (InvalidOperation, TypeError, ValueError) as exc:
             raise BillReconciliationError("Invalid external cash flow") from exc
-        if not flows.is_finite():
-            raise BillReconciliationError("Invalid external cash flow")
+        if not flows.is_finite() or flows != 0:
+            raise BillReconciliationError("Unsupported external cash flow for Spot-trade-only reconciliation")
 
 
 def reconcile_spot_bills(bills, *, account_fingerprint, begin_ms, end_ms):
