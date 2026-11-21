@@ -262,7 +262,7 @@ This release is not an autonomous trading bot. Order submission remains disabled
 ### Implemented in the review branch
 
 - Added Settings.from_public_env(); check-demo-public and analyze-once no longer call Settings.from_env() and do not read API key, secret, passphrase, or order-gate environment variables.
-- HTTP failures retain sanitized status, content type and numeric API error code when available. Non-JSON 403 responses are reported as HTTP failures without exposing body, headers, URL or credentials.
+- HTTP failures retain sanitized status, content type, numeric API error code and only allowlisted Server/Via/CF-Ray metadata (IP literals redacted). Non-JSON 403 responses are reported without exposing body, arbitrary headers, URL or credentials.
 - API error messages redact any configured key, secret and passphrase before they can reach diagnostics.
 - Public unauthenticated GET only: at most 3 attempts for transient connection errors, HTTP 429 and HTTP 5xx, with bounded 250/500 ms backoff.
 - Public market-data circuit breaker opens after 3 exhausted transient calls, cools down for 15 seconds, then permits one half-open probe.
