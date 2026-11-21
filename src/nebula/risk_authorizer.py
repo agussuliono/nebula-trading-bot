@@ -111,12 +111,16 @@ class PortfolioRiskAuthorizer:
                 raise RiskAuthorizationError(
                     "Daily baseline missing after account activity; wait for next clean UTC day"
                 )
-            bills = []
             ledger.establish_daily_baseline(
                 equity_quote=equity, timestamp_ms=now_ms,
                 account_fingerprint=fingerprint,
             )
             baseline = ledger.get_daily_baseline(now_ms)
+            # Re-fetch against the exact immutable baseline interval. The earlier
+            # day-start scan only proves the account was clean before baseline creation.
+            bills = self.client.get_account_bills(
+                begin=str(baseline["opening_timestamp_ms"]), end=str(now_ms)
+            )
         else:
             bills = self.client.get_account_bills(
                 begin=str(baseline["opening_timestamp_ms"]), end=str(now_ms)
