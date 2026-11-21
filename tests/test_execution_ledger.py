@@ -135,7 +135,8 @@ def test_reconcile_triggered_algo_discovers_child_order_ids(tmp_path):
         def get_fills_history(self, inst_id, order_id, limit=100, after=None):
             if order_id == "100":
                 return [{"instId":inst_id,"ordId":"100","tradeId":"1","clOrdId":"NBENTRY1","side":"buy",
-                    "fillSz":"0.01","fillPx":"100","fee":"-0.001","feeCcy":"BTC","fillTime":"1000"}]
+                    "fillSz":"0.01","fillPx":"100","fee":"-0.001","feeCcy":"BTC","fillTime":"1000",
+                    "billId":"1001","instType":"SPOT","subType":"1","tradeQuoteCcy":"USDT","ts":"1001"}]
             return [{"instId":inst_id,"ordId":"200","tradeId":"2","side":"sell",
                 "fillSz":"0.009","fillPx":"110","fee":"-0.09","feeCcy":"USDT","fillTime":"2000"}]
     store = seed(tmp_path)
