@@ -257,7 +257,7 @@ This release is not an autonomous trading bot. Order submission remains disabled
 - The 14-day forward test has not begun. No strategy profitability claim is made.
 
 
-## v0.16.11 — public API diagnostics and bounded resilience (2026-11-21)
+## v0.16.7 — public API diagnostics and bounded resilience (2026-11-21)
 
 ### Implemented in the review branch
 
