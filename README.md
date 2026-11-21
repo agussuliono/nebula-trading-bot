@@ -1,6 +1,6 @@
 # NEBULA Trading Bot V1 — Demo-only foundation
 
-## v0.16.11 patch note
+## v0.16.7 patch note
 
 - Public-only CLI paths (check-demo-public and analyze-once) use a dedicated settings loader that never reads API key, secret, passphrase, or order-gate environment variables.
 - HTTP errors now retain safe diagnostics (HTTP status, sanitized API code and content type). Non-JSON responses such as HTML 403 pages are classified without copying their body, arbitrary headers, or request URL; only allowlisted Server/Via/CF-Ray metadata is retained, with IP literals redacted.
@@ -12,7 +12,7 @@
 - Added regression tests for credential isolation/redaction, 403 non-JSON diagnostics, bounded retries, circuit-breaker recovery, and no retries for private reads/writes.
 - This patch does not resolve the previously observed HTTP 403 from the user's network. The rejecting layer is still unknown because the original response headers/body were not retained. No live or Demo account was accessed.
 
-**Version:** 0.16.11  
+**Version:** 0.16.7  
 **Status:** Public API diagnostics and bounded read resilience included. Strategy validation failed on the supplied historical sample; not ready for forward testing or autonomous trading.
 
 ## v0.16.5 patch note
