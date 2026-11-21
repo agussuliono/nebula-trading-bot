@@ -12,6 +12,7 @@ def test_intent_is_idempotent(tmp_path):
 def test_rejected_entry_lock_is_not_released_for_tiny_decimal_partial_fill(tmp_path):
     store = StateStore(str(tmp_path / "tiny-fill.db"))
     store.reserve_entry_intent("NBENTRY1", "BTC-USDT", 123, "buy")
+    store.update_intent("NBENTRY1", "submitting")
     store.save_order_snapshot("NBENTRY1", {
         "ordId": "10001",
         "state": "canceled",
