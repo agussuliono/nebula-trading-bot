@@ -96,7 +96,7 @@ def test_account_bills_rejects_duplicate_or_non_older_next_page():
         [{"billId": "19"}],
     )
 
-    with pytest.raises(OkxError, match="after cursor"):
+    with pytest.raises(OkxError, match="duplicate billId|after cursor"):
         client.get_account_bills(begin=begin, end=end, limit=2)
 
 
