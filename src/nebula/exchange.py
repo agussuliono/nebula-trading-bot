@@ -248,7 +248,8 @@ class OkxDemoClient:
                     except ValueError:
                         error_data = None
                     if isinstance(error_data, dict):
-                        error_code = error_data.get("code")
+                        raw_code = error_data.get("code")
+                        error_code = self._safe_error_code(raw_code) if raw_code not in (None, "") else None
                         api_message = self._safe_api_message(error_data.get("msg", ""))
                 detail = f"API code {error_code}" if error_code not in (None, "") else f"non-success response (content-type={content_type})"
                 if api_message:
