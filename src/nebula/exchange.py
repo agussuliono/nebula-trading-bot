@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 
 from .config import DEMO_FLAG, DEMO_REST_URL, Settings, SafetyError
 from .instruments import InstrumentRuleError, SpotInstrument
+from .bill_reconciliation import _create_complete_account_bills_snapshot
 
 
 class OkxError(RuntimeError):
@@ -246,7 +247,10 @@ class OkxDemoClient:
                 seen.add(bill_id)
                 rows_all.append(row)
             if len(page) < limit:
-                return rows_all
+                return _create_complete_account_bills_snapshot(
+                    rows_all, begin_ms=effective_begin, end_ms=effective_end,
+                    page_count=_page + 1, terminal_page_seen=True,
+                )
             next_cursor = str(page[-1].get("billId") or "")
             if not next_cursor or next_cursor == cursor:
                 raise OkxError("OKX account-bills pagination cursor did not advance")
