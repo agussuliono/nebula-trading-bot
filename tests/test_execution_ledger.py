@@ -71,10 +71,10 @@ def test_triggered_oco_reconciles_children_and_fills_without_releasing_lock(tmp_
             if order_id == "100":
                 return [{"instId":inst_id,"ordId":"100","tradeId":"1","clOrdId":"NBENTRY1",
                     "side":"buy","fillSz":"0.01","fillPx":"100","fee":"-0.001","feeCcy":"BTC","fillTime":"1000",
-                    "billId":"1001","instType":"SPOT","subType":"1","tradeQuoteCcy":"USDT","ts":"1001"]
+                    "billId":"1001","instType":"SPOT","subType":"1","tradeQuoteCcy":"USDT","ts":"1001"}]
             return [{"instId":inst_id,"ordId":order_id,"tradeId":"2","clOrdId":"",
                 "side":"sell","fillSz":"0.009","fillPx":"110","fee":"-0.09","feeCcy":"USDT","fillTime":"2000",
-                "billId":"1002","instType":"SPOT","subType":"2","tradeQuoteCcy":"USDT","ts":"2001"]
+                "billId":"1002","instType":"SPOT","subType":"2","tradeQuoteCcy":"USDT","ts":"2001"}]
     store = seed(tmp_path)
     result = DemoProtectionManager(FakeClient(), store).reconcile_exit_children("NBENTRY1", child_order_ids=["200"])
     assert result["child_orders"][0]["state"] == "filled"
