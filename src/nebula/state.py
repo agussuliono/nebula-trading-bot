@@ -132,7 +132,52 @@ class StateStore:
             return cursor.rowcount == 1
 
     def update_intent(self, client_order_id: str, status: str, exchange_order_id: str | None = None) -> None:
+        """Apply only forward, evidence-compatible order-intent transitions."""
+        allowed = {
+            "reserved": {"submitting"},
+            "submitting": {"acknowledged", "submission_unknown", "rejected"},
+            "submission_unknown": {
+                "submission_unknown", "acknowledged", "live", "partially_filled",
+                "filled", "canceled", "mmp_canceled", "rejected",
+            },
+            "acknowledged": {
+                "submission_unknown", "live", "partially_filled",
+                "filled", "canceled", "mmp_canceled",
+            },
+            "live": {
+                "submission_unknown", "live", "partially_filled",
+                "filled", "canceled", "mmp_canceled",
+            },
+            "partially_filled": {
+                "submission_unknown", "partially_filled",
+                "filled", "canceled", "mmp_canceled",
+            },
+            "filled": {"filled"},
+            "canceled": {"canceled"},
+            "rejected": {"rejected"},
+            "mmp_canceled": {"mmp_canceled"},
+        }
+        if status not in allowed:
+            raise ValueError("Unsupported order intent state")
+        if exchange_order_id is not None:
+            value = str(exchange_order_id)
+            if not value.isascii() or not value.isdigit():
+                raise ValueError("Exchange order ID must be numeric")
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status,exchange_order_id FROM intents WHERE client_order_id=?",
+                (client_order_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError("Cannot update an unknown order intent")
+            current = str(row["status"])
+            if status not in allowed.get(current, set()):
+                raise ValueError(f"Invalid order intent transition: {current} -> {status}")
+            previous_id = str(row["exchange_order_id"] or "")
+            next_id = str(exchange_order_id) if exchange_order_id is not None else ""
+            if previous_id and next_id and previous_id != next_id:
+                raise ValueError("Exchange order ID cannot change for an existing intent")
             db.execute(
                 "UPDATE intents SET status=?, exchange_order_id=COALESCE(?, exchange_order_id), last_update=CURRENT_TIMESTAMP WHERE client_order_id=?",
                 (status, exchange_order_id, client_order_id),
