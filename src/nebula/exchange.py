@@ -22,11 +22,14 @@ class OkxError(RuntimeError):
     """Sanitized exchange error with optional non-secret HTTP diagnostics."""
 
     def __init__(self, message, *, status_code=None, error_code=None,
-                 content_type=None, retryable=False):
+                 content_type=None, server=None, via=None, cf_ray=None, retryable=False):
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
         self.content_type = content_type
+        self.server = server
+        self.via = via
+        self.cf_ray = cf_ray
         self.retryable = bool(retryable)
 
     def diagnostic(self):
@@ -38,6 +41,12 @@ class OkxError(RuntimeError):
             result["api_error_code"] = self.error_code
         if self.content_type is not None:
             result["content_type"] = self.content_type
+        if self.server is not None:
+            result["server"] = self.server
+        if self.via is not None:
+            result["via"] = self.via
+        if self.cf_ray is not None:
+            result["cf_ray"] = self.cf_ray
         if self.retryable:
             result["retryable"] = True
         return result
@@ -185,6 +194,16 @@ class OkxDemoClient:
         text = str(value)
         return text if text.isascii() and text.isdigit() else "unknown"
 
+    @staticmethod
+    def _safe_response_header(response, name):
+        raw = getattr(response, "headers", {}).get(name)
+        if raw is None:
+            return None
+        value = " ".join(str(raw).split())
+        if not value or any(ord(char) < 32 or ord(char) > 126 for char in value):
+            return None
+        return value[:120]
+
     def _request_once(self, method, request_path, body, private):
         return self.session.request(
             method, DEMO_REST_URL + request_path,
@@ -220,10 +239,15 @@ class OkxDemoClient:
 
             status_code = getattr(response, "status_code", None)
             content_type = self._response_content_type(response)
+            response_meta = {
+                "server": self._safe_response_header(response, "Server"),
+                "via": self._safe_response_header(response, "Via"),
+                "cf_ray": self._safe_response_header(response, "CF-Ray"),
+            }
             if isinstance(status_code, int) and 300 <= status_code < 400:
                 raise OkxError(
                     "Unexpected HTTP redirect; automatic redirects are disabled",
-                    status_code=status_code, content_type=content_type,
+                    status_code=status_code, content_type=content_type, **response_meta,
                 )
 
             if isinstance(status_code, int) and (status_code == 429 or 500 <= status_code <= 599):
@@ -237,7 +261,7 @@ class OkxDemoClient:
                     )
                 if method == "POST":
                     message += "; write outcome must be reconciled before any retry"
-                raise OkxError(message, status_code=status_code, content_type=content_type)
+                raise OkxError(message, status_code=status_code, content_type=content_type, **response_meta)
 
             if isinstance(status_code, int) and status_code >= 400:
                 error_code = None
@@ -256,7 +280,7 @@ class OkxDemoClient:
                     detail += f": {api_message}"
                 raise OkxError(
                     f"OKX HTTP {status_code}: {detail}",
-                    status_code=status_code, error_code=error_code, content_type=content_type,
+                    status_code=status_code, error_code=error_code, content_type=content_type, **response_meta,
                 )
 
             try:
@@ -264,7 +288,7 @@ class OkxDemoClient:
             except ValueError as exc:
                 raise OkxError(
                     f"OKX returned invalid JSON (HTTP {status_code}; content-type={content_type})",
-                    status_code=status_code, content_type=content_type,
+                    status_code=status_code, content_type=content_type, **response_meta,
                 ) from exc
 
             if not isinstance(data, dict) or data.get("code") != "0":
