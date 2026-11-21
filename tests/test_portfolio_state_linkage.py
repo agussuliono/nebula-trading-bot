@@ -4,8 +4,10 @@ from nebula.state import StateStore
 def test_exit_intent_fills_are_linked_to_active_entry_only(tmp_path):
     state = StateStore(str(tmp_path / "state.sqlite"))
     assert state.reserve_entry_intent("entry001", "AAA-USDT", 100, "buy")
+    state.update_intent("entry001", "submitting")
     state.update_intent("entry001", "acknowledged", "1001")
     assert state.reserve_exit_intent("exit001", "AAA-USDT", 101, "sell", "entry001")
+    state.update_intent("exit001", "submitting")
     state.update_intent("exit001", "acknowledged", "1002")
     # Fill rows are associated through exchange order IDs; unrelated same-symbol
     # historical orders are not included in this active position query.
@@ -47,6 +49,7 @@ def test_legacy_sell_intent_is_not_guessed_for_current_locked_position(tmp_path)
 def test_unlinked_legacy_sell_fill_blocks_position_attribution(tmp_path):
     state = StateStore(str(tmp_path / "legacy-fill.sqlite"))
     assert state.reserve_entry_intent("entry1", "AAA-USDT", 1, "buy")
+    state.update_intent("entry1", "submitting")
     state.update_intent("entry1", "acknowledged", "1001")
     # Simulate a legacy sell intent created before v0.12.0 without a position link.
     with state._connect() as db:
@@ -61,12 +64,16 @@ def test_unlinked_legacy_sell_fill_blocks_position_attribution(tmp_path):
 def test_position_context_exposes_terminal_entry_and_unresolved_exit_state(tmp_path):
     state = StateStore(str(tmp_path / "context.sqlite"))
     assert state.reserve_entry_intent("entry1", "AAA-USDT", 1, "buy")
+    state.update_intent("entry1", "submitting")
+    state.update_intent("entry1", "acknowledged", "1001")
     state.update_intent("entry1", "filled", "1001")
     with state._connect() as db:
         db.execute("""INSERT INTO order_snapshots(client_order_id,exchange_order_id,exchange_state,
             requested_size,cumulative_fill_size,average_fill_price,fee,fee_currency)
             VALUES('entry1','1001','filled','1','1','100','-0.1','USDT')""")
     assert state.reserve_exit_intent("exit1", "AAA-USDT", 2, "sell", "entry1")
+    state.update_intent("exit1", "submitting")
+    state.update_intent("exit1", "acknowledged", "1002")
     state.update_intent("exit1", "live", "1002")
     context = state.get_position_context("entry1")
     assert context["entry_status"] == "filled"
