@@ -6,6 +6,7 @@ import pytest
 
 from nebula.config import Settings
 from nebula.exchange import OkxDemoClient, OkxError
+from nebula.bill_reconciliation import CompleteAccountBillsSnapshot
 
 
 class Response:
@@ -58,7 +59,14 @@ def test_account_bills_pagination_uses_after_cursor_and_collects_terminal_page()
 
     rows = client.get_account_bills(begin=begin, end=end, limit=2)
 
+    assert isinstance(rows, CompleteAccountBillsSnapshot)
+    assert rows.begin_ms == int(begin)
+    assert rows.end_ms == int(end)
+    assert rows.page_count == 3
+    assert rows.terminal_page_seen is True
     assert [row["billId"] for row in rows] == ["103", "102", "101", "100", "99"]
+    with pytest.raises(TypeError):
+        rows[0]["billId"] = "999"
     assert len(session.calls) == 3
     for index, (_, kwargs) in enumerate(session.calls):
         method, url = session.calls[index][0][:2]
@@ -84,6 +92,9 @@ def test_account_bills_exact_multiple_requires_and_accepts_empty_terminal_page()
 
     rows = client.get_account_bills(begin=begin, end=end, limit=2)
 
+    assert isinstance(rows, CompleteAccountBillsSnapshot)
+    assert rows.page_count == 2
+    assert rows.terminal_page_seen is True
     assert [row["billId"] for row in rows] == ["20", "19"]
     assert len(session.calls) == 2
     assert parse_qs(urlparse(session.calls[1][0][1]).query)["after"] == ["19"]
