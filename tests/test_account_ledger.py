@@ -170,3 +170,21 @@ def test_bill_reconciliation_rejects_duplicate_ids_and_non_spot(tmp_path):
         _reconcile(_snapshot([valid,valid], ts, ts+1000), "demo-account-hash", ts, ts+1000)
     with pytest.raises(BillReconciliationError, match="non-Spot"):
         _reconcile(_snapshot([{**valid,"instType":"MARGIN"}], ts, ts+1000), "demo-account-hash", ts, ts+1000)
+
+
+
+def test_bill_reconciliation_rejects_raw_lists_and_snapshot_mutation():
+    ts = 1795132800000
+    raw = []
+    with pytest.raises(BillReconciliationError, match="raw lists"):
+        _reconcile(raw, "demo-account-hash", ts, ts + 1000)
+
+    snapshot = _snapshot([], ts, ts + 1000)
+    assert snapshot.page_count == 1
+    assert snapshot.terminal_page_seen is True
+    with pytest.raises((AttributeError, TypeError)):
+        snapshot.rows = ()
+    with pytest.raises((AttributeError, TypeError)):
+        snapshot.rows.append({"billId": "1"})
+    with pytest.raises(BillReconciliationError, match="exact requested interval"):
+        _reconcile(snapshot, "demo-account-hash", ts, ts + 999)
