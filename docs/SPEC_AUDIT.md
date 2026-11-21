@@ -157,3 +157,14 @@ Earlier conversational figures such as a Rp210,000 position cap, Rp2,000 target 
 - Added tests for invalid/skipped transitions, unknown status, terminal rewrite, exchange order ID mutation, and recovery of a pre-submit reserved entry without exchange calls.
 - GitHub Actions run #345 / ID 44898364646 on commit c84b02a64baa4fdb82cf2396a08fe4db113adb3a: 457 tests passed in 4.06 seconds; compile, explicit Demo safety settings, and fail-closed defaults passed.
 - No credentials, authenticated OKX account call, exchange write, Demo/live order, or real money was used.
+
+
+## v0.16.10 audit — reconcile by immutable OKX ordId
+
+- Once an exchange order ID is persisted, the order manager now queries order details by ordId instead of clOrdId. Pending-order fallback must match both the persisted ordId and local clOrdId.
+- This avoids ambiguous lookups if a client ID is ever reused: OKX documents that GET /api/v5/trade/order returns only the latest match when clOrdId is associated with multiple orders. Local intent IDs remain idempotent in the durable database, but exchange ordId is the stronger lookup key once acknowledged.
+- A response with a different ordId is rejected by the order snapshot validator; a pending row with the same clOrdId but different ordId is not accepted as the original order.
+- Added tests for exact ordId lookup, mismatched order response, and pending fallback requiring the exact ordId.
+- Official reference: https://app.okx.com/docs-v5/en/ (GET /api/v5/trade/order; clOrdId lookup behavior).
+- GitHub Actions run ID 44898598648 on source commit 06d63736a1aa7e53b09178b2d6e2a64c16f28649: 460 tests passed in 5.54 seconds; compile, explicit safety settings, and fail-closed defaults passed.
+- No API credentials, authenticated account calls, or exchange writes were used.
