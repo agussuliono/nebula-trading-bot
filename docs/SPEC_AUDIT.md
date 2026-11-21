@@ -135,3 +135,36 @@ Earlier conversational figures such as a Rp210,000 position cap, Rp2,000 target 
 - Dataset audit rejects duplicate/out-of-order timestamps, invalid OHLC and interval mismatches; missing intervals are reported and never interpolated.
 - Tests: 183 pass. Real OKX connectivity is unverified because the build environment could not resolve the host DNS. No market data performance conclusions can be drawn.
 - Remaining: add listing/universe history to mitigate survivorship bias; calibrate spread/fees/slippage using Demo observations; assess multi-asset correlation and execution realism.
+
+
+## v0.16.8 audit — exchange order snapshot identity and lifecycle
+
+- Durable order snapshots now bind returned identity fields to the original local intent whenever OKX supplies them: instrument, side, product type, trade mode, and client order ID.
+- An exchange order ID cannot change after it has been persisted or conflict with the order ID already acknowledged on the intent. Requested size is immutable because V1 does not amend regular orders.
+- Cumulative fill size remains monotonic. Order lifecycle transitions from live/partially_filled are constrained to documented Spot states; once filled/canceled/mmp_canceled is observed, a stale response cannot regress the persisted terminal state.
+- Added regressions for mismatched client/instrument/product/mode/side identity, changed order ID, changed requested size, terminal-state regression, and valid partial-fill-to-canceled progression.
+- CI on commit 557fb7584457effa339380623ceb98a8e3418cf8: 454 tests passed in 3.69 seconds; compile and both explicit/default safety checks passed.
+- Identity fields are checked when present to retain compatibility with older offline fixtures. Production OKX order-detail responses are expected to include these fields; strict real-Demo response-shape verification remains part of the pending read-only integration test.
+- No credentials, authenticated OKX request, exchange write, or Demo/live order was used.
+
+
+## v0.16.9 audit — monotonic intent state machine and crash-before-submit recovery
+
+- Replaced unrestricted intent updates with an explicit forward-only state transition table. Unknown states, skipped transitions, terminal-state rewrites, and changes to an already persisted exchange order ID are rejected.
+- Valid submission path is reserved → submitting → acknowledged/submission_unknown → exchange-observed live/partially_filled/terminal. Reconciliation may move ambiguous states only toward observed exchange states; terminal intents cannot be reopened.
+- Added recovery for a durable reserved intent. The order manager marks it rejected locally and releases a zero-fill buy reservation without any exchange read/write. This is safe because the submit protocol persists submitting before calling the exchange write method; a process crash while still reserved proves the network submission was not attempted.
+- A crash after submitting remains ambiguous and follows the read-only exchange reconciliation path; it is never automatically resubmitted.
+- Added tests for invalid/skipped transitions, unknown status, terminal rewrite, exchange order ID mutation, and recovery of a pre-submit reserved entry without exchange calls.
+- GitHub Actions run #345 / ID 44898364646 on commit c84b02a64baa4fdb82cf2396a08fe4db113adb3a: 457 tests passed in 4.06 seconds; compile, explicit Demo safety settings, and fail-closed defaults passed.
+- No credentials, authenticated OKX account call, exchange write, Demo/live order, or real money was used.
+
+
+## v0.16.10 audit — reconcile by immutable OKX ordId
+
+- Once an exchange order ID is persisted, the order manager now queries order details by ordId instead of clOrdId. Pending-order fallback must match both the persisted ordId and local clOrdId.
+- This avoids ambiguous lookups if a client ID is ever reused: OKX documents that GET /api/v5/trade/order returns only the latest match when clOrdId is associated with multiple orders. Local intent IDs remain idempotent in the durable database, but exchange ordId is the stronger lookup key once acknowledged.
+- A response with a different ordId is rejected by the order snapshot validator; a pending row with the same clOrdId but different ordId is not accepted as the original order.
+- Added tests for exact ordId lookup, mismatched order response, and pending fallback requiring the exact ordId.
+- Official reference: https://app.okx.com/docs-v5/en/ (GET /api/v5/trade/order; clOrdId lookup behavior).
+- GitHub Actions run ID 44898598648 on source commit 06d63736a1aa7e53b09178b2d6e2a64c16f28649: 460 tests passed in 5.54 seconds; compile, explicit safety settings, and fail-closed defaults passed.
+- No API credentials, authenticated account calls, or exchange writes were used.

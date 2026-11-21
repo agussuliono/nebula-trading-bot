@@ -28,6 +28,8 @@ class CleanAccount:
 
 def seed_filled_position(state, entry_id="NBSTARTUPENTRY"):
     state.reserve_entry_intent(entry_id, "BTC-USDT", 123, "buy")
+    state.update_intent(entry_id, "submitting")
+    state.update_intent(entry_id, "acknowledged", "10001")
     state.update_intent(entry_id, "filled", "10001")
     state.save_order_snapshot(entry_id, {
         "ordId": "10001", "state": "filled", "sz": "0.01",
@@ -189,7 +191,8 @@ def test_filled_position_without_protection_intent_remains_blocked(tmp_path):
                 "instId": instrument, "ordId": order_id, "tradeId": "70001",
                 "clOrdId": "NBSTARTUPENTRY", "side": "buy", "fillSz": "0.01",
                 "fillPx": "50000", "fee": "-0.001", "feeCcy": "BTC",
-                "fillTime": "1000",
+                "fillTime": "1000", "billId": "70001", "instType": "SPOT",
+                "subType": "1", "tradeQuoteCcy": "USDT", "ts": "1001",
             }]
 
     state = StateStore(str(tmp_path / "missing-protection.db"))
@@ -208,7 +211,8 @@ def test_active_protection_must_match_fresh_exchange_snapshot(tmp_path):
                 "instId": instrument, "ordId": order_id, "tradeId": "70001",
                 "clOrdId": "NBSTARTUPENTRY", "side": "buy", "fillSz": "0.01",
                 "fillPx": "50000", "fee": "-0.001", "feeCcy": "BTC",
-                "fillTime": "1000",
+                "fillTime": "1000", "billId": "70001", "instType": "SPOT",
+                "subType": "1", "tradeQuoteCcy": "USDT", "ts": "1001",
             }]
 
         def get_algo_order(self, algo_client_order_id):

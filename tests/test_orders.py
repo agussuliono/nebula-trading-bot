@@ -39,7 +39,11 @@ class FakeClient:
     def get_pending_algo_orders(self, ord_type):
         return []
     def get_account_bills(self, *, begin=None, end=None, limit=100):
-        return []
+        from nebula.bill_reconciliation import _create_complete_account_bills_snapshot
+        return _create_complete_account_bills_snapshot(
+            [], begin_ms=int(begin), end_ms=int(end),
+            page_count=1, terminal_page_seen=True,
+        )
 
 
 def setup(tmp_path, client):
@@ -409,7 +413,11 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
         def get_pending_algo_orders(self, ord_type):
             return []
         def get_account_bills(self, *, begin=None, end=None, limit=100):
-            return []
+            from nebula.bill_reconciliation import _create_complete_account_bills_snapshot
+            return _create_complete_account_bills_snapshot(
+                [], begin_ms=int(begin), end_ms=int(end),
+                page_count=1, terminal_page_seen=True,
+            )
     authorizer = PortfolioRiskAuthorizer(
         SnapshotClient(), StateStore(str(tmp_path / "auth.db")), settings,
         plan_provider=lambda **kwargs: {
@@ -493,3 +501,70 @@ def test_reconcile_keeps_position_lock_after_canceled_partial_fill(tmp_path):
     assert result["status"] == "canceled"
     assert manager.state.get_order_snapshot("NBPARTIAL")["cumulative_fill_size"] == "0.002"
     assert manager.state.get_position_lock()["owner_client_order_id"] == "NBPARTIAL"
+
+
+def _acknowledged_intent(store, client_order_id="NBORDERID"):
+    store.reserve_entry_intent(client_order_id, "BTC-USDT", 123, "buy")
+    store.update_intent(client_order_id, "submitting")
+    store.update_intent(client_order_id, "acknowledged", "41001")
+
+
+class ByOrderIdClient:
+    def __init__(self, order, pending=None):
+        self.order = order
+        self.pending = pending or []
+        self.order_id_calls = []
+
+    def get_order_by_id(self, inst_id, order_id):
+        self.order_id_calls.append((inst_id, order_id))
+        return [self.order] if self.order else []
+
+    def get_order(self, inst_id, client_order_id):
+        raise AssertionError("Known exchange order IDs must not be looked up by clOrdId")
+
+    def get_pending_orders(self, inst_type="SPOT"):
+        return self.pending
+
+
+def _exchange_order(order_id="41001", client_order_id="NBORDERID"):
+    return {
+        "ordId": order_id, "clOrdId": client_order_id, "instId": "BTC-USDT",
+        "instType": "SPOT", "tdMode": "cash", "side": "buy",
+        "state": "live", "sz": "0.01", "accFillSz": "0",
+        "avgPx": "0", "fee": "0", "feeCcy": "USDT",
+    }
+
+
+def test_reconcile_uses_immutable_exchange_order_id_when_known(tmp_path):
+    store = StateStore(str(tmp_path / "by-order-id.db"))
+    _acknowledged_intent(store)
+    client = ByOrderIdClient(_exchange_order())
+    result = DemoOrderManager(client, store).reconcile("NBORDERID")
+
+    assert result["status"] == "live"
+    assert client.order_id_calls == [("BTC-USDT", "41001")]
+
+
+def test_reconcile_rejects_response_for_different_exchange_order_id(tmp_path):
+    store = StateStore(str(tmp_path / "wrong-order-id.db"))
+    _acknowledged_intent(store)
+    client = ByOrderIdClient(_exchange_order(order_id="99999"))
+    manager = DemoOrderManager(client, store)
+
+    with pytest.raises(OrderManagerError, match="snapshot failed validation"):
+        manager.reconcile("NBORDERID")
+
+    assert store.get_intent("NBORDERID")["status"] == "acknowledged"
+    assert store.get_order_snapshot("NBORDERID") is None
+
+
+def test_pending_fallback_requires_exact_exchange_order_id_when_known(tmp_path):
+    store = StateStore(str(tmp_path / "pending-order-id.db"))
+    _acknowledged_intent(store)
+    client = ByOrderIdClient(
+        None, pending=[_exchange_order(order_id="99999")]
+    )
+    result = DemoOrderManager(client, store).reconcile("NBORDERID")
+
+    assert result["status"] == "submission_unknown"
+    assert store.get_order_snapshot("NBORDERID") is None

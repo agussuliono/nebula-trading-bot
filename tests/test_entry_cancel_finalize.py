@@ -13,6 +13,8 @@ class InstrumentStub:
 def seeded(tmp_path, *, state='partially_filled', fill='0.002'):
     store = StateStore(str(tmp_path / 'entry-cancel.db'))
     store.reserve_entry_intent('NBENTRY1', 'BTC-USDT', 123, 'buy')
+    store.update_intent('NBENTRY1', 'submitting')
+    store.update_intent('NBENTRY1', 'acknowledged', '10001')
     store.update_intent('NBENTRY1', state, '10001')
     store.save_order_snapshot('NBENTRY1', {'ordId':'10001','clOrdId':'NBENTRY1','state':state,
         'sz':'0.01','accFillSz':fill,'avgPx':'50000' if fill != '0' else '',

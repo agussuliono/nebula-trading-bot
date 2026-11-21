@@ -37,6 +37,8 @@ class NeverWriteSession:
 
 def seed_position(store, entry_id="NBSTOPRECOVERY"):
     store.reserve_entry_intent(entry_id, "BTC-USDT", 123, "buy")
+    store.update_intent(entry_id, "submitting")
+    store.update_intent(entry_id, "acknowledged", "10001")
     store.update_intent(entry_id, "filled", "10001")
     store.save_order_snapshot(entry_id, {
         "ordId": "10001",
@@ -88,6 +90,7 @@ def test_restart_recovers_ambiguous_entry_with_kill_switch_still_active(tmp_path
     db_path = str(tmp_path / "restart-entry.sqlite3")
     first = StateStore(db_path)
     first.reserve_entry_intent("NBENTRYRESTART", "BTC-USDT", 123, "buy")
+    first.update_intent("NBENTRYRESTART", "submitting")
     first.update_intent("NBENTRYRESTART", "submission_unknown")
 
     class ReadOnlyRecoveryClient:

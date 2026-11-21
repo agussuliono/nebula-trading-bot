@@ -12,6 +12,7 @@ def test_intent_is_idempotent(tmp_path):
 def test_rejected_entry_lock_is_not_released_for_tiny_decimal_partial_fill(tmp_path):
     store = StateStore(str(tmp_path / "tiny-fill.db"))
     store.reserve_entry_intent("NBENTRY1", "BTC-USDT", 123, "buy")
+    store.update_intent("NBENTRY1", "submitting")
     store.save_order_snapshot("NBENTRY1", {
         "ordId": "10001",
         "state": "canceled",
@@ -30,6 +31,7 @@ def test_rejected_entry_lock_is_not_released_for_tiny_decimal_partial_fill(tmp_p
 def test_rejected_zero_fill_entry_lock_can_still_be_released(tmp_path):
     store = StateStore(str(tmp_path / "zero-fill.db"))
     store.reserve_entry_intent("NBENTRY1", "BTC-USDT", 123, "buy")
+    store.update_intent("NBENTRY1", "submitting")
     store.save_order_snapshot("NBENTRY1", {
         "ordId": "10001",
         "state": "canceled",
@@ -138,3 +140,34 @@ def test_partially_failed_protection_state_cannot_be_resubmitted_or_regressed(tm
     with pytest.raises(ValueError, match="terminal OCO state"):
         store.update_protection_intent("NBENTRY1", "triggered", exchange_algo_id="9988")
     assert store.get_protection_intent("NBENTRY1")["status"] == "partially_failed"
+
+
+def test_intent_state_machine_rejects_skipped_and_unknown_transitions(tmp_path):
+    import pytest
+    store = StateStore(str(tmp_path / "intent-transitions.db"))
+    store.reserve_entry_intent("NB1", "BTC-USDT", 1, "buy")
+
+    with pytest.raises(ValueError, match="Invalid order intent transition"):
+        store.update_intent("NB1", "filled", "1001")
+    with pytest.raises(ValueError, match="Unsupported order intent state"):
+        store.update_intent("NB1", "mystery")
+
+    store.update_intent("NB1", "submitting")
+    store.update_intent("NB1", "submission_unknown")
+    store.update_intent("NB1", "partially_filled", "1001")
+    store.update_intent("NB1", "filled", "1001")
+    assert store.get_intent("NB1")["status"] == "filled"
+
+
+def test_terminal_intent_and_exchange_order_id_cannot_be_rewritten(tmp_path):
+    import pytest
+    store = StateStore(str(tmp_path / "intent-terminal.db"))
+    store.reserve_entry_intent("NB1", "BTC-USDT", 1, "buy")
+    store.update_intent("NB1", "submitting")
+    store.update_intent("NB1", "acknowledged", "1001")
+    store.update_intent("NB1", "filled", "1001")
+
+    with pytest.raises(ValueError, match="Invalid order intent transition"):
+        store.update_intent("NB1", "live", "1001")
+    with pytest.raises(ValueError, match="cannot change"):
+        store.update_intent("NB1", "filled", "1002")
