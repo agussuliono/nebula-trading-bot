@@ -14,6 +14,8 @@ class PublicDemoStub:
 def seeded(tmp_path, state='filled', fill='0.004', risk_plan=None):
     store = StateStore(str(tmp_path / 'protection.db'))
     store.reserve_entry_intent('NBENTRY1', 'BTC-USDT', 123, 'buy', risk_plan=risk_plan)
+    store.update_intent('NBENTRY1', 'submitting')
+    store.update_intent('NBENTRY1', 'acknowledged', '10001')
     store.update_intent('NBENTRY1', state, '10001')
     store.save_order_snapshot('NBENTRY1', {'ordId':'10001','state':state,'sz':'0.01',
         'accFillSz':fill,'avgPx':'50000','fee':'-0.1','feeCcy':'USDT'})
@@ -177,6 +179,8 @@ def test_exchange_backed_oco_blocks_when_trade_fill_ledger_is_incomplete(tmp_pat
 def test_prepare_requires_position_lock_owner(tmp_path):
     store = StateStore(str(tmp_path / 'unlocked.db'))
     store.reserve_intent('NBENTRY1','BTC-USDT',123,'buy')
+    store.update_intent('NBENTRY1','submitting')
+    store.update_intent('NBENTRY1','acknowledged','1')
     store.update_intent('NBENTRY1','filled','1')
     store.save_order_snapshot('NBENTRY1', {'ordId':'1','state':'filled','sz':'1','accFillSz':'1','avgPx':'10'})
     with pytest.raises(ProtectionManagerError, match='lock'):
@@ -430,6 +434,8 @@ def test_protection_intent_survives_state_store_restart(tmp_path):
     path = tmp_path / 'restart.db'
     store = StateStore(str(path))
     store.reserve_entry_intent('NBENTRY1','BTC-USDT',123,'buy')
+    store.update_intent('NBENTRY1','submitting')
+    store.update_intent('NBENTRY1','acknowledged','10001')
     store.update_intent('NBENTRY1','filled','10001')
     store.save_order_snapshot('NBENTRY1', {'ordId':'10001','state':'filled','sz':'0.01',
         'accFillSz':'0.004','avgPx':'50000'})
