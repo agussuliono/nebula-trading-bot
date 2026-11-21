@@ -66,6 +66,10 @@ class _RetryablePublicFailure(OkxError):
     pass
 
 
+class _PublicRequestFailure(OkxError):
+    """Non-retried public transport failure that still counts against the breaker."""
+
+
 class _PublicApiCircuitBreaker:
     """Small per-client breaker for idempotent public market-data GETs only."""
 
@@ -255,6 +259,10 @@ class OkxDemoClient:
                     ) from exc
                 raise OkxError(f"OKX transport error: {type(exc).__name__}") from exc
             except requests.RequestException as exc:
+                if public_read:
+                    raise _PublicRequestFailure(
+                        f"OKX public transport error: {type(exc).__name__}"
+                    ) from exc
                 raise OkxError(f"OKX transport error: {type(exc).__name__}") from exc
 
             status_code = getattr(response, "status_code", None)
@@ -363,7 +371,7 @@ class OkxDemoClient:
             self._public_circuit.before_request()
         try:
             result = self._request_with_policy(method, request_path, body, private, public_read)
-        except _RetryablePublicFailure:
+        except (_RetryablePublicFailure, _PublicRequestFailure):
             self._public_circuit.record_transient_failure()
             raise
         except OkxError:
