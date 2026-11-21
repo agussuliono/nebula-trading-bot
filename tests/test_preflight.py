@@ -155,6 +155,7 @@ def test_preflight_orchestrator_approves_candidate_without_exchange_writes(
     assert client.calls == [
         "instrument_rules", "account_config", "balance", "tickers",
         "pending_regular", "pending_oco", "pending_conditional", "account_bills",
+        "account_bills",
     ]
     assert not hasattr(client, "place_spot_limit")
     assert not hasattr(client, "place_spot_oco_exit")
