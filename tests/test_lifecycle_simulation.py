@@ -31,13 +31,15 @@ class LifecycleFakeExchange:
             "instId": "BTC-USDT", "ordId": ENTRY_ORDER_ID, "tradeId": "70001",
             "clOrdId": ENTRY_ID, "side": "buy", "fillSz": "0.01",
             "fillPx": "100", "fee": "-0.001", "feeCcy": "BTC",
-            "fillTime": "1000",
+            "fillTime": "1000", "billId": "70001", "instType": "SPOT",
+            "subType": "1", "tradeQuoteCcy": "USDT", "ts": "1001",
         }]
         self.child_fill_rows = [{
             "instId": "BTC-USDT", "ordId": CHILD_ORDER_ID, "tradeId": "80001",
             "clOrdId": "", "side": "sell", "fillSz": "0.0045",
             "fillPx": "110", "fee": "-0.00495", "feeCcy": "USDT",
-            "fillTime": "2000",
+            "fillTime": "2000", "billId": "80001", "instType": "SPOT",
+            "subType": "2", "tradeQuoteCcy": "USDT", "ts": "2001",
         }]
 
     def get_spot_instrument(self, inst_id):
@@ -168,7 +170,8 @@ def test_full_spot_position_lifecycle_survives_restart_and_releases_only_when_fl
         "instId": "BTC-USDT", "ordId": CHILD_ORDER_ID, "tradeId": "80002",
         "clOrdId": "", "side": "sell", "fillSz": "0.0045",
         "fillPx": "110", "fee": "-0.00495", "feeCcy": "USDT",
-        "fillTime": "3000",
+        "fillTime": "3000", "billId": "80002", "instType": "SPOT",
+        "subType": "2", "tradeQuoteCcy": "USDT", "ts": "3001",
     })
     completed = restarted.reconcile(ENTRY_ID)
 
