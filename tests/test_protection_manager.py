@@ -143,7 +143,8 @@ def test_exchange_backed_oco_uses_net_base_after_base_currency_fee(tmp_path):
                 "clOrdId": "NBENTRY1", "side": "buy",
                 "fillSz": "0.004", "fillPx": "50000",
                 "fee": "-0.0001", "feeCcy": "BTC",
-                "fillTime": "1800000000000",
+                "fillTime": "1800000000000", "billId": "70001", "instType": "SPOT",
+                "subType": "1", "tradeQuoteCcy": "USDT", "ts": "1800000000001",
             }]
 
     manager = DemoProtectionManager(ExchangeBacked(), store)
