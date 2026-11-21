@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import threading
@@ -23,6 +24,15 @@ class OkxError(RuntimeError):
 
     def __init__(self, message, *, status_code=None, error_code=None,
                  content_type=None, server=None, via=None, cf_ray=None, retryable=False):
+        safe_meta = []
+        if server:
+            safe_meta.append(f"server={server}")
+        if via:
+            safe_meta.append(f"via={via}")
+        if cf_ray:
+            safe_meta.append(f"cf_ray={cf_ray}")
+        if safe_meta:
+            message = f"{message} [{'; '.join(safe_meta)}]"
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
@@ -202,7 +212,17 @@ class OkxDemoClient:
         value = " ".join(str(raw).split())
         if not value or any(ord(char) < 32 or ord(char) > 126 for char in value):
             return None
-        return value[:120]
+        # Proxy metadata can contain IP literals; retain topology labels but redact addresses.
+        safe_tokens = []
+        for token in value.split():
+            candidate = token.strip("[](),;")
+            try:
+                ipaddress.ip_address(candidate)
+            except ValueError:
+                safe_tokens.append(token)
+            else:
+                safe_tokens.append("[IP]")
+        return " ".join(safe_tokens)[:120]
 
     def _request_once(self, method, request_path, body, private):
         return self.session.request(
