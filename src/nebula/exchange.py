@@ -216,12 +216,21 @@ class OkxDemoClient:
         value = " ".join(str(raw).split())
         if not value or any(ord(char) < 32 or ord(char) > 126 for char in value):
             return None
-        # Proxy metadata can contain IP literals; retain topology labels but redact addresses.
+        # Proxy metadata can contain IP literals, including host:port and
+        # bracketed IPv6 forms. Retain topology labels but redact addresses.
         safe_tokens = []
         for token in value.split():
-            candidate = token.strip("[](),;")
+            candidate = token.strip("(),;")
+            host = candidate
+            if candidate.startswith("[") and "]:" in candidate:
+                host = candidate[1:candidate.index("]")]
+            elif candidate.count(":") == 1:
+                possible_host, separator, possible_port = candidate.rpartition(":")
+                if separator and possible_port.isdigit():
+                    host = possible_host
+            host = host.strip("[]")
             try:
-                ipaddress.ip_address(candidate)
+                ipaddress.ip_address(host)
             except ValueError:
                 safe_tokens.append(token)
             else:
