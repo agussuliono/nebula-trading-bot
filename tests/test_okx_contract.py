@@ -419,3 +419,20 @@ def test_public_nonretryable_transport_errors_count_toward_circuit_breaker(monke
     with pytest.raises(OkxError, match="circuit breaker is open"):
         client.get_tickers()
     assert len(session.calls) == 3
+
+
+def test_proxy_diagnostics_redact_ip_literals_with_ports_and_ipv6():
+    response = Response(
+        {"code": "0", "msg": "", "data": []},
+        headers={
+            "Content-Type": "application/json",
+            "Via": "1.1 edge-proxy 203.0.113.7:8080 [2001:db8::1]:3128 2001:db8::2",
+        },
+    )
+
+    safe = OkxDemoClient._safe_response_header(response, "Via")
+
+    assert safe == "1.1 edge-proxy [IP] [IP] [IP]"
+    assert "203.0.113.7" not in safe
+    assert "2001:db8::1" not in safe
+    assert "2001:db8::2" not in safe
