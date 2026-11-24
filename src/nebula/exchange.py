@@ -67,12 +67,12 @@ class OkxError(RuntimeError):
         return result
 
 
-class _AccountBillsRateLimiter:
-    """Cross-process pacing for the account-bills endpoint on Linux.
+class _PrivateReadRateLimiter:
+    """Cross-process pacing for paginated private reads on Linux.
 
     The lock file stores only a boot identifier and monotonic deadline, never
     credentials. A shared file lock coordinates separate NEBULA processes that
-    run under the same OS user. The interval is deliberately below 5 req/s.
+    run under the same OS user. The interval is below the strictest covered endpoint limit (5 req/s).
     """
 
     INTERVAL_SECONDS = 0.21
@@ -240,7 +240,7 @@ class OkxDemoClient:
         return DEMO_REST_URL
 
     def __init__(self, settings: Settings, session=None, timeout: float = 10.0,
-                 account_bills_rate_limit_path=None):
+                 private_read_rate_limit_path=None):
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise ValueError("timeout must be a finite positive number")
         try:
@@ -252,10 +252,10 @@ class OkxDemoClient:
         self.settings = settings
         self.session = session or requests.Session()
         self.timeout = timeout_value
-        self.account_bills_rate_limit_path = (
-            Path(account_bills_rate_limit_path).expanduser()
-            if account_bills_rate_limit_path is not None
-            else Path.home() / ".cache" / "nebula" / "okx-account-bills.lock"
+        self.private_read_rate_limit_path = (
+            Path(private_read_rate_limit_path).expanduser()
+            if private_read_rate_limit_path is not None
+            else Path.home() / ".cache" / "nebula" / "okx-private-read.lock"
         )
         self._startup_entry_permit = None
         self._startup_entry_state = None
@@ -544,6 +544,40 @@ class OkxDemoClient:
                 self._public_circuit.record_success()
             return result
 
+    def _private_read_get(self, path: str, params: dict, *, deadline: float):
+        """Rate-limit and safely retry an idempotent private GET within one deadline."""
+        for attempt in range(3):
+            _PrivateReadRateLimiter.wait_for_slot(
+                self.private_read_rate_limit_path, deadline=deadline,
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise OkxError("Private read deadline expired before request")
+            try:
+                result = self.request(
+                    "GET", path, params, private=True,
+                    _timeout=min(self.timeout, remaining),
+                )
+                if time.monotonic() > deadline:
+                    raise OkxError("Private read deadline expired during HTTP request")
+                return result
+            except OkxError as exc:
+                retryable = exc.status_code == 429 or exc.error_code == "50011"
+                if not retryable or attempt == 2:
+                    raise
+                retry_after = self._retry_after_seconds(exc.retry_after)
+                delay = retry_after if retry_after is not None else min(0.25 * (2 ** attempt), 1.0)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or delay > remaining:
+                    raise OkxError(
+                        "Private read retry delay exceeds the remaining total deadline",
+                        status_code=exc.status_code, error_code=exc.error_code,
+                        retry_after=exc.retry_after,
+                    ) from exc
+                if delay:
+                    time.sleep(delay)
+        raise OkxError("Private read retry policy ended unexpectedly")
+
     def get_instruments(self):
         return self.request("GET", "/api/v5/public/instruments", {"instType": "SPOT"})
 
@@ -627,44 +661,9 @@ class OkxDemoClient:
             if cursor is not None:
                 params["after"] = cursor
 
-            page = None
-            last_error = None
-            for attempt in range(3):
-                _AccountBillsRateLimiter.wait_for_slot(
-                    self.account_bills_rate_limit_path, deadline=deadline,
-                )
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise OkxError("Account-bills total deadline expired before request")
-                try:
-                    page = self.request(
-                        "GET", "/api/v5/account/bills", params, private=True,
-                        _timeout=min(self.timeout, remaining),
-                    )
-                    if time.monotonic() > deadline:
-                        raise OkxError(
-                            "Account-bills total deadline expired during the HTTP request"
-                        )
-                    break
-                except OkxError as exc:
-                    last_error = exc
-                    retryable = exc.status_code == 429 or exc.error_code == "50011"
-                    if not retryable or attempt == 2:
-                        raise
-                    retry_after = self._retry_after_seconds(exc.retry_after)
-                    delay = retry_after if retry_after is not None else min(0.25 * (2 ** attempt), 1.0)
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0 or delay > remaining:
-                        raise OkxError(
-                            "Account-bills retry delay exceeds the remaining total deadline",
-                            status_code=exc.status_code, error_code=exc.error_code,
-                            retry_after=exc.retry_after,
-                        ) from exc
-                    if delay:
-                        time.sleep(delay)
-
-            if page is None:
-                raise OkxError("Account-bills request did not produce a page") from last_error
+            page = self._private_read_get(
+                "/api/v5/account/bills", params, deadline=deadline,
+            )
             if (not isinstance(page, list) or len(page) > limit
                     or any(not isinstance(row, dict) for row in page)):
                 raise OkxError("OKX account-bills page is malformed")
@@ -702,7 +701,9 @@ class OkxDemoClient:
 
     def get_fills_history(self, inst_id: str, order_id: str, limit: int = 100, after: str | None = None):
         """Read one page of trade-level fills (OKX retains up to three months)."""
-        if not inst_id or not str(order_id).isdigit() or not 1 <= int(limit) <= 100:
+        if (not inst_id or not str(order_id).isascii() or not str(order_id).isdigit()
+                or isinstance(limit, bool) or not isinstance(limit, int)
+                or not 1 <= limit <= 100):
             raise ValueError("Invalid instrument, order_id, or fill history limit")
         if after is not None and not str(after).isdigit():
             raise ValueError("Fill history cursor must be a numeric billId")
@@ -710,7 +711,10 @@ class OkxDemoClient:
                   "ordId": str(order_id), "limit": str(limit)}
         if after is not None:
             params["after"] = str(after)
-        return self.request("GET", "/api/v5/trade/fills-history", params, private=True)
+        deadline = time.monotonic() + 15.0
+        return self._private_read_get(
+            "/api/v5/trade/fills-history", params, deadline=deadline,
+        )
 
     def cancel_order(self, *, inst_id: str, order_id: str):
         """Cancel an incomplete regular order, including while emergency stop is active."""
@@ -728,11 +732,12 @@ class OkxDemoClient:
         rows_all = []
         seen_ids = set()
         cursor = None
+        deadline = time.monotonic() + 30.0
         for _page in range(100):
             page_params = {**params, "limit": "100"}
             if cursor is not None:
                 page_params["after"] = cursor
-            page = self.request("GET", path, page_params, private=True)
+            page = self._private_read_get(path, page_params, deadline=deadline)
             if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
                 raise OkxError("OKX pending-order page is malformed")
             for row in page:
