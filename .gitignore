@@ -29,3 +29,8 @@ data/
 .DS_Store
 .idea/
 .vscode/
+
+# Python build metadata and distribution outputs
+*.egg-info/
+build/
+dist/
