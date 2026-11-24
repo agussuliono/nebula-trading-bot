@@ -367,3 +367,18 @@ def test_private_read_limiter_lock_file_is_owner_only(tmp_path, monkeypatch):
     )
 
     assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+
+
+def test_private_read_limiter_fails_closed_on_corrupt_lock_metadata(tmp_path, monkeypatch):
+    fake_monotonic(monkeypatch, start=9000.0)
+    lock_path = tmp_path / "corrupt.lock"
+    lock_path.write_text("partial-metadata", encoding="ascii")
+    client, session = make_client(
+        [],
+        rate_limit_path=lock_path,
+    )
+
+    with pytest.raises(OkxError, match="lock metadata is incomplete"):
+        client.get_account_bills()
+
+    assert session.calls == []
