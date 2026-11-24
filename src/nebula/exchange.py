@@ -182,7 +182,7 @@ class _PrivateReadRateLimiter:
             finally:
                 # Failed HTTP attempts also consume a request slot.
                 completed_at = time.monotonic()
-                payload = f"{boot_id}\\n{completed_at + cls.INTERVAL_SECONDS:.9f}\\n".encode("ascii")
+                payload = f"{boot_id}\n{completed_at + cls.INTERVAL_SECONDS:.9f}\n".encode("ascii")
                 os.lseek(fd, 0, os.SEEK_SET)
                 os.write(fd, payload)
                 os.ftruncate(fd, len(payload))
