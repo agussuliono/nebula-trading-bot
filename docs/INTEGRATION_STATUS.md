@@ -4,7 +4,7 @@ Date: 2026-11-19
 
 ## Verified from official OKX documentation
 
-- Demo Trading uses REST `https://openapi.okx.com` with `x-simulated-trading: 1` on requests.
+- Demo Trading uses the REST host mapped from the account-registration region (`openapi.okx.com`, `us.okx.com`, or `eea.okx.com`) with mandatory `x-simulated-trading: 1` on requests.
 - Create a separate API key inside Demo Trading. Read is needed for account reads; Trade is needed for order operations. Do not grant Withdraw.
 - Public Spot instrument metadata includes `tickSz`, `lotSz`, `minSz`, base/quote currency and instrument state.
 - Spot `lotSz` and `minSz` are denominated in base currency. Order states include `live`, `partially_filled`, `filled`, `canceled` and `mmp_canceled`. Pending-order endpoint only returns live and partially-filled orders; terminal history needs a separate reconciliation path before production use.
@@ -281,3 +281,12 @@ This release is not an autonomous trading bot. Order submission remains disabled
 - Automated CI uses mocked HTTP responses and verifies the local retry, circuit-breaker, diagnostics, host and credential-isolation contracts.
 - A passing CI run cannot establish that OKX will permit requests from the user's network. Real public connectivity and authenticated Demo read-only verification remain separate gates.
 - No Demo order, live order, cancel, transfer, withdrawal, or money movement is enabled by this change.
+
+
+## 2026-11-24 — Regional Demo REST host allowlist
+
+- Added a closed host mapping in `config.py`: `global → https://openapi.okx.com`, `us_au → https://us.okx.com`, and `eea → https://eea.okx.com`.
+- The account-registration region is selected with `NEBULA_OKX_REGION`; default is `global`. A caller cannot provide a raw REST URL. Every selected host still uses the mandatory Demo header `x-simulated-trading: 1`, redirects remain disabled, and the adapter has no production-mode switch.
+- Official OKX documentation says US/AU accounts registered through app.okx.com must use `us.okx.com`, EEA accounts registered through my.okx.com must use `eea.okx.com`, while global accounts use `openapi.okx.com`. The user's registration region has not been established from this chat and must not be inferred from the current IP/location.
+- Offline contract tests cover all three allowlisted hosts, mandatory Demo header, redirect prevention, and rejection of arbitrary domains.
+- No OKX request or account read was executed for this change. The selected account region, public reachability, private Demo authentication, and all exchange-side behavior remain unverified. The order gate remains disabled.
