@@ -229,8 +229,8 @@ def test_account_bills_retries_http_429_using_retry_after_seconds(tmp_path, monk
 
     assert list(rows) == []
     assert len(session.calls) == 2
-    assert delays == pytest.approx([2.0, 0.21], abs=1e-6)
-    assert clock[0] == pytest.approx(3002.21)
+    assert delays == [2.0]
+    assert clock[0] == pytest.approx(3002.0)
 
 
 def test_account_bills_retries_okx_50011_using_retry_after_http_date(tmp_path, monkeypatch):
@@ -250,8 +250,8 @@ def test_account_bills_retries_okx_50011_using_retry_after_http_date(tmp_path, m
 
     assert list(rows) == []
     assert len(session.calls) == 2
-    assert delays == pytest.approx([4.0, 0.21], abs=1e-6)
-    assert clock[0] == pytest.approx(4004.21)
+    assert delays == [4.0]
+    assert clock[0] == pytest.approx(4004.0)
 
 
 def test_account_bills_does_not_retry_early_when_retry_after_exceeds_deadline(tmp_path, monkeypatch):
