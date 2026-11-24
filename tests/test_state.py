@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from nebula.state import StateStore
 
 
@@ -171,3 +173,43 @@ def test_terminal_intent_and_exchange_order_id_cannot_be_rewritten(tmp_path):
         store.update_intent("NB1", "live", "1001")
     with pytest.raises(ValueError, match="cannot change"):
         store.update_intent("NB1", "filled", "1002")
+
+
+def test_database_and_active_wal_sidecars_are_owner_only(tmp_path):
+    import os
+    import stat
+
+    path = tmp_path / "private-state.db"
+    old_umask = os.umask(0o022)
+    try:
+        store = StateStore(str(path))
+        connection = store._connect()
+        try:
+            connection.execute(
+                "INSERT INTO kv(key, value) VALUES(?, ?)",
+                ("private-test", "private-value"),
+            )
+            connection.commit()
+
+            expected = 0o600
+            assert stat.S_IMODE(path.stat().st_mode) == expected
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(str(path) + suffix)
+                assert sidecar.exists()
+                assert stat.S_IMODE(sidecar.stat().st_mode) == expected
+        finally:
+            connection.close()
+    finally:
+        os.umask(old_umask)
+
+
+def test_state_store_refuses_symlinked_database_path(tmp_path):
+    import pytest
+
+    real_path = tmp_path / "real-state.db"
+    real_path.write_bytes(b"not a sqlite database")
+    link_path = tmp_path / "linked-state.db"
+    link_path.symlink_to(real_path)
+
+    with pytest.raises(RuntimeError, match="securely open NEBULA state file"):
+        StateStore(str(link_path))
