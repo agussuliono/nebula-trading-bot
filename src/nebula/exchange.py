@@ -88,9 +88,12 @@ class _PrivateReadRateLimiter:
             raise OkxError(
                 "Private-read cross-process rate limiter requires a readable Linux boot ID"
             ) from exc
-        if not value or len(value) > 80:
-            raise OkxError("Private-read rate limiter could not validate the current boot ID")
-        return value
+        try:
+            return str(uuid.UUID(value))
+        except (ValueError, AttributeError) as exc:
+            raise OkxError(
+                "Private-read rate limiter could not validate the current boot ID"
+            ) from exc
 
     @classmethod
     def wait_for_slot(cls, path: str | os.PathLike, *, deadline: float) -> None:
