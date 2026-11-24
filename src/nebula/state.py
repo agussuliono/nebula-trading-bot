@@ -315,6 +315,25 @@ class StateStore:
             lock = db.execute("SELECT owner_client_order_id,instrument FROM position_lock WHERE singleton=1").fetchone()
             if not lock or lock["owner_client_order_id"] != position_client_order_id or lock["instrument"] != instrument:
                 raise RuntimeError("Exit order does not match the active position lock")
+            existing_exit = db.execute(
+                """SELECT client_order_id,status FROM intents
+                   WHERE position_client_order_id=? AND side='sell'
+                     AND status NOT IN ('filled','canceled','rejected','mmp_canceled')
+                   LIMIT 1""",
+                (position_client_order_id,),
+            ).fetchone()
+            if existing_exit:
+                raise RuntimeError(
+                    f"Position already has an unresolved exit order {existing_exit['client_order_id']}"
+                )
+            protection = db.execute(
+                "SELECT status FROM protection_intents WHERE entry_client_order_id=?",
+                (position_client_order_id,),
+            ).fetchone()
+            if protection:
+                raise RuntimeError(
+                    "Independent sell order is blocked while a durable OCO protection intent exists"
+                )
             db.execute("INSERT INTO intents(client_order_id,instrument,candle_ts,side,status,position_client_order_id) VALUES(?,?,?,?,'reserved',?)",
                        (client_order_id, instrument, candle_ts, side, position_client_order_id))
             return True
