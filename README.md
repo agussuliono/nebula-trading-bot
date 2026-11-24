@@ -7,6 +7,8 @@
 - Added regression coverage for data-quality filtering and credential-free shadow orchestration.
 
 
+## v0.16.7 patch note
+
 - Public-only CLI paths (check-demo-public and analyze-once) use a dedicated settings loader that never reads API key, secret, passphrase, or order-gate environment variables.
 - HTTP errors now retain safe diagnostics (HTTP status, sanitized API code and content type). Non-JSON responses such as HTML 403 pages are classified without copying their body, arbitrary headers, or request URL; only allowlisted Server/Via/CF-Ray metadata is retained, with IP literals redacted.
 - Configured API key, secret and passphrase values are redacted from exchange-provided error messages.
