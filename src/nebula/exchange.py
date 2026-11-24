@@ -73,7 +73,8 @@ class _PrivateReadRateLimiter:
 
     The lock file stores only a boot identifier and monotonic deadline, never
     credentials. A shared file lock coordinates separate NEBULA processes that
-    run under the same OS user. The interval is below the strictest covered endpoint limit (5 req/s).
+    run under the same OS user. The interval remains below the strictest covered
+    endpoint limit (5 requests/second).
     """
 
     INTERVAL_SECONDS = 0.21
@@ -96,22 +97,23 @@ class _PrivateReadRateLimiter:
             import fcntl
         except ImportError as exc:
             raise OkxError(
-                "Account-bills cross-process rate limiter is unavailable on this platform"
+                "Private-read cross-process rate limiter is unavailable on this platform"
             ) from exc
 
         lock_path = Path(path).expanduser()
+        fd = None
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(lock_path.parent, 0o700)
             flags = os.O_CREAT | os.O_RDWR
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             fd = os.open(lock_path, flags, 0o600)
             if not stat.S_ISREG(os.fstat(fd).st_mode):
-                os.close(fd)
                 raise OSError("rate-limit lock path is not a regular file")
             os.fchmod(fd, 0o600)
         except OSError as exc:
+            if fd is not None:
+                os.close(fd)
             raise OkxError("Cannot initialize the private-read rate-limit lock") from exc
 
         try:
