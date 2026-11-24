@@ -290,3 +290,13 @@ This release is not an autonomous trading bot. Order submission remains disabled
 - Official OKX documentation says US/AU accounts registered through app.okx.com must use `us.okx.com`, EEA accounts registered through my.okx.com must use `eea.okx.com`, while global accounts use `openapi.okx.com`. The user confirmed that the account-registration region for this project is `global`; the workflow on the current review stack pins `NEBULA_OKX_REGION=global`. This confirmation does not establish public endpoint reachability or authenticated Demo connectivity.
 - Offline contract tests cover all three allowlisted hosts, mandatory Demo header, redirect prevention, and rejection of arbitrary domains.
 - No OKX request or account read was executed for this change. The selected account region, public reachability, private Demo authentication, and all exchange-side behavior remain unverified. The order gate remains disabled.
+
+
+## 2026-11-24 — v0.16.8 shadow credential isolation and scanner data-quality gate
+
+- Default `orchestrate-once` now uses public-only settings. Private API credentials are loaded only when `--execute-demo` is explicitly selected.
+- Scanner data completeness now counts confirmed, finite, positive OHLCV candles. Runtime rejects a candidate when valid traded history is below `min_data_points` and reports the reason in `data_quality_rejected`.
+- Regression tests cover credential selection and insufficient valid traded history.
+- Package version is aligned to README patch version 0.16.8.
+- CI run #420 on the pre-final-documentation code commit passed 502 tests in 7.08 seconds and compile/safety checks. A follow-up README formatting commit is pending its own CI result.
+- These checks are offline only. OKX public reachability, authenticated Demo read-only verification, exchange OCO/partial-fill behavior, and 14-day forward testing remain unverified/not started. No account or order operation was performed.
