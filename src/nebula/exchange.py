@@ -97,6 +97,19 @@ class _PrivateReadRateLimiter:
                 "Private-read rate limiter could not validate the current boot ID"
             ) from exc
 
+    @staticmethod
+    def _write_deadline(fd: int, boot_id: str, deadline: float) -> None:
+        payload = f"{boot_id}\n{deadline:.9f}\n".encode("ascii")
+        os.lseek(fd, 0, os.SEEK_SET)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("short write while persisting private-read pacing state")
+            remaining = remaining[written:]
+        os.ftruncate(fd, len(payload))
+        os.fsync(fd)
+
     @classmethod
     def run_request(cls, path: str | os.PathLike, *, deadline: float, operation):
         """Pace and execute one request while holding the cross-process lock."""
@@ -175,18 +188,22 @@ class _PrivateReadRateLimiter:
             if time.monotonic() >= deadline:
                 raise OkxError("Private-read deadline expired during rate-limit pacing")
 
-            # Keep the OS lock until the callback finishes. Measure the next
-            # interval from completion so delayed processes cannot bunch sends.
+            # Persist a write-ahead reservation before invoking the HTTP
+            # callback. If this process is killed after sending but before it can
+            # write completion metadata, the next process still observes a slot.
+            request_started_at = time.monotonic()
+            cls._write_deadline(
+                fd, boot_id, request_started_at + cls.INTERVAL_SECONDS,
+            )
+            # Hold the OS lock through the callback. On normal completion (or a
+            # handled failure), conservatively start the next interval at finish.
             try:
                 result = operation()
             finally:
-                # Failed HTTP attempts also consume a request slot.
                 completed_at = time.monotonic()
-                payload = f"{boot_id}\n{completed_at + cls.INTERVAL_SECONDS:.9f}\n".encode("ascii")
-                os.lseek(fd, 0, os.SEEK_SET)
-                os.write(fd, payload)
-                os.ftruncate(fd, len(payload))
-                os.fsync(fd)
+                cls._write_deadline(
+                    fd, boot_id, completed_at + cls.INTERVAL_SECONDS,
+                )
             if completed_at >= deadline:
                 raise OkxError("Private-read deadline expired during HTTP request")
             return result
