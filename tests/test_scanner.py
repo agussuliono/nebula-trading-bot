@@ -1,4 +1,5 @@
-from nebula.scanner import build_candidates, candle_range_volatility, rank_candidates, MarketCandidate
+from nebula.scanner import (build_candidates, candle_range_volatility, rank_candidates,
+                             valid_traded_candle_count, MarketCandidate)
 
 
 def test_build_candidates_uses_usdt_live_spot_and_quote_volume():
@@ -93,3 +94,15 @@ def test_build_candidates_rejects_future_listing_and_nonfinite_market_fields():
     assert build_candidates([{"instId":"BTC-USDT", "instType":"SPOT", "state":"live",
                               "quoteCcy":"USDT", "listTime":str(now - 1000)}],
                             [bad], now_ms=now) == []
+
+
+
+def test_valid_traded_candle_count_excludes_unconfirmed_zero_and_invalid_volume():
+    rows = [
+        ["5", "12", "13", "11", "12", "1", "12", "12", "1"],
+        ["4", "12", "13", "11", "12", "0", "0", "0", "1"],
+        ["3", "12", "13", "11", "12", "nan", "0", "0", "1"],
+        ["2", "12", "13", "11", "12", "1", "12", "12", "0"],
+        ["1", "12", "13", "11", "12", "1", "12", "12", "1"],
+    ]
+    assert valid_traded_candle_count(rows) == 2
