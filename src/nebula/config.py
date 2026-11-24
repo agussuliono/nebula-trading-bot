@@ -1,16 +1,17 @@
 from dataclasses import dataclass
 import math
 import os
+from types import MappingProxyType
 
 # OKX REST domains depend on the region where the account was registered.
 # Keep this as a closed allowlist: callers may select a region, never a URL.
 # Demo requests to every regional host must still carry the mandatory
 # x-simulated-trading: 1 header; no production-mode switch exists in NEBULA.
-DEMO_REST_URLS = {
+DEMO_REST_URLS = MappingProxyType({
     "global": "https://openapi.okx.com",
     "us_au": "https://us.okx.com",
     "eea": "https://eea.okx.com",
-}
+})
 DEFAULT_DEMO_REGION = "global"
 # Backward-compatible name for the default global Demo endpoint.
 DEMO_REST_URL = DEMO_REST_URLS[DEFAULT_DEMO_REGION]
