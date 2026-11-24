@@ -151,12 +151,15 @@ def main():
         emit_result(f"OK: {len(instruments)} spot instruments; {len(tickers)} tickers (public market data). No orders sent.")
         return
 
-    # analyze-once only uses public market data; keep it independent of credentials.
-    settings = (
-        Settings.from_public_env()
-        if args.command == "analyze-once"
-        else Settings.from_env()
-    )
+    # Public-only commands must not inspect API credentials. The default
+    # orchestrator mode is shadow-only; load credentials only for an explicit
+    # --execute-demo request.
+    if args.command == "analyze-once" or (
+        args.command == "orchestrate-once" and not args.execute_demo
+    ):
+        settings = Settings.from_public_env()
+    else:
+        settings = Settings.from_env()
     client = OkxDemoClient(settings)
     if args.command == "verify-demo-once":
         from .demo_verification import verify_demo_read_only
