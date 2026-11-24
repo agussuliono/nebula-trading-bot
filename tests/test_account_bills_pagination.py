@@ -429,3 +429,56 @@ def test_private_read_limiter_paces_failed_http_attempts_too(tmp_path, monkeypat
 
     assert delays == pytest.approx([0.21], abs=1e-6)
     assert clock[0] == pytest.approx(11_000.21)
+
+
+def _separate_process_private_read_worker(lock_path, start_event, events, worker_id):
+    import time
+    from nebula.exchange import _PrivateReadRateLimiter
+
+    start_event.wait(timeout=5)
+
+    def simulated_http_request():
+        events.put((worker_id, "start", time.monotonic()))
+        time.sleep(0.05)
+        events.put((worker_id, "end", time.monotonic()))
+        return "ok"
+
+    _PrivateReadRateLimiter.run_request(
+        lock_path, deadline=time.monotonic() + 10,
+        operation=simulated_http_request,
+    )
+
+
+def test_private_read_limiter_serializes_actual_requests_across_processes(tmp_path):
+    import multiprocessing
+    import time
+    from nebula.exchange import _PrivateReadRateLimiter
+
+    context = multiprocessing.get_context("fork")
+    start_event = context.Event()
+    events = context.Queue()
+    lock_path = str(tmp_path / "multiprocess-private-read.lock")
+    processes = [
+        context.Process(
+            target=_separate_process_private_read_worker,
+            args=(lock_path, start_event, events, worker_id),
+        )
+        for worker_id in (1, 2)
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+
+    observed = [events.get(timeout=8) for _ in range(4)]
+    for process in processes:
+        process.join(timeout=8)
+        assert process.exitcode == 0
+    assert all(not process.is_alive() for process in processes)
+
+    starts = sorted((worker, ts) for worker, stage, ts in observed if stage == "start")
+    ends = {worker: ts for worker, stage, ts in observed if stage == "end"}
+    first_worker, first_start = starts[0]
+    second_worker, second_start = starts[1]
+    assert first_worker != second_worker
+    assert ends[first_worker] >= first_start
+    assert second_start - ends[first_worker] >= _PrivateReadRateLimiter.INTERVAL_SECONDS - 0.02
