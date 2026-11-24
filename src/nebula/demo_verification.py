@@ -1,7 +1,7 @@
 """Read-only OKX Demo connectivity and account-safety verification."""
 from decimal import Decimal, InvalidOperation
 
-from .config import DEMO_FLAG, DEMO_REST_URL, SafetyError
+from .config import DEMO_FLAG, DEMO_REST_URLS, DEFAULT_DEMO_REGION, SafetyError
 
 
 def verify_demo_read_only(client, settings) -> dict:
@@ -14,7 +14,9 @@ def verify_demo_read_only(client, settings) -> dict:
     report = {
         "mode": "okx_spot_demo_read_only_verification",
         "status": "blocked",
-        "demo_host_fixed": getattr(client, "base_url", None) == DEMO_REST_URL,
+        "demo_host_fixed": getattr(client, "base_url", None) == DEMO_REST_URLS.get(
+            getattr(settings, "okx_api_region", DEFAULT_DEMO_REGION)
+        ),
         "simulated_trading_flag": DEMO_FLAG,
         "public_api": "not_checked",
         "private_api": "not_checked",
