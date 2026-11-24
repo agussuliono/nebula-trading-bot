@@ -83,10 +83,10 @@ class _PrivateReadRateLimiter:
             value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
         except (OSError, UnicodeError) as exc:
             raise OkxError(
-                "Account-bills cross-process rate limiter requires a readable Linux boot ID"
+                "Private-read cross-process rate limiter requires a readable Linux boot ID"
             ) from exc
         if not value or len(value) > 80:
-            raise OkxError("Account-bills rate limiter could not validate the current boot ID")
+            raise OkxError("Private-read rate limiter could not validate the current boot ID")
         return value
 
     @classmethod
@@ -107,7 +107,7 @@ class _PrivateReadRateLimiter:
                 flags |= os.O_NOFOLLOW
             fd = os.open(lock_path, flags, 0o600)
         except OSError as exc:
-            raise OkxError("Cannot initialize the account-bills rate-limit lock") from exc
+            raise OkxError("Cannot initialize the private-read rate-limit lock") from exc
 
         try:
             # Non-blocking acquisition makes lock contention obey the same
@@ -120,7 +120,7 @@ class _PrivateReadRateLimiter:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise OkxError(
-                            "Account-bills total deadline expired waiting for the shared rate-limit lock"
+                            "Private-read deadline expired waiting for the shared rate-limit lock"
                         )
                     time.sleep(min(0.05, remaining))
             boot_id = cls._boot_id()
@@ -139,12 +139,12 @@ class _PrivateReadRateLimiter:
             delay = max(0.0, next_allowed - now)
             remaining = deadline - now
             if remaining <= 0 or delay > remaining:
-                raise OkxError("Account-bills total deadline would be exceeded by rate-limit pacing")
+                raise OkxError("Private-read deadline would be exceeded by rate-limit pacing")
             if delay:
                 time.sleep(delay)
             now = time.monotonic()
             if now >= deadline:
-                raise OkxError("Account-bills total deadline expired during rate-limit pacing")
+                raise OkxError("Private-read deadline expired during rate-limit pacing")
 
             payload = f"{boot_id}\n{now + cls.INTERVAL_SECONDS:.9f}\n".encode("ascii")
             os.lseek(fd, 0, os.SEEK_SET)
@@ -152,7 +152,7 @@ class _PrivateReadRateLimiter:
             os.ftruncate(fd, len(payload))
             os.fsync(fd)
         except OSError as exc:
-            raise OkxError("Account-bills rate-limit coordination failed") from exc
+            raise OkxError("Private-read rate-limit coordination failed") from exc
         finally:
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)
