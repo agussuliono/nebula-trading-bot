@@ -229,8 +229,8 @@ def test_account_bills_retries_http_429_using_retry_after_seconds(tmp_path, monk
 
     assert list(rows) == []
     assert len(session.calls) == 2
-    assert delays == [2.0]
-    assert clock[0] == pytest.approx(3002.0)
+    assert delays == pytest.approx([2.0, 0.21], abs=1e-6)
+    assert clock[0] == pytest.approx(3002.21)
 
 
 def test_account_bills_retries_okx_50011_using_retry_after_http_date(tmp_path, monkeypatch):
@@ -250,8 +250,8 @@ def test_account_bills_retries_okx_50011_using_retry_after_http_date(tmp_path, m
 
     assert list(rows) == []
     assert len(session.calls) == 2
-    assert delays == [4.0]
-    assert clock[0] == pytest.approx(4004.0)
+    assert delays == pytest.approx([4.0, 0.21], abs=1e-6)
+    assert clock[0] == pytest.approx(4004.21)
 
 
 def test_account_bills_does_not_retry_early_when_retry_after_exceeds_deadline(tmp_path, monkeypatch):
@@ -381,3 +381,51 @@ def test_private_read_limiter_fails_closed_on_corrupt_lock_metadata(tmp_path, mo
         client.get_account_bills()
 
     assert session.calls == []
+
+
+def test_private_read_limiter_holds_cross_process_lock_during_http_callback(tmp_path, monkeypatch):
+    from nebula.exchange import _PrivateReadRateLimiter
+
+    fake_monotonic(monkeypatch, start=10_000.0)
+    lock_path = tmp_path / "held-through-request.lock"
+    observed = []
+
+    def simulated_http_request():
+        with open(lock_path, "r+b") as other:
+            try:
+                fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                observed.append("lock-held")
+            else:
+                fcntl.flock(other.fileno(), fcntl.LOCK_UN)
+                observed.append("lock-released")
+        return {"ok": True}
+
+    result = _PrivateReadRateLimiter.run_request(
+        lock_path, deadline=10_001.0, operation=simulated_http_request,
+    )
+
+    assert result == {"ok": True}
+    assert observed == ["lock-held"]
+
+
+def test_private_read_limiter_paces_failed_http_attempts_too(tmp_path, monkeypatch):
+    from nebula.exchange import _PrivateReadRateLimiter
+
+    clock, delays = fake_monotonic(monkeypatch, start=11_000.0)
+    lock_path = tmp_path / "failed-attempt.lock"
+
+    def failed_request():
+        raise OkxError("simulated HTTP failure", status_code=429)
+
+    with pytest.raises(OkxError, match="simulated HTTP failure"):
+        _PrivateReadRateLimiter.run_request(
+            lock_path, deadline=11_010.0, operation=failed_request,
+        )
+
+    _PrivateReadRateLimiter.run_request(
+        lock_path, deadline=11_010.0, operation=lambda: "ok",
+    )
+
+    assert delays == pytest.approx([0.21], abs=1e-6)
+    assert clock[0] == pytest.approx(11_000.21)
