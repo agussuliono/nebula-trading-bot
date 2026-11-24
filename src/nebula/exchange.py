@@ -6,6 +6,7 @@ import ipaddress
 import json
 import math
 import os
+import stat
 import threading
 import time
 from email.utils import parsedate_to_datetime
@@ -106,6 +107,10 @@ class _PrivateReadRateLimiter:
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             fd = os.open(lock_path, flags, 0o600)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                raise OSError("rate-limit lock path is not a regular file")
+            os.fchmod(fd, 0o600)
         except OSError as exc:
             raise OkxError("Cannot initialize the private-read rate-limit lock") from exc
 
