@@ -482,3 +482,45 @@ def test_private_read_limiter_serializes_actual_requests_across_processes(tmp_pa
     assert first_worker != second_worker
     assert ends[first_worker] >= first_start
     assert second_start - ends[first_worker] >= _PrivateReadRateLimiter.INTERVAL_SECONDS - 0.02
+
+
+def _private_read_worker_crash_after_request_start(lock_path, started):
+    import time
+    from nebula.exchange import _PrivateReadRateLimiter
+
+    def simulated_http_request():
+        started.put(time.monotonic())
+        time.sleep(5)
+
+    _PrivateReadRateLimiter.run_request(
+        lock_path, deadline=time.monotonic() + 10,
+        operation=simulated_http_request,
+    )
+
+
+def test_private_read_limiter_keeps_reservation_if_process_dies_mid_request(tmp_path):
+    import multiprocessing
+    import time
+    from nebula.exchange import _PrivateReadRateLimiter
+
+    context = multiprocessing.get_context("fork")
+    started = context.Queue()
+    lock_path = str(tmp_path / "crashed-private-read.lock")
+    process = context.Process(
+        target=_private_read_worker_crash_after_request_start,
+        args=(lock_path, started),
+    )
+    process.start()
+    first_start = started.get(timeout=5)
+    process.terminate()
+    process.join(timeout=5)
+    assert process.exitcode is not None
+
+    second_start = []
+    _PrivateReadRateLimiter.run_request(
+        lock_path, deadline=time.monotonic() + 5,
+        operation=lambda: second_start.append(time.monotonic()),
+    )
+
+    assert len(second_start) == 1
+    assert second_start[0] - first_start >= _PrivateReadRateLimiter.INTERVAL_SECONDS - 0.02
