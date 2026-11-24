@@ -350,3 +350,20 @@ def test_fills_history_rejects_boolean_or_non_integer_limits_before_http(tmp_pat
         with pytest.raises(ValueError, match="fill history limit"):
             client.get_fills_history("BTC-USDT", "123456", limit=limit)
         assert session.calls == []
+
+
+def test_private_read_limiter_lock_file_is_owner_only(tmp_path, monkeypatch):
+    import os
+    import stat
+    from nebula.exchange import _PrivateReadRateLimiter
+
+    fake_monotonic(monkeypatch, start=8000.0)
+    lock_path = tmp_path / "shared.lock"
+    lock_path.write_text("", encoding="ascii")
+    os.chmod(lock_path, 0o644)
+
+    _PrivateReadRateLimiter.wait_for_slot(
+        lock_path, deadline=8001.0,
+    )
+
+    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
