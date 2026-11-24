@@ -436,3 +436,40 @@ def test_proxy_diagnostics_redact_ip_literals_with_ports_and_ipv6():
     assert "203.0.113.7" not in safe
     assert "2001:db8::1" not in safe
     assert "2001:db8::2" not in safe
+
+
+@pytest.mark.parametrize(
+    ("region", "expected_host"),
+    [
+        ("global", "https://openapi.okx.com"),
+        ("us_au", "https://us.okx.com"),
+        ("eea", "https://eea.okx.com"),
+    ],
+)
+def test_demo_rest_host_is_selected_only_from_region_allowlist(region, expected_host):
+    session = RecordingSession(Response({"code": "0", "msg": "", "data": []}))
+    settings = Settings(okx_api_region=region)
+    client = OkxDemoClient(settings, session=session)
+
+    assert client.get_tickers() == []
+    assert client.base_url == expected_host
+    assert session.calls[0][0][1].startswith(expected_host + "/")
+    assert session.calls[0][1]["headers"]["x-simulated-trading"] == "1"
+    assert session.calls[0][1]["allow_redirects"] is False
+
+
+def test_demo_rest_host_rejects_arbitrary_url_as_region():
+    with pytest.raises(ValueError, match="okx_api_region must be one of"):
+        Settings(okx_api_region="https://example.invalid")
+
+
+def test_demo_region_setting_is_read_from_environment(monkeypatch):
+    monkeypatch.setenv("NEBULA_OKX_REGION", "eea")
+    assert Settings.from_env().okx_api_region == "eea"
+    assert Settings.from_public_env().okx_api_region == "eea"
+
+
+def test_demo_region_setting_rejects_unknown_values(monkeypatch):
+    monkeypatch.setenv("NEBULA_OKX_REGION", "custom")
+    with pytest.raises(ValueError, match="NEBULA_OKX_REGION must be one of"):
+        Settings.from_env()
