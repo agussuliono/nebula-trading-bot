@@ -19,7 +19,7 @@ import requests
 
 from decimal import Decimal, InvalidOperation
 
-from .config import DEMO_FLAG, DEMO_REST_URL, Settings, SafetyError
+from .config import DEMO_FLAG, DEMO_REST_URLS, Settings, SafetyError
 from .instruments import InstrumentRuleError, SpotInstrument
 from .bill_reconciliation import _create_complete_account_bills_snapshot
 
@@ -258,8 +258,8 @@ class OkxDemoClient:
 
     @property
     def base_url(self) -> str:
-        """Expose the fixed Demo host as a read-only compatibility property."""
-        return DEMO_REST_URL
+        """Return the region-mapped Demo host from the closed allowlist."""
+        return DEMO_REST_URLS[self.settings.okx_api_region]
 
     def __init__(self, settings: Settings, session=None, timeout: float = 10.0,
                  private_read_rate_limit_path=None):
@@ -271,6 +271,8 @@ class OkxDemoClient:
             raise ValueError("timeout must be a finite positive number") from exc
         if not math.isfinite(timeout_value) or timeout_value <= 0:
             raise ValueError("timeout must be a finite positive number")
+        if getattr(settings, "okx_api_region", None) not in DEMO_REST_URLS:
+            raise SafetyError("Unsupported OKX API region; select a documented Demo region")
         self.settings = settings
         self.session = session or requests.Session()
         self.timeout = timeout_value
@@ -393,7 +395,7 @@ class OkxDemoClient:
 
     def _request_once(self, method, request_path, body, private, timeout=None):
         return self.session.request(
-            method, DEMO_REST_URL + request_path,
+            method, self.base_url + request_path,
             headers=self._headers(method, request_path, body, private),
             data=body or None, timeout=self.timeout if timeout is None else timeout,
             # Never replay authenticated headers or resubmit a write through redirects.
