@@ -261,8 +261,7 @@ class OkxDemoClient:
         """Return the region-mapped Demo host from the closed allowlist."""
         return DEMO_REST_URLS[self.settings.okx_api_region]
 
-    def __init__(self, settings: Settings, session=None, timeout: float = 10.0,
-                 private_read_rate_limit_path=None):
+    def __init__(self, settings: Settings, session=None, timeout: float = 10.0):
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise ValueError("timeout must be a finite positive number")
         try:
@@ -276,10 +275,10 @@ class OkxDemoClient:
         self.settings = settings
         self.session = session or requests.Session()
         self.timeout = timeout_value
-        self.private_read_rate_limit_path = (
-            Path(private_read_rate_limit_path).expanduser()
-            if private_read_rate_limit_path is not None
-            else Path.home() / ".cache" / "nebula" / "okx-private-read.lock"
+        # Fixed per-OS-user path prevents normal configuration from bypassing
+        # cross-process pacing by selecting a second lock file.
+        self._private_read_rate_limit_path = (
+            Path.home() / ".cache" / "nebula" / "okx-private-read.lock"
         )
         self._startup_entry_permit = None
         self._startup_entry_state = None
@@ -572,7 +571,7 @@ class OkxDemoClient:
         """Rate-limit and safely retry an idempotent private GET within one deadline."""
         for attempt in range(3):
             _PrivateReadRateLimiter.wait_for_slot(
-                self.private_read_rate_limit_path, deadline=deadline,
+                self._private_read_rate_limit_path, deadline=deadline,
             )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
