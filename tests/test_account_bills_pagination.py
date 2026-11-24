@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 from email.utils import formatdate
 from urllib.parse import parse_qs, urlparse
+import fcntl
 
 import pytest
 
@@ -293,3 +294,28 @@ def test_account_bills_rejects_invalid_total_timeout_before_http(tmp_path):
         with pytest.raises(ValueError, match="total_timeout"):
             client.get_account_bills(total_timeout=timeout)
         assert session.calls == []
+
+
+def test_account_bills_rate_limit_lock_contention_obeys_total_deadline(tmp_path, monkeypatch):
+    from nebula.exchange import _AccountBillsRateLimiter
+
+    clock = [6000.0]
+    delays = []
+
+    def sleep(delay):
+        delays.append(delay)
+        clock[0] += delay
+
+    monkeypatch.setattr("nebula.exchange.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nebula.exchange.time.sleep", sleep)
+    lock_path = tmp_path / "held.lock"
+    with open(lock_path, "w", encoding="ascii") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+        with pytest.raises(OkxError, match="deadline expired waiting"):
+            _AccountBillsRateLimiter.wait_for_slot(
+                lock_path, deadline=clock[0] + 0.09,
+            )
+        fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+
+    assert delays
+    assert sum(delays) == pytest.approx(0.09, abs=1e-6)
