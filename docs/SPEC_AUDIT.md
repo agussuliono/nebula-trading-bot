@@ -193,5 +193,5 @@ Status: implemented in review branch; GitHub Actions run #369 passed 470 tests, 
 - Runtime reports instruments rejected for insufficient valid traded candles separately from stale market data.
 - Regression coverage was added for public-only versus explicit Demo settings selection, valid traded-candle counting, and runtime rejection below the minimum valid-candle threshold.
 - Package and README version: 0.16.8.
-- GitHub Actions NEBULA CI run #420 / ID 45413514303 on commit f9ca02dc4bd3bc7915f07b3e08d02bcfc488fbcf: 502 tests passed in 7.08 seconds; compileall and both explicit/default safety configuration checks passed. A later README-only formatting commit is being validated separately.
+- GitHub Actions NEBULA CI run #420 / ID 45413514303 on commit f9ca02dc4bd3bc7915f07b3e08d02bcfc488fbcf: 502 tests passed in 7.08 seconds. Final stack CI run #422 / ID 45413849019 on commit c7e1c47766b8f3a23d5b7b0aedde1a2788ee4168: 502 tests passed in 10.27 seconds; compile, explicit Demo safety settings, and fail-closed defaults passed.
 - CI is offline/fake-backed. It does not prove OKX connectivity, authenticated Demo behavior, order lifecycle, or strategy profitability. No credentials, account connection, or exchange write was used.
