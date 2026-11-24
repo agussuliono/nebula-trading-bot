@@ -63,7 +63,6 @@ class Settings:
     api_key: str = ""
     secret_key: str = ""
     passphrase: str = ""
-    okx_api_region: str = DEFAULT_DEMO_REGION
     demo_account_exclusive: bool = False
     enable_demo_orders: bool = False
     # Fail closed: even if the Demo order gate is explicitly enabled, the
@@ -75,6 +74,8 @@ class Settings:
     fee_bps: float = 10.0
     slippage_bps: float = 10.0
     market_data_max_age_ms: int = 30_000
+    # Appended to preserve the existing positional Settings constructor contract.
+    okx_api_region: str = DEFAULT_DEMO_REGION
 
     def __post_init__(self):
         if self.okx_api_region not in DEMO_REST_URLS:
