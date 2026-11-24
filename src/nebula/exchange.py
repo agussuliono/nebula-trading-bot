@@ -9,6 +9,7 @@ import os
 import stat
 import threading
 import time
+import uuid
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from datetime import datetime, timezone
@@ -132,15 +133,29 @@ class _PrivateReadRateLimiter:
                     time.sleep(min(0.05, remaining))
             boot_id = cls._boot_id()
             os.lseek(fd, 0, os.SEEK_SET)
-            raw = os.read(fd, 256).decode("ascii", errors="ignore").splitlines()
+            raw_bytes = os.read(fd, 257)
+            if len(raw_bytes) > 256:
+                raise OkxError("Private-read rate-limit lock metadata is oversized")
+            try:
+                raw = raw_bytes.decode("ascii").splitlines()
+            except UnicodeError as exc:
+                raise OkxError("Private-read rate-limit lock metadata is malformed") from exc
             next_allowed = 0.0
-            if len(raw) == 2 and raw[0] == boot_id:
+            if raw_bytes:
+                if len(raw) != 2:
+                    raise OkxError("Private-read rate-limit lock metadata is incomplete")
                 try:
-                    parsed = float(raw[1])
-                    if math.isfinite(parsed) and parsed >= 0:
-                        next_allowed = parsed
-                except ValueError:
-                    pass
+                    stored_boot_id = str(uuid.UUID(raw[0]))
+                except (ValueError, AttributeError) as exc:
+                    raise OkxError("Private-read rate-limit lock boot ID is malformed") from exc
+                if stored_boot_id == boot_id:
+                    try:
+                        parsed = float(raw[1])
+                    except ValueError as exc:
+                        raise OkxError("Private-read rate-limit deadline is malformed") from exc
+                    if not math.isfinite(parsed) or parsed < 0:
+                        raise OkxError("Private-read rate-limit deadline is invalid")
+                    next_allowed = parsed
 
             now = time.monotonic()
             delay = max(0.0, next_allowed - now)
