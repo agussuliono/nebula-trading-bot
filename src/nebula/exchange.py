@@ -5,8 +5,12 @@ import hmac
 import ipaddress
 import json
 import math
+import os
 import threading
 import time
+import tempfile
+from email.utils import parsedate_to_datetime
+from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
@@ -23,7 +27,8 @@ class OkxError(RuntimeError):
     """Sanitized exchange error with optional non-secret HTTP diagnostics."""
 
     def __init__(self, message, *, status_code=None, error_code=None,
-                 content_type=None, server=None, via=None, cf_ray=None, retryable=False):
+                 content_type=None, server=None, via=None, cf_ray=None, retryable=False,
+                 retry_after=None):
         safe_meta = []
         if server:
             safe_meta.append(f"server={server}")
@@ -41,6 +46,7 @@ class OkxError(RuntimeError):
         self.via = via
         self.cf_ray = cf_ray
         self.retryable = bool(retryable)
+        self.retry_after = retry_after
 
     def diagnostic(self):
         """Return safe metadata only; never include URL, headers, or response body."""
@@ -60,6 +66,87 @@ class OkxError(RuntimeError):
         if self.retryable:
             result["retryable"] = True
         return result
+
+
+class _AccountBillsRateLimiter:
+    """Cross-process pacing for the account-bills endpoint on Linux.
+
+    The lock file stores only a boot identifier and monotonic deadline, never
+    credentials. A shared file lock coordinates separate NEBULA processes that
+    run under the same OS user. The interval is deliberately below 5 req/s.
+    """
+
+    INTERVAL_SECONDS = 0.21
+
+    @staticmethod
+    def _boot_id() -> str:
+        try:
+            value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError) as exc:
+            raise OkxError(
+                "Account-bills cross-process rate limiter requires a readable Linux boot ID"
+            ) from exc
+        if not value or len(value) > 80:
+            raise OkxError("Account-bills rate limiter could not validate the current boot ID")
+        return value
+
+    @classmethod
+    def wait_for_slot(cls, path: str | os.PathLike, *, deadline: float) -> None:
+        try:
+            import fcntl
+        except ImportError as exc:
+            raise OkxError(
+                "Account-bills cross-process rate limiter is unavailable on this platform"
+            ) from exc
+
+        lock_path = Path(path).expanduser()
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(lock_path.parent, 0o700)
+            flags = os.O_CREAT | os.O_RDWR
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(lock_path, flags, 0o600)
+        except OSError as exc:
+            raise OkxError("Cannot initialize the account-bills rate-limit lock") from exc
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            boot_id = cls._boot_id()
+            os.lseek(fd, 0, os.SEEK_SET)
+            raw = os.read(fd, 256).decode("ascii", errors="ignore").splitlines()
+            next_allowed = 0.0
+            if len(raw) == 2 and raw[0] == boot_id:
+                try:
+                    parsed = float(raw[1])
+                    if math.isfinite(parsed) and parsed >= 0:
+                        next_allowed = parsed
+                except ValueError:
+                    pass
+
+            now = time.monotonic()
+            delay = max(0.0, next_allowed - now)
+            remaining = deadline - now
+            if remaining <= 0 or delay > remaining:
+                raise OkxError("Account-bills total deadline would be exceeded by rate-limit pacing")
+            if delay:
+                time.sleep(delay)
+            now = time.monotonic()
+            if now >= deadline:
+                raise OkxError("Account-bills total deadline expired during rate-limit pacing")
+
+            payload = f"{boot_id}\n{now + cls.INTERVAL_SECONDS:.9f}\n".encode("ascii")
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, payload)
+            os.ftruncate(fd, len(payload))
+            os.fsync(fd)
+        except OSError as exc:
+            raise OkxError("Account-bills rate-limit coordination failed") from exc
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
 
 class _RetryablePublicFailure(OkxError):
@@ -141,7 +228,8 @@ class OkxDemoClient:
         """Expose the fixed Demo host as a read-only compatibility property."""
         return DEMO_REST_URL
 
-    def __init__(self, settings: Settings, session=None, timeout: float = 10.0):
+    def __init__(self, settings: Settings, session=None, timeout: float = 10.0,
+                 account_bills_rate_limit_path=None):
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise ValueError("timeout must be a finite positive number")
         try:
@@ -153,6 +241,11 @@ class OkxDemoClient:
         self.settings = settings
         self.session = session or requests.Session()
         self.timeout = timeout_value
+        self.account_bills_rate_limit_path = (
+            Path(account_bills_rate_limit_path).expanduser()
+            if account_bills_rate_limit_path is not None
+            else Path.home() / ".cache" / "nebula" / "okx-account-bills.lock"
+        )
         self._startup_entry_permit = None
         self._startup_entry_state = None
         self._public_circuit = _PublicApiCircuitBreaker()
@@ -237,22 +330,53 @@ class OkxDemoClient:
                 safe_tokens.append("[IP]")
         return " ".join(safe_tokens)[:120]
 
-    def _request_once(self, method, request_path, body, private):
+    @staticmethod
+    def _response_retry_after(response):
+        raw = getattr(response, "headers", {}).get("Retry-After")
+        if raw is None:
+            return None
+        value = str(raw).strip()
+        if (not value or len(value) > 128
+                or any(ord(char) < 32 or ord(char) > 126 for char in value)):
+            return None
+        return value
+
+    @staticmethod
+    def _retry_after_seconds(value):
+        """Parse RFC 9110 delay-seconds or HTTP-date; malformed values return None."""
+        if value is None:
+            return None
+        text = str(value).strip()
+        if text.isascii() and text.isdigit():
+            return float(int(text))
+        try:
+            parsed = parsedate_to_datetime(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            seconds = parsed.timestamp() - time.time()
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return max(0.0, seconds) if math.isfinite(seconds) else None
+
+    def _request_once(self, method, request_path, body, private, timeout=None):
         return self.session.request(
             method, DEMO_REST_URL + request_path,
             headers=self._headers(method, request_path, body, private),
-            data=body or None, timeout=self.timeout,
+            data=body or None, timeout=self.timeout if timeout is None else timeout,
             # Never replay authenticated headers or resubmit a write through redirects.
             allow_redirects=False,
         )
 
-    def _request_with_policy(self, method, request_path, body, private, public_read):
+    def _request_with_policy(self, method, request_path, body, private, public_read,
+                             request_timeout=None):
         # Only idempotent, unauthenticated public GETs are retried. Private reads and
         # every POST are single-attempt because exchange outcomes must be reconciled.
         max_attempts = 3 if public_read else 1
         for attempt in range(max_attempts):
             try:
-                response = self._request_once(method, request_path, body, private)
+                response = self._request_once(
+                    method, request_path, body, private, timeout=request_timeout
+                )
             except (requests.Timeout, requests.ConnectionError) as exc:
                 if public_read and attempt + 1 < max_attempts:
                     time.sleep(min(0.25 * (2 ** attempt), 0.75))
@@ -299,7 +423,10 @@ class OkxDemoClient:
                     )
                 if method == "POST":
                     message += "; write outcome must be reconciled before any retry"
-                raise OkxError(message, status_code=status_code, content_type=content_type, **response_meta)
+                raise OkxError(
+                    message, status_code=status_code, content_type=content_type,
+                    retry_after=self._response_retry_after(response), **response_meta,
+                )
 
             if isinstance(status_code, int) and status_code >= 400:
                 error_code = None
@@ -318,7 +445,8 @@ class OkxDemoClient:
                     detail += f": {api_message}"
                 raise OkxError(
                     f"OKX HTTP {status_code}: {detail}",
-                    status_code=status_code, error_code=error_code, content_type=content_type, **response_meta,
+                    status_code=status_code, error_code=error_code, content_type=content_type,
+                    retry_after=self._response_retry_after(response), **response_meta,
                 )
 
             try:
@@ -338,13 +466,15 @@ class OkxDemoClient:
                     detail += f": {msg}"
                 raise OkxError(
                     detail, status_code=status_code, error_code=code,
-                    content_type=content_type, **response_meta,
+                    content_type=content_type,
+                    retry_after=self._response_retry_after(response), **response_meta,
                 )
             return data.get("data", [])
 
         raise OkxError("Public request retry policy ended unexpectedly")
 
-    def request(self, method: str, path: str, params=None, payload=None, private=False):
+    def request(self, method: str, path: str, params=None, payload=None, private=False,
+                _timeout=None):
         method = str(method).upper()
         endpoint = (method, path)
         public_read = endpoint in self._PUBLIC_READS
@@ -376,10 +506,19 @@ class OkxDemoClient:
         query = f"?{urlencode(params, doseq=True)}" if params else ""
         request_path = f"{path}{query}"
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False) if payload is not None else ""
+        request_timeout = None
+        if _timeout is not None:
+            if (isinstance(_timeout, bool) or not isinstance(_timeout, (int, float))
+                    or not math.isfinite(float(_timeout)) or float(_timeout) <= 0):
+                raise ValueError("request timeout override must be finite and positive")
+            request_timeout = float(_timeout)
         if public_read:
             self._public_circuit.before_request()
         try:
-            result = self._request_with_policy(method, request_path, body, private, public_read)
+            result = self._request_with_policy(
+                method, request_path, body, private, public_read,
+                request_timeout=request_timeout,
+            )
         except (_RetryablePublicFailure, _PublicRequestFailure):
             self._public_circuit.record_transient_failure()
             raise
@@ -438,15 +577,20 @@ class OkxDemoClient:
         return self.request("GET", "/api/v5/account/balance", private=True)
 
     def get_account_bills(self, *, begin: str | None = None, end: str | None = None,
-                          limit: int = 100):
-        """Read complete account bills for a bounded window inside OKX's 7-day retention.
+                          limit: int = 100, total_timeout: float = 30.0):
+        """Read a complete bills snapshot with shared pacing and bounded retries.
 
-        The API is read-only. Pagination follows OKX's newest-first billId cursor:
-        each after cursor must move strictly toward older bill IDs. Incomplete,
-        malformed, out-of-window, or over-cap results fail closed.
+        OKX documents a 5 requests/second per-User-ID limit for this endpoint.
+        A Linux file lock coordinates this client with other NEBULA processes
+        running under the same OS user. Only this idempotent private GET retries
+        HTTP 429 or OKX 50011; writes and other private reads remain single-shot.
         """
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise ValueError("Account bill page limit must be an integer between 1 and 100")
+        if (isinstance(total_timeout, bool) or not isinstance(total_timeout, (int, float))
+                or not math.isfinite(float(total_timeout)) or float(total_timeout) <= 0):
+            raise ValueError("total_timeout must be finite and positive")
+        total_timeout = float(total_timeout)
         for name, value in (("begin", begin), ("end", end)):
             if value is not None:
                 text_value = str(value)
@@ -460,8 +604,10 @@ class OkxDemoClient:
             raise ValueError("begin must not be later than end")
         if effective_begin < oldest_supported_ms or effective_end > now_ms:
             raise ValueError("Account bills window must be fully inside the last 7 days")
+
+        deadline = time.monotonic() + total_timeout
         rows_all, seen, cursor = [], set(), None
-        for _page in range(100):
+        for page_number in range(100):
             params = {"limit": str(limit)}
             if begin is not None:
                 params["begin"] = str(begin)
@@ -469,7 +615,41 @@ class OkxDemoClient:
                 params["end"] = str(end)
             if cursor is not None:
                 params["after"] = cursor
-            page = self.request("GET", "/api/v5/account/bills", params, private=True)
+
+            page = None
+            last_error = None
+            for attempt in range(3):
+                _AccountBillsRateLimiter.wait_for_slot(
+                    self.account_bills_rate_limit_path, deadline=deadline,
+                )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise OkxError("Account-bills total deadline expired before request")
+                try:
+                    page = self.request(
+                        "GET", "/api/v5/account/bills", params, private=True,
+                        _timeout=min(self.timeout, remaining),
+                    )
+                    break
+                except OkxError as exc:
+                    last_error = exc
+                    retryable = exc.status_code == 429 or exc.error_code == "50011"
+                    if not retryable or attempt == 2:
+                        raise
+                    retry_after = self._retry_after_seconds(exc.retry_after)
+                    delay = retry_after if retry_after is not None else min(0.25 * (2 ** attempt), 1.0)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or delay > remaining:
+                        raise OkxError(
+                            "Account-bills retry delay exceeds the remaining total deadline",
+                            status_code=exc.status_code, error_code=exc.error_code,
+                            retry_after=exc.retry_after,
+                        ) from exc
+                    if delay:
+                        time.sleep(delay)
+
+            if page is None:
+                raise OkxError("Account-bills request did not produce a page") from last_error
             if (not isinstance(page, list) or len(page) > limit
                     or any(not isinstance(row, dict) for row in page)):
                 raise OkxError("OKX account-bills page is malformed")
@@ -489,7 +669,7 @@ class OkxDemoClient:
             if len(page) < limit:
                 return _create_complete_account_bills_snapshot(
                     rows_all, begin_ms=effective_begin, end_ms=effective_end,
-                    page_count=_page + 1, terminal_page_seen=True,
+                    page_count=page_number + 1, terminal_page_seen=True,
                 )
             next_cursor = str(page[-1].get("billId") or "")
             if not next_cursor or next_cursor == cursor:
