@@ -177,13 +177,16 @@ class _PrivateReadRateLimiter:
 
             # Keep the OS lock until the callback finishes. Measure the next
             # interval from completion so delayed processes cannot bunch sends.
-            result = operation()
-            completed_at = time.monotonic()
-            payload = f"{boot_id}\\n{completed_at + cls.INTERVAL_SECONDS:.9f}\\n".encode("ascii")
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.write(fd, payload)
-            os.ftruncate(fd, len(payload))
-            os.fsync(fd)
+            try:
+                result = operation()
+            finally:
+                # Failed HTTP attempts also consume a request slot.
+                completed_at = time.monotonic()
+                payload = f"{boot_id}\\n{completed_at + cls.INTERVAL_SECONDS:.9f}\\n".encode("ascii")
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.write(fd, payload)
+                os.ftruncate(fd, len(payload))
+                os.fsync(fd)
             if completed_at >= deadline:
                 raise OkxError("Private-read deadline expired during HTTP request")
             return result
