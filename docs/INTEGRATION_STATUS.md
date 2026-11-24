@@ -298,5 +298,5 @@ This release is not an autonomous trading bot. Order submission remains disabled
 - Scanner data completeness now counts confirmed, finite, positive OHLCV candles. Runtime rejects a candidate when valid traded history is below `min_data_points` and reports the reason in `data_quality_rejected`.
 - Regression tests cover credential selection and insufficient valid traded history.
 - Package version is aligned to README patch version 0.16.8.
-- CI run #420 on the pre-final-documentation code commit passed 502 tests in 7.08 seconds and compile/safety checks. A follow-up README formatting commit is pending its own CI result.
+- Final GitHub Actions CI run #422 on commit c7e1c47766b8f3a23d5b7b0aedde1a2788ee4168 passed 502 tests in 10.27 seconds; compile, explicit Demo safety settings, and fail-closed defaults passed.
 - These checks are offline only. OKX public reachability, authenticated Demo read-only verification, exchange OCO/partial-fill behavior, and 14-day forward testing remain unverified/not started. No account or order operation was performed.
