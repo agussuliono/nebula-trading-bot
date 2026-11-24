@@ -641,6 +641,10 @@ class OkxDemoClient:
                         "GET", "/api/v5/account/bills", params, private=True,
                         _timeout=min(self.timeout, remaining),
                     )
+                    if time.monotonic() > deadline:
+                        raise OkxError(
+                            "Account-bills total deadline expired during the HTTP request"
+                        )
                     break
                 except OkxError as exc:
                     last_error = exc
