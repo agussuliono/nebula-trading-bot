@@ -319,3 +319,34 @@ def test_account_bills_rate_limit_lock_contention_obeys_total_deadline(tmp_path,
 
     assert delays
     assert sum(delays) == pytest.approx(0.09, abs=1e-6)
+
+
+def test_paginated_private_get_endpoints_share_one_cross_process_limiter(tmp_path, monkeypatch):
+    clock, delays = fake_monotonic(monkeypatch, start=7000.0)
+    client, session = make_client(
+        [], [], [],
+        rate_limit_path=tmp_path / "shared-private.lock",
+    )
+
+    assert list(client.get_account_bills()) == []
+    assert list(client.get_fills_history("BTC-USDT", "123456")) == []
+    assert client.get_pending_orders() == []
+
+    assert len(session.calls) == 3
+    assert [call[0][1].split("?", 1)[0] for call in session.calls] == [
+        "https://openapi.okx.com/api/v5/account/bills",
+        "https://openapi.okx.com/api/v5/trade/fills-history",
+        "https://openapi.okx.com/api/v5/trade/orders-pending",
+    ]
+    assert delays == pytest.approx([0.21, 0.21], abs=1e-6)
+    assert clock[0] == pytest.approx(7000.42)
+
+
+def test_fills_history_rejects_boolean_or_non_integer_limits_before_http(tmp_path):
+    for index, limit in enumerate((True, 0, 101, 1.5, "2")):
+        client, session = make_client(
+            [], rate_limit_path=tmp_path / f"fills-{index}.lock",
+        )
+        with pytest.raises(ValueError, match="fill history limit"):
+            client.get_fills_history("BTC-USDT", "123456", limit=limit)
+        assert session.calls == []
