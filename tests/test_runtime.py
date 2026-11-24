@@ -178,3 +178,23 @@ def test_runtime_blocks_candidate_plan_when_circuit_breaker_halted(monkeypatch, 
 def test_default_runtime_policy_is_self_consistent():
     policy = RuntimePolicy()
     assert policy.min_data_points >= policy.slow_ema + 1
+
+
+
+def test_runtime_requires_minimum_valid_traded_candles_not_just_closed_rows(tmp_path):
+    class PoorQualityClient(FakePublicClient):
+        def get_candles(self, inst_id, bar, limit):
+            rows = super().get_candles(inst_id, bar, limit)
+            for row in rows[:30]:
+                row[5] = "0"
+            return rows
+
+    runtime, _ = _runtime(tmp_path, PoorQualityClient())
+    result = runtime.run_once()
+    assert result["eligible_count"] == 0
+    assert result["signals"] == []
+    assert result["data_quality_rejected"] == [{
+        "instrument": "AAA-USDT",
+        "valid_traded_candles": 50,
+        "required": 51,
+    }]
