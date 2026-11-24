@@ -473,3 +473,10 @@ def test_demo_region_setting_rejects_unknown_values(monkeypatch):
     monkeypatch.setenv("NEBULA_OKX_REGION", "custom")
     with pytest.raises(ValueError, match="NEBULA_OKX_REGION must be one of"):
         Settings.from_env()
+
+
+def test_demo_rest_host_allowlist_cannot_be_mutated():
+    from nebula.config import DEMO_REST_URLS
+
+    with pytest.raises(TypeError):
+        DEMO_REST_URLS["global"] = "https://www.okx.com"
