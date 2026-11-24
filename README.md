@@ -57,6 +57,14 @@
 
 ## Safety model
 
+## Local state and single-instance boundary
+
+- Set `NEBULA_DB_PATH` to one stable absolute path when running NEBULA from different working directories. Every process for the same Demo account must use the same state database; a different database cannot see the same position lock or order ledger.
+- SQLite database, WAL, SHM and journal files are restricted to owner-only permissions. Symlinked state paths are refused.
+- Paginated private reads use a shared Linux file lock under the same OS user. This coordinates processes on one Linux host only; it does not coordinate another laptop, Codespace, VM, container with a separate filesystem, or another OS user. Do not run concurrent NEBULA instances against the same OKX Demo User ID on separate hosts.
+- A passing offline test suite is not evidence that the account can be accessed or that a strategy is suitable. The previously evaluated EMA strategy was rejected; Demo order permission must remain disabled until independent prospective strategy evidence is sufficient.
+
+
 - REST host is fixed to `https://openapi.okx.com`; no environment variable can switch it.
 - Every request carries `x-simulated-trading: 1`.
 - Order submission requires `NEBULA_ENABLE_DEMO_ORDERS=true`, complete Demo credentials, finite positive risk limits, `max_risk <= max_daily_loss`, and inactive kill switch.
