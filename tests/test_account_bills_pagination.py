@@ -52,10 +52,9 @@ def make_client(*pages, rate_limit_path):
         for page in pages
     ]
     session = RecordingSession(*responses)
-    client = OkxDemoClient(
-        settings, session=session,
-        private_read_rate_limit_path=rate_limit_path,
-    )
+    client = OkxDemoClient(settings, session=session)
+    # Isolate lock files between tests; production construction has one fixed path.
+    client._private_read_rate_limit_path = rate_limit_path
     return client, session
 
 
