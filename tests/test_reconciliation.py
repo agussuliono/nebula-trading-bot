@@ -43,3 +43,24 @@ def test_flat_requires_zero_base_and_no_regular_or_algo_orders():
         def get_pending_algo_orders(self, ord_type="oco"): return []
     snap=DemoAccountReconciler(Flat()).snapshot("BTC-USDT")
     assert snap.is_flat("0.00001")
+
+
+def test_snapshot_counts_pending_conditional_algo_orders_as_open():
+    class Conditional(FakeAccount):
+        def get_balance(self):
+            return [{"details":[
+                {"ccy":"BTC", "availBal":"0", "frozenBal":"0"},
+                {"ccy":"USDT", "availBal":"100", "frozenBal":"0"},
+            ]}]
+        def get_pending_orders(self, inst_type="SPOT"):
+            return []
+        def get_pending_algo_orders(self, ord_type="oco"):
+            if ord_type == "conditional":
+                return [{"instId":"BTC-USDT", "algoId":"123"}]
+            return []
+
+    snap = DemoAccountReconciler(Conditional()).snapshot("BTC-USDT")
+
+    assert snap.has_open_orders
+    assert not snap.is_flat("0.00001")
+    assert len(snap.open_algo_orders) == 1
