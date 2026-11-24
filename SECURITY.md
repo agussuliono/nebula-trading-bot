@@ -17,6 +17,11 @@ Do not publish API keys, secrets, passphrases, account identifiers, private logs
 
 ## Scope
 
+## Regional Demo endpoint protection
+
+- The REST hostname is selected only from the explicit allowlist in `config.py`: global, US/Australia, or EEA. The user selects the region where the OKX account was registered through `NEBULA_OKX_REGION`; no arbitrary URL can be supplied.
+- All regional Demo requests must keep `x-simulated-trading: 1`, disable redirects, and use Demo API credentials. Never use a production endpoint or remove the Demo header.
+
 ## Local state protection
 
 - NEBULA's SQLite database and its WAL/SHM/journal sidecars contain order intents, fills, position locks and audit data. They are created or hardened to owner-only file permissions; symlinked database paths are refused.
