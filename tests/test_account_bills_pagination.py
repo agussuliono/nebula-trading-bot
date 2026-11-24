@@ -54,7 +54,7 @@ def make_client(*pages, rate_limit_path):
     session = RecordingSession(*responses)
     client = OkxDemoClient(
         settings, session=session,
-        account_bills_rate_limit_path=rate_limit_path,
+        private_read_rate_limit_path=rate_limit_path,
     )
     return client, session
 
@@ -297,7 +297,7 @@ def test_account_bills_rejects_invalid_total_timeout_before_http(tmp_path):
 
 
 def test_account_bills_rate_limit_lock_contention_obeys_total_deadline(tmp_path, monkeypatch):
-    from nebula.exchange import _AccountBillsRateLimiter
+    from nebula.exchange import _PrivateReadRateLimiter
 
     clock = [6000.0]
     delays = []
@@ -312,7 +312,7 @@ def test_account_bills_rate_limit_lock_contention_obeys_total_deadline(tmp_path,
     with open(lock_path, "w", encoding="ascii") as held:
         fcntl.flock(held.fileno(), fcntl.LOCK_EX)
         with pytest.raises(OkxError, match="deadline expired waiting"):
-            _AccountBillsRateLimiter.wait_for_slot(
+            _PrivateReadRateLimiter.wait_for_slot(
                 lock_path, deadline=clock[0] + 0.09,
             )
         fcntl.flock(held.fileno(), fcntl.LOCK_UN)
