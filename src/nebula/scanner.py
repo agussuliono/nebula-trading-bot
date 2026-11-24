@@ -123,6 +123,23 @@ def build_candidates(instruments: list[dict], tickers: list[dict], *, now_ms: in
     return out
 
 
+def valid_traded_candle_count(candles: list[list[str]]) -> int:
+    """Count confirmed candles with finite positive OHLCV suitable for analysis."""
+    from .strategy import closed_candles
+    count = 0
+    for row in closed_candles(candles):
+        try:
+            open_px, high, low, close, volume = (float(row[i]) for i in range(1, 6))
+            if (all(math.isfinite(v) and v > 0 for v in
+                    (open_px, high, low, close, volume))
+                    and high >= max(open_px, close, low)
+                    and low <= min(open_px, close, high)):
+                count += 1
+        except (ValueError, TypeError, IndexError, OverflowError):
+            continue
+    return count
+
+
 def candle_range_volatility(candles: list[list[str]], window: int = 24) -> tuple[float, int]:
     """Mean true range as % of close over confirmed, traded candles."""
     from .strategy import closed_candles
