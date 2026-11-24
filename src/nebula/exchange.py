@@ -8,7 +8,6 @@ import math
 import os
 import threading
 import time
-import tempfile
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from datetime import datetime, timezone
@@ -111,7 +110,19 @@ class _AccountBillsRateLimiter:
             raise OkxError("Cannot initialize the account-bills rate-limit lock") from exc
 
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            # Non-blocking acquisition makes lock contention obey the same
+            # total operation deadline as pacing and retry waits.
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise OkxError(
+                            "Account-bills total deadline expired waiting for the shared rate-limit lock"
+                        )
+                    time.sleep(min(0.05, remaining))
             boot_id = cls._boot_id()
             os.lseek(fd, 0, os.SEEK_SET)
             raw = os.read(fd, 256).decode("ascii", errors="ignore").splitlines()
