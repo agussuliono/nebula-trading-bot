@@ -98,7 +98,9 @@ class _PrivateReadRateLimiter:
             ) from exc
 
     @staticmethod
-    def _write_deadline(fd: int, boot_id: str, deadline: float) -> None:
+    def _write_deadline(
+        fd: int, boot_id: str, deadline: float, *, sync: bool = True,
+    ) -> None:
         payload = f"{boot_id}\n{deadline:.9f}\n".encode("ascii")
         os.lseek(fd, 0, os.SEEK_SET)
         remaining = memoryview(payload)
@@ -108,7 +110,10 @@ class _PrivateReadRateLimiter:
                 raise OSError("short write while persisting private-read pacing state")
             remaining = remaining[written:]
         os.ftruncate(fd, len(payload))
-        os.fsync(fd)
+        # A process crash leaves page-cache writes visible to the next process;
+        # the boot ID invalidates monotonic metadata after an OS reboot.
+        if sync:
+            os.fsync(fd)
 
     @classmethod
     def run_request(cls, path: str | os.PathLike, *, deadline: float, operation):
@@ -194,6 +199,7 @@ class _PrivateReadRateLimiter:
             request_started_at = time.monotonic()
             cls._write_deadline(
                 fd, boot_id, request_started_at + cls.INTERVAL_SECONDS,
+                sync=False,
             )
             # Hold the OS lock through the callback. On normal completion (or a
             # handled failure), conservatively start the next interval at finish.
