@@ -1,7 +1,9 @@
 """Durable local state for idempotent Demo order submission and audit."""
 import hashlib
 import json
+import os
 import sqlite3
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -9,20 +11,70 @@ from typing import Any
 class StateStore:
     def __init__(self, path: str = "nebula.sqlite3"):
         self.path = str(path)
+        self._secure_storage_files(create_database=True)
         self._init_db()
+        self._secure_storage_files()
+
+    def _secure_regular_file(self, path: str, *, create: bool = False) -> None:
+        """Force a database file/sidecar to owner-only mode without following links."""
+        candidate = Path(path)
+        flags = os.O_RDWR
+        if create:
+            flags |= os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        elif candidate.is_symlink():
+            raise RuntimeError(f"Refusing symlinked NEBULA state file: {candidate.name}")
+
         try:
-            Path(self.path).chmod(0o600)
-        except (OSError, TypeError):
-            # SQLite may use :memory: or a platform that does not support chmod.
-            pass
+            fd = os.open(str(candidate), flags, 0o600)
+        except FileNotFoundError:
+            if not create:
+                return
+            raise
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot securely open NEBULA state file: {candidate.name}"
+            ) from exc
+
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RuntimeError(
+                    f"NEBULA state path is not a regular file: {candidate.name}"
+                )
+            if not hasattr(os, "fchmod"):
+                raise RuntimeError(
+                    "This platform cannot enforce private NEBULA state-file permissions"
+                )
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+
+    def _secure_storage_files(self, *, create_database: bool = False) -> None:
+        # In-memory SQLite has no filesystem state or sidecars.
+        if self.path == ":memory:":
+            return
+        self._secure_regular_file(self.path, create=create_database)
+        # Harden pre-existing sidecars before SQLite opens them, and newly-created
+        # ones after WAL mode is enabled. WAL/SHM can contain sensitive account data.
+        for suffix in ("-wal", "-shm", "-journal"):
+            self._secure_regular_file(self.path + suffix)
 
     def _connect(self):
+        if self.path != ":memory:":
+            self._secure_storage_files()
         conn = sqlite3.connect(self.path, timeout=10.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA foreign_keys=ON")
+            if self.path != ":memory:":
+                self._secure_storage_files()
+            return conn
+        except Exception:
+            conn.close()
+            raise
 
     def _init_db(self):
         with self._connect() as db:
@@ -263,6 +315,25 @@ class StateStore:
             lock = db.execute("SELECT owner_client_order_id,instrument FROM position_lock WHERE singleton=1").fetchone()
             if not lock or lock["owner_client_order_id"] != position_client_order_id or lock["instrument"] != instrument:
                 raise RuntimeError("Exit order does not match the active position lock")
+            existing_exit = db.execute(
+                """SELECT client_order_id,status FROM intents
+                   WHERE position_client_order_id=? AND side='sell'
+                     AND status NOT IN ('filled','canceled','rejected','mmp_canceled')
+                   LIMIT 1""",
+                (position_client_order_id,),
+            ).fetchone()
+            if existing_exit:
+                raise RuntimeError(
+                    f"Position already has an unresolved exit order {existing_exit['client_order_id']}"
+                )
+            protection = db.execute(
+                "SELECT status FROM protection_intents WHERE entry_client_order_id=?",
+                (position_client_order_id,),
+            ).fetchone()
+            if protection:
+                raise RuntimeError(
+                    "Independent sell order is blocked while a durable OCO protection intent exists"
+                )
             db.execute("INSERT INTO intents(client_order_id,instrument,candle_ts,side,status,position_client_order_id) VALUES(?,?,?,?,'reserved',?)",
                        (client_order_id, instrument, candle_ts, side, position_client_order_id))
             return True

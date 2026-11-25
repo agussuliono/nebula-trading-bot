@@ -8,7 +8,7 @@
 - Only unauthenticated, idempotent public GET requests retry transient connection failures, HTTP 429, and HTTP 5xx: at most 3 attempts with 250/500 ms backoff. HTTP 403, other 4xx, redirects, invalid JSON and API-level errors are not retried.
 - A public-market circuit breaker opens after 3 exhausted transient failures, pauses requests for 15 seconds, and allows one half-open probe. It does not wrap private reads or order writes.
 - Private GETs and all POST operations remain single-attempt. Order submissions are never retried automatically; ambiguous outcomes must be reconciled.
-- The REST host remains fixed to https://openapi.okx.com; every request keeps x-simulated-trading: 1, and redirects remain disabled.
+- The Demo REST host is selected from a closed allowlist by `NEBULA_OKX_REGION` (`global`, `us_au`, or `eea`); raw URLs and production-mode switches are not accepted. Every request keeps `x-simulated-trading: 1`, and redirects remain disabled.
 - Added regression tests for credential isolation/redaction, 403 non-JSON diagnostics, bounded retries, circuit-breaker recovery, and no retries for private reads/writes.
 - This patch does not resolve the previously observed HTTP 403 from the user's network. The rejecting layer is still unknown because the original response headers/body were not retained. No live or Demo account was accessed.
 
@@ -57,7 +57,15 @@
 
 ## Safety model
 
-- REST host is fixed to `https://openapi.okx.com`; no environment variable can switch it.
+## Local state and single-instance boundary
+
+- Set `NEBULA_DB_PATH` to one stable absolute path when running NEBULA from different working directories. Every process for the same Demo account must use the same state database; a different database cannot see the same position lock or order ledger.
+- SQLite database, WAL, SHM and journal files are restricted to owner-only permissions. Symlinked state paths are refused.
+- Paginated private reads use a shared Linux file lock under the same OS user. This coordinates processes on one Linux host only; it does not coordinate another laptop, Codespace, VM, container with a separate filesystem, or another OS user. Do not run concurrent NEBULA instances against the same OKX Demo User ID on separate hosts.
+- A passing offline test suite is not evidence that the account can be accessed or that a strategy is suitable. The previously evaluated EMA strategy was rejected; Demo order permission must remain disabled until independent prospective strategy evidence is sufficient.
+
+
+- REST hosts are selected only from the closed Demo allowlist for the account-registration region; no arbitrary URL or live-trading host can be configured.
 - Every request carries `x-simulated-trading: 1`.
 - Order submission requires `NEBULA_ENABLE_DEMO_ORDERS=true`, complete Demo credentials, finite positive risk limits, `max_risk <= max_daily_loss`, and inactive kill switch.
 - No withdrawal endpoint or withdrawal permission is implemented or needed.
@@ -159,7 +167,7 @@ The ranking score is a deterministic implementation choice, not a proven predict
 
 ## Remaining before forward testing
 
-The current release adds offline fee/slippage-aware single-asset and multi-asset portfolio backtesting, portfolio-wide one-position enforcement, and chronological walk-forward evaluation. Remaining work includes broader stress testing, strategy parameter calibration without overfitting, account-region validation, private Demo read-only integration, full execution reconciliation, security review, and the required 14-day Demo forward run. The backtest does not authorize or enable order execution.
+The current release adds offline fee/slippage-aware single-asset and multi-asset portfolio backtesting, portfolio-wide one-position enforcement, and chronological walk-forward evaluation. Remaining work includes broader stress testing, independent prospective strategy evidence, confirmation of the account-registration region, authenticated private Demo read-only integration, full execution reconciliation, security review, and the required 14-day Demo forward run. The backtest does not authorize or enable order execution.
 
 See `docs/INTEGRATION_STATUS.md` and `docs/SPEC_AUDIT.md`.
 

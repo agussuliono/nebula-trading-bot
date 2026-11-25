@@ -52,3 +52,9 @@ def test_public_settings_loader_does_not_read_credentials_or_order_flags(monkeyp
     assert settings.passphrase == ""
     assert settings.enable_demo_orders is False
     assert settings.kill_switch is True
+
+
+def test_region_field_preserves_existing_positional_settings_constructor():
+    settings = Settings("api", "secret", "passphrase", True)
+    assert settings.demo_account_exclusive is True
+    assert settings.okx_api_region == "global"

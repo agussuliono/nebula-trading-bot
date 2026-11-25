@@ -1,11 +1,20 @@
 from dataclasses import dataclass
 import math
 import os
+from types import MappingProxyType
 
-# OKX's documented REST host is shared by production and Demo. The mandatory
-# x-simulated-trading header is therefore part of every request; never make
-# the host or that flag user-configurable.
-DEMO_REST_URL = "https://openapi.okx.com"
+# OKX REST domains depend on the region where the account was registered.
+# Keep this as a closed allowlist: callers may select a region, never a URL.
+# Demo requests to every regional host must still carry the mandatory
+# x-simulated-trading: 1 header; no production-mode switch exists in NEBULA.
+DEMO_REST_URLS = MappingProxyType({
+    "global": "https://openapi.okx.com",
+    "us_au": "https://us.okx.com",
+    "eea": "https://eea.okx.com",
+})
+DEFAULT_DEMO_REGION = "global"
+# Backward-compatible name for the default global Demo endpoint.
+DEMO_REST_URL = DEMO_REST_URLS[DEFAULT_DEMO_REGION]
 DEMO_FLAG = "1"
 
 
@@ -41,6 +50,14 @@ def _positive_int(name: str, default: str) -> int:
     return value
 
 
+def _okx_region() -> str:
+    value = os.getenv("NEBULA_OKX_REGION", DEFAULT_DEMO_REGION).strip().lower()
+    if value not in DEMO_REST_URLS:
+        allowed = ", ".join(sorted(DEMO_REST_URLS))
+        raise ValueError(f"NEBULA_OKX_REGION must be one of: {allowed}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     api_key: str = ""
@@ -57,6 +74,13 @@ class Settings:
     fee_bps: float = 10.0
     slippage_bps: float = 10.0
     market_data_max_age_ms: int = 30_000
+    # Appended to preserve the existing positional Settings constructor contract.
+    okx_api_region: str = DEFAULT_DEMO_REGION
+
+    def __post_init__(self):
+        if self.okx_api_region not in DEMO_REST_URLS:
+            allowed = ", ".join(sorted(DEMO_REST_URLS))
+            raise ValueError(f"okx_api_region must be one of: {allowed}")
 
     @classmethod
     def from_public_env(cls) -> "Settings":
@@ -67,6 +91,7 @@ class Settings:
         safe dataclass defaults.
         """
         return cls(
+            okx_api_region=_okx_region(),
             fee_bps=_finite_float("NEBULA_FEE_BPS", "10"),
             slippage_bps=_finite_float("NEBULA_SLIPPAGE_BPS", "10"),
             market_data_max_age_ms=_positive_int("NEBULA_MARKET_DATA_MAX_AGE_MS", "30000"),
@@ -78,6 +103,7 @@ class Settings:
             api_key=os.getenv("OKX_API_KEY", ""),
             secret_key=os.getenv("OKX_SECRET_KEY", ""),
             passphrase=os.getenv("OKX_PASSPHRASE", ""),
+            okx_api_region=_okx_region(),
             demo_account_exclusive=_bool("NEBULA_DEMO_ACCOUNT_EXCLUSIVE"),
             enable_demo_orders=_bool("NEBULA_ENABLE_DEMO_ORDERS"),
             kill_switch=_bool("NEBULA_KILL_SWITCH", default=True),

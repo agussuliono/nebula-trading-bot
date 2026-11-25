@@ -568,3 +568,48 @@ def test_pending_fallback_requires_exact_exchange_order_id_when_known(tmp_path):
 
     assert result["status"] == "submission_unknown"
     assert store.get_order_snapshot("NBORDERID") is None
+
+
+def test_second_unresolved_sell_exit_is_blocked_for_single_position(tmp_path):
+    client = FakeClient()
+    manager = setup(tmp_path, client)
+    submit(manager, "NBEXITLOCK")
+    first = manager.submit_limit(
+        inst_id="BTC-USDT", side="sell", size="0.01", price="51000",
+        client_order_id="NBEXITLOCK1", candle_ts=127,
+        position_client_order_id="NBEXITLOCK",
+    )
+    assert first["status"] == "acknowledged"
+
+    with pytest.raises(OrderManagerError, match="unresolved exit order"):
+        manager.submit_limit(
+            inst_id="BTC-USDT", side="sell", size="0.01", price="50900",
+            client_order_id="NBEXITLOCK2", candle_ts=128,
+            position_client_order_id="NBEXITLOCK",
+        )
+
+    assert client.place_calls == 2  # one entry and one exit only
+
+
+def test_independent_sell_exit_is_blocked_when_oco_protection_exists(tmp_path):
+    client = FakeClient()
+    manager = setup(tmp_path, client)
+    submit(manager, "NBOCOLOCK")
+    manager.state.reserve_protection_intent(
+        entry_client_order_id="NBOCOLOCK",
+        instrument="BTC-USDT",
+        algo_client_order_id="NBPLOCK",
+        filled_size="0.01",
+        take_profit="55000",
+        stop_loss="45000",
+    )
+    manager.state.update_protection_intent("NBOCOLOCK", "active")
+
+    with pytest.raises(OrderManagerError, match="OCO protection intent exists"):
+        manager.submit_limit(
+            inst_id="BTC-USDT", side="sell", size="0.01", price="51000",
+            client_order_id="NBOCOEXIT", candle_ts=129,
+            position_client_order_id="NBOCOLOCK",
+        )
+
+    assert client.place_calls == 1  # only the entry; OCO is managed separately
