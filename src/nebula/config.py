@@ -92,6 +92,13 @@ class Settings:
             raise SafetyError("Private API credentials are incomplete")
 
     def validate_order_permission(self) -> None:
+        """Gate order submission and OCO cancellation.
+
+        OCO cancel stays blocked during emergency stop: it removes active
+        SL/TP protection and no replacement OCO can be placed while the kill
+        switch is on. Cancel a protective OCO via the OKX UI, or clear the
+        kill switch first.
+        """
         self._validate_demo_write_base()
         if self.kill_switch:
             raise SafetyError("Emergency stop is active")
