@@ -165,9 +165,10 @@ def test_withdraw_permission_is_a_blocker_and_no_write_is_possible():
     assert result["exchange_writes"] == 0
 
 
-def test_non_spot_or_borrow_enabled_account_is_blocked():
+def test_non_spot_or_auto_loan_account_is_blocked():
     client = ReadOnlyDemoStub(config={
         "acctLv": "2", "autoLoan": True, "enableSpotBorrow": True,
+        "spotBorrowAutoRepay": False,
         "perm": "read_only,trade",
     })
     result = verify_demo_read_only(client, credentials())
@@ -175,7 +176,63 @@ def test_non_spot_or_borrow_enabled_account_is_blocked():
     assert result["status"] == "connected_but_not_ready"
     assert "account_not_in_spot_mode" in result["blockers"]
     assert "auto_loan_enabled_or_unknown" in result["blockers"]
-    assert "spot_borrow_enabled_or_unknown" in result["blockers"]
+    assert "spot_borrow_state_unknown" not in result["blockers"]
+
+
+def test_spot_borrow_feature_enabled_without_borrowings_is_verified():
+    client = ReadOnlyDemoStub(
+        config={
+            "acctLv": "1", "autoLoan": False, "enableSpotBorrow": True,
+            "spotBorrowAutoRepay": False, "perm": "read_only",
+        },
+        balances=[{"details": [
+            {"ccy": "USDT", "availBal": "1000", "frozenBal": "0", "liab": "0"},
+        ]}],
+    )
+    result = verify_demo_read_only(client, credentials())
+
+    assert result["status"] == "read_only_demo_connection_verified"
+    assert result["spot_borrow_enabled"] is True
+    assert result["borrowings_present"] is False
+    assert result["blockers"] == []
+
+
+def test_spot_borrowings_present_blocks_verification():
+    client = ReadOnlyDemoStub(
+        config={
+            "acctLv": "1", "autoLoan": False, "enableSpotBorrow": True,
+            "spotBorrowAutoRepay": False, "perm": "read_only",
+        },
+        balances=[{"details": [
+            {"ccy": "USDT", "availBal": "1000", "frozenBal": "0", "liab": "10"},
+        ]}],
+    )
+    result = verify_demo_read_only(client, credentials())
+
+    assert result["status"] == "connected_but_not_ready"
+    assert result["borrowings_present"] is True
+    assert "spot_borrowings_present" in result["blockers"]
+
+
+def test_spot_borrow_auto_repay_enabled_blocks_verification():
+    client = ReadOnlyDemoStub(config={
+        "acctLv": "1", "autoLoan": False, "enableSpotBorrow": True,
+        "spotBorrowAutoRepay": True, "perm": "read_only",
+    })
+    result = verify_demo_read_only(client, credentials())
+
+    assert result["status"] == "connected_but_not_ready"
+    assert "spot_borrow_auto_repay_enabled_or_unknown" in result["blockers"]
+
+
+def test_spot_borrow_state_unknown_blocks_verification():
+    client = ReadOnlyDemoStub(config={
+        "acctLv": "1", "autoLoan": False, "perm": "read_only",
+    })
+    result = verify_demo_read_only(client, credentials())
+
+    assert result["status"] == "connected_but_not_ready"
+    assert "spot_borrow_state_unknown" in result["blockers"]
 
 
 def test_open_orders_and_non_quote_assets_are_reported_as_blockers():
