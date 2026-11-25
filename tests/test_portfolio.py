@@ -256,7 +256,7 @@ def test_spot_borrow_auto_repay_enabled_blocks_entry():
     assert report["entry_allowed"] is False
 
 
-@pytest.mark.parametrize("liab", ["missing", None, "abc", "-1", "NaN", "Infinity"])
+@pytest.mark.parametrize("liab", ["missing", None, False, "abc", "-1", "NaN", "Infinity"])
 def test_missing_or_malformed_liability_fails_closed(liab):
     data = _snapshot()
     if liab == "missing":

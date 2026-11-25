@@ -235,7 +235,7 @@ def test_spot_borrow_state_unknown_blocks_verification():
     assert "spot_borrow_state_unknown" in result["blockers"]
 
 
-@pytest.mark.parametrize("liab", ["missing", None, "abc", "-1", "NaN", "Infinity"])
+@pytest.mark.parametrize("liab", ["missing", None, False, "abc", "-1", "NaN", "Infinity"])
 def test_missing_or_malformed_liability_fails_closed(liab):
     detail = {"ccy": "USDT", "availBal": "1000", "frozenBal": "0"}
     if liab != "missing":
@@ -246,6 +246,8 @@ def test_missing_or_malformed_liability_fails_closed(liab):
     assert result["status"] == "blocked"
     assert result["private_api"] == "failed"
     assert result["exchange_writes"] == 0
+    if liab == "missing":
+        assert "balance_liability_missing" in result["blockers"]
 
 
 def test_open_orders_and_non_quote_assets_are_reported_as_blockers():

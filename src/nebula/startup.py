@@ -41,6 +41,22 @@ class StartupRecovery:
             raise StartupRecoveryError(f"Invalid {field} in account snapshot")
         return number
 
+    @staticmethod
+    def _liability(value):
+        # Strict liability parsing without truthiness fallback: False, null,
+        # containers, and empty strings are not valid API amounts.
+        if isinstance(value, bool) or value is None or isinstance(value, (list, dict)):
+            raise StartupRecoveryError("Invalid liability in account snapshot")
+        if isinstance(value, str) and not value.strip():
+            raise StartupRecoveryError("Invalid liability in account snapshot")
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise StartupRecoveryError("Invalid liability in account snapshot") from exc
+        if not number.is_finite() or number < 0:
+            raise StartupRecoveryError("Invalid liability in account snapshot")
+        return number
+
     def validate_local_database(self):
         """Read-only SQLite integrity and cross-table invariant audit."""
         path = str(self.state.path)
@@ -220,9 +236,9 @@ class StartupRecovery:
                 raise StartupRecoveryError("Account balance row is malformed")
             amount = self._positive(row.get("availBal"), "available balance")
             frozen = self._positive(row.get("frozenBal"), "frozen balance")
-            if row.get("liab") is None or row.get("liab") == "":
+            if "liab" not in row:
                 raise StartupRecoveryError("Account balance liability is missing")
-            if self._positive(row.get("liab"), "liability") > 0:
+            if self._liability(row.get("liab")) > 0:
                 raise StartupRecoveryError("Spot borrowings are present in the account balance")
             if row["ccy"] != "USDT" and amount + frozen > 0:
                 holdings.append(row["ccy"])
@@ -341,8 +357,10 @@ class StartupRecovery:
                     "position_client_order_id": owner,
                     "protection": protection_status,
                     "account_base_inventory": str(account.available_base + account.frozen_base),
+                    "borrowings_present": account.borrowings_present,
                     "exchange_writes": 0,
-                    "blockers": ["existing_position_requires_protective_monitoring"],
+                    "blockers": ["existing_position_requires_protective_monitoring"]
+                    + (["spot_borrowings_present"] if account.borrowings_present else []),
                 }
 
             if protection_status in {"triggered", "partially_failed"}:
@@ -378,8 +396,10 @@ class StartupRecovery:
                     "protection": protection_status,
                     "account_base_inventory": str(actual),
                     "accounting_complete": True,
+                    "borrowings_present": account.borrowings_present,
                     "exchange_writes": 0,
-                    "blockers": ["existing_position_requires_exit_finalization"],
+                    "blockers": ["existing_position_requires_exit_finalization"]
+                    + (["spot_borrowings_present"] if account.borrowings_present else []),
                 }
 
             raise StartupRecoveryError(

@@ -149,6 +149,7 @@ def verify_demo_read_only(client, settings) -> dict:
                 available = Decimal(str(row.get("availBal", "0")))
                 frozen = Decimal(str(row.get("frozenBal", "0")))
                 if "liab" not in row:
+                    report["blockers"].append("balance_liability_missing")
                     raise ValueError("balance_liability_missing")
                 liability = Decimal(str(row["liab"]))
             except (InvalidOperation, TypeError, ValueError) as exc:

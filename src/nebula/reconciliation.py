@@ -17,6 +17,22 @@ def _decimal(value, field):
     return result
 
 
+def _liability(value, field):
+    # Strict liability parsing: booleans and other non-numeric types are not
+    # valid API amounts and must never read as zero borrowings.
+    if isinstance(value, bool) or value is None or isinstance(value, (list, dict)):
+        raise ReconciliationError(f"Invalid {field} in account response")
+    if isinstance(value, str) and not value.strip():
+        raise ReconciliationError(f"Invalid {field} in account response")
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ReconciliationError(f"Invalid {field} in account response") from exc
+    if not result.is_finite() or result < 0:
+        raise ReconciliationError(f"Invalid {field} in account response")
+    return result
+
+
 @dataclass(frozen=True)
 class SpotAccountSnapshot:
     instrument: str
@@ -27,6 +43,7 @@ class SpotAccountSnapshot:
     frozen_quote: Decimal
     open_orders: tuple[dict, ...]
     open_algo_orders: tuple[dict, ...]
+    borrowings_present: bool = False
 
     @property
     def has_open_orders(self):
@@ -56,6 +73,12 @@ class DemoAccountReconciler:
         if len(balances) != 1 or not isinstance(balances[0].get("details"), list):
             raise ReconciliationError("Account balance response is missing its details array")
         details = {row.get("ccy"): row for row in balances[0]["details"] if isinstance(row, dict)}
+        borrowings_present = False
+        for row in balances[0]["details"]:
+            if not isinstance(row, dict) or "liab" not in row:
+                raise ReconciliationError("Account balance liability is missing")
+            if _liability(row["liab"], "liab") > 0:
+                borrowings_present = True
         base_row, quote_row = details.get(base, {}), details.get(quote, {})
         # An absent currency means zero, but malformed present values fail closed.
         return SpotAccountSnapshot(
@@ -66,4 +89,5 @@ class DemoAccountReconciler:
             frozen_quote=_decimal(quote_row.get("frozenBal", "0"), "quote frozenBal"),
             open_orders=tuple(x for x in orders if x.get("instId") == instrument),
             open_algo_orders=tuple(x for x in algos if x.get("instId") == instrument),
+            borrowings_present=borrowings_present,
         )
