@@ -172,7 +172,7 @@ class OkxDemoClient:
             raise ValueError("invalid instrument or candle limit (2..300)")
         return self.request("GET", "/api/v5/market/candles", {"instId": inst_id, "bar": bar, "limit": str(limit)})
 
-    def get_history_candles(self, inst_id: str, bar: str = "1H", limit: int = 300,
+    def get_history_candles(self, inst_id: str, bar: str = "1H", limit: int = 100,
                             *, after: str | None = None, before: str | None = None):
         """Read one page of public historical candles; never accesses private APIs."""
         if not inst_id or not isinstance(inst_id, str) or isinstance(limit, bool) or not 1 <= int(limit) <= 100:
