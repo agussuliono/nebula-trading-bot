@@ -98,3 +98,10 @@ def test_invalid_balance_amounts_fail_closed(field, value):
 def test_malformed_balance_rows_fail_closed(details):
     with pytest.raises(ReconciliationError):
         DemoAccountReconciler(_account_with_details(details)).snapshot("BTC-USDT")
+
+
+@pytest.mark.parametrize("ccy", [" BTC ", "BTC ", " BTC", "btc", "Btc", "BTC\n", "BT C", "BTC-USD"])
+def test_noncanonical_currency_codes_fail_closed(ccy):
+    details = [{"ccy": ccy, "availBal": "0.5", "frozenBal": "0", "liab": "0"}]
+    with pytest.raises(ReconciliationError):
+        DemoAccountReconciler(_account_with_details(details)).snapshot("BTC-USDT")

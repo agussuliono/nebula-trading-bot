@@ -1,6 +1,10 @@
 """Fail-closed read-only account reconciliation for OKX Spot Demo."""
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+
+
+_CCY_PATTERN = re.compile(r"^[A-Z0-9]{2,15}$")
 
 
 class ReconciliationError(RuntimeError):
@@ -87,8 +91,8 @@ class DemoAccountReconciler:
             if not isinstance(row, dict):
                 raise ReconciliationError("Account balance row is malformed")
             ccy = row.get("ccy")
-            if not isinstance(ccy, str) or not ccy.strip():
-                raise ReconciliationError("Account balance row is missing its currency")
+            if not isinstance(ccy, str) or not _CCY_PATTERN.fullmatch(ccy):
+                raise ReconciliationError("Account balance row has a non-canonical currency")
             if ccy in details:
                 raise ReconciliationError("Account balance response has duplicate currencies")
             for field in ("availBal", "frozenBal", "liab"):
