@@ -14,7 +14,7 @@ class ReadOnlyDemoStub:
             "perm": "read_only", "uid": "redacted-test-id",
         }
         self.balances = balances if balances is not None else [{
-            "details": [{"ccy": "USDT", "availBal": "1000", "frozenBal": "0"}]
+            "details": [{"ccy": "USDT", "availBal": "1000", "frozenBal": "0", "liab": "0"}]
         }]
         self.regular = regular or []
         self.oco = oco or []
@@ -235,11 +235,26 @@ def test_spot_borrow_state_unknown_blocks_verification():
     assert "spot_borrow_state_unknown" in result["blockers"]
 
 
+@pytest.mark.parametrize("liab", ["missing", None, False, "abc", "-1", "NaN", "Infinity"])
+def test_missing_or_malformed_liability_fails_closed(liab):
+    detail = {"ccy": "USDT", "availBal": "1000", "frozenBal": "0"}
+    if liab != "missing":
+        detail["liab"] = liab
+    client = ReadOnlyDemoStub(balances=[{"details": [detail]}])
+    result = verify_demo_read_only(client, credentials())
+
+    assert result["status"] == "blocked"
+    assert result["private_api"] == "failed"
+    assert result["exchange_writes"] == 0
+    if liab == "missing":
+        assert "balance_liability_missing" in result["blockers"]
+
+
 def test_open_orders_and_non_quote_assets_are_reported_as_blockers():
     client = ReadOnlyDemoStub(
         balances=[{"details": [
-            {"ccy": "USDT", "availBal": "100", "frozenBal": "0"},
-            {"ccy": "BTC", "availBal": "0.01", "frozenBal": "0"},
+            {"ccy": "USDT", "availBal": "100", "frozenBal": "0", "liab": "0"},
+            {"ccy": "BTC", "availBal": "0.01", "frozenBal": "0", "liab": "0"},
         ]}],
         regular=[{"instId": "ETH-USDT"}],
     )
@@ -287,8 +302,8 @@ def test_private_read_timeout_fails_closed_without_retry_or_writes():
 
 def test_tiny_non_quote_balance_is_not_lost_to_float_underflow():
     client = ReadOnlyDemoStub(balances=[{"details": [
-        {"ccy": "USDT", "availBal": "100", "frozenBal": "0"},
-        {"ccy": "BTC", "availBal": "1e-1000", "frozenBal": "0"},
+        {"ccy": "USDT", "availBal": "100", "frozenBal": "0", "liab": "0"},
+        {"ccy": "BTC", "availBal": "1e-1000", "frozenBal": "0", "liab": "0"},
     ]}])
     result = verify_demo_read_only(client, credentials())
 

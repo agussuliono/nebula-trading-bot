@@ -17,7 +17,7 @@ class CleanAccount:
                  "enableSpotBorrow": False, "perm": "read_only,trade"}]
 
     def get_balance(self):
-        return [{"details": [{"ccy": "USDT", "availBal": "1000", "frozenBal": "0"}]}]
+        return [{"details": [{"ccy": "USDT", "availBal": "1000", "frozenBal": "0", "liab": "0"}]}]
 
     def get_pending_orders(self, inst_type="SPOT"):
         return []

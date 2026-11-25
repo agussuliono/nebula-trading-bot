@@ -97,8 +97,8 @@ def test_child_order_ids_are_persisted_and_cannot_regress(tmp_path):
 def test_finalize_requires_both_flat_ledger_and_fresh_flat_account(tmp_path):
     class FlatClient:
         def get_balance(self):
-            return [{"details":[{"ccy":"BTC","availBal":"0","frozenBal":"0"},
-                                {"ccy":"USDT","availBal":"99","frozenBal":"0"}]}]
+            return [{"details":[{"ccy":"BTC","availBal":"0","frozenBal":"0", "liab": "0"},
+                                {"ccy":"USDT","availBal":"99","frozenBal":"0", "liab": "0"}]}]
         def get_pending_orders(self, inst_type="SPOT"): return []
         def get_pending_algo_orders(self, ord_type="oco"): return []
     store = seed(tmp_path)
@@ -116,7 +116,7 @@ def test_finalize_requires_both_flat_ledger_and_fresh_flat_account(tmp_path):
 def test_finalize_keeps_lock_when_exchange_reports_residual_or_open_order(tmp_path):
     class NotFlatClient:
         def get_balance(self):
-            return [{"details":[{"ccy":"BTC","availBal":"0.001","frozenBal":"0"}]}]
+            return [{"details":[{"ccy":"BTC","availBal":"0.001","frozenBal":"0", "liab": "0"}]}]
         def get_pending_orders(self, inst_type="SPOT"): return [{"instId":"BTC-USDT","ordId":"777"}]
         def get_pending_algo_orders(self, ord_type="oco"): return []
     store = seed(tmp_path)
@@ -187,7 +187,7 @@ def test_dust_tolerance_does_not_turn_residual_inventory_into_realized_pnl():
 
 def test_unresolved_oco_child_blocks_lock_release_even_if_balance_appears_flat(tmp_path):
     class FlatClient:
-        def get_balance(self): return [{"details":[{"ccy":"BTC","availBal":"0","frozenBal":"0"}]}]
+        def get_balance(self): return [{"details":[{"ccy":"BTC","availBal":"0","frozenBal":"0", "liab": "0"}]}]
         def get_pending_orders(self, inst_type="SPOT"): return []
         def get_pending_algo_orders(self, ord_type="oco"): return []
     store = seed(tmp_path)
@@ -218,7 +218,7 @@ def test_fill_history_overflow_fails_closed_instead_of_using_partial_ledger(tmp_
 def test_verified_flat_finalization_records_realized_pnl_once(tmp_path):
     from nebula.risk_controls import CircuitBreaker
     class FlatClient:
-        def get_balance(self): return [{"details":[{"ccy":"BTC","availBal":"0","frozenBal":"0"}]}]
+        def get_balance(self): return [{"details":[{"ccy":"BTC","availBal":"0","frozenBal":"0", "liab": "0"}]}]
         def get_pending_orders(self, inst_type="SPOT"): return []
         def get_pending_algo_orders(self, ord_type="oco"): return []
     store = seed(tmp_path)

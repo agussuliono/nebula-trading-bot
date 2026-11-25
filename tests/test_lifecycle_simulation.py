@@ -106,8 +106,8 @@ class LifecycleFakeExchange:
         # The fake account becomes flat only after the simulated child order fills.
         base = "0" if self.child_state == "filled" else "0.0045"
         return [{"details": [
-            {"ccy": "BTC", "availBal": base, "frozenBal": "0"},
-            {"ccy": "USDT", "availBal": "1000", "frozenBal": "0"},
+            {"ccy": "BTC", "availBal": base, "frozenBal": "0", "liab": "0"},
+            {"ccy": "USDT", "availBal": "1000", "frozenBal": "0", "liab": "0"},
         ]}]
 
     def get_pending_algo_orders(self, ord_type="oco"):

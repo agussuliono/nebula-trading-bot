@@ -215,7 +215,7 @@ class PortfolioRiskEngine:
             amount = _d(item.get("eq"), f"{ccy} equity")
             available = _d(item.get("availBal"), f"{ccy} available balance")
             frozen = _d(item.get("frozenBal"), f"{ccy} frozen balance")
-            liability = _d(item.get("liab", "0"), f"{ccy} liability")
+            liability = _d(item.get("liab"), f"{ccy} liability")
             if liability > 0 and "spot_borrowings_present" not in blockers:
                 blockers.append("spot_borrowings_present")
             if (available > amount + self.policy.balance_tolerance

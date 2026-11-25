@@ -15,8 +15,8 @@ def _snapshot(*, bid="110", balance_qty="1", balance_ts=None, ticker_ts=None,
         "account_config": [{"acctLv": acct_lv, "autoLoan": auto_loan,
                             "enableSpotBorrow": False, "perm": "read_only,trade"}],
         "balance": [{"uTime": str(balance_ts or NOW), "details": [
-            {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"},
-            {"ccy": "AAA", "eq": balance_qty, "availBal": balance_qty, "frozenBal": "0"},
+            {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0", "liab": "0"},
+            {"ccy": "AAA", "eq": balance_qty, "availBal": balance_qty, "frozenBal": "0", "liab": "0"},
         ]}],
         "tickers": [{"instId": "AAA-USDT", "bidPx": bid, "askPx": str(Decimal(bid) + Decimal("0.1")), "bidSz": "10", "askSz": "10",
                      "ts": str(ticker_ts or NOW)}],
@@ -134,7 +134,7 @@ def test_missing_protection_blocks_entry():
 
 def test_unpriced_asset_blocks_entry():
     data = _snapshot()
-    data["balance"][0]["details"].append({"ccy": "XYZ", "eq": "2", "availBal": "2", "frozenBal": "0"})
+    data["balance"][0]["details"].append({"ccy": "XYZ", "eq": "2", "availBal": "2", "frozenBal": "0", "liab": "0"})
     report = _engine().evaluate(**data, now_ms=NOW)
     assert any(x.startswith("unpriced_assets") for x in report["blockers"])
     assert report["valuation_complete"] is False
@@ -168,7 +168,7 @@ def test_planned_entry_risk_includes_entry_exit_fee_and_slippage():
     data["protection_intent"] = None
     data["open_algo_orders"] = []
     data["balance"][0]["details"] = [
-        {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}
+        {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0", "liab": "0"}
     ]
     data["planned_entry"] = {
         "instrument": "AAA-USDT", "size": "1", "entry_price": "101",
@@ -190,7 +190,7 @@ def test_planned_entry_risk_over_limit_blocks_entry():
     data["protection_intent"] = None
     data["open_algo_orders"] = []
     data["balance"][0]["details"] = [
-        {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}
+        {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0", "liab": "0"}
     ]
     data["planned_entry"] = {
         "instrument": "AAA-USDT", "size": "10", "entry_price": "101",
@@ -209,7 +209,7 @@ def test_planned_entry_must_have_stop_below_entry_and_target_above():
     data["protection_intent"] = None
     data["open_algo_orders"] = []
     data["balance"][0]["details"] = [
-        {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}
+        {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0", "liab": "0"}
     ]
     data["planned_entry"] = {
         "instrument": "AAA-USDT", "size": "1", "entry_price": "101",
@@ -254,6 +254,17 @@ def test_spot_borrow_auto_repay_enabled_blocks_entry():
     report = _engine().evaluate(**data, now_ms=NOW)
     assert "spot_borrow_auto_repay_enabled" in report["blockers"]
     assert report["entry_allowed"] is False
+
+
+@pytest.mark.parametrize("liab", ["missing", None, False, "abc", "-1", "NaN", "Infinity"])
+def test_missing_or_malformed_liability_fails_closed(liab):
+    data = _snapshot()
+    if liab == "missing":
+        data["balance"][0]["details"][0].pop("liab")
+    else:
+        data["balance"][0]["details"][0]["liab"] = liab
+    with pytest.raises(PortfolioError):
+        _engine().evaluate(**data, now_ms=NOW)
 
 
 @pytest.mark.parametrize("permission", ["transfer", "loan", "earn", "onchain", "future_scope"])
@@ -306,7 +317,7 @@ def test_planned_entry_requires_available_quote_balance():
     data["protection_intent"] = None
     data["open_algo_orders"] = []
     data["balance"][0]["details"] = [
-        {"ccy": "USDT", "eq": "50", "availBal": "20", "frozenBal": "30"}
+        {"ccy": "USDT", "eq": "50", "availBal": "20", "frozenBal": "30", "liab": "0"}
     ]
     data["planned_entry"] = {
         "instrument": "AAA-USDT", "size": "1", "entry_price": "101",
@@ -379,7 +390,7 @@ def test_unrelated_open_algo_order_blocks_entry():
     data["position_fills"] = []
     data["protection_intent"] = None
     data["open_algo_orders"] = [{"instId": "BBB-USDT", "ordType": "oco", "algoId": "777"}]
-    data["balance"][0]["details"] = [{"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]
+    data["balance"][0]["details"] = [{"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0", "liab": "0"}]
     data["planned_entry"] = {"instrument":"AAA-USDT", "size":"1", "entry_price":"101", "stop_loss":"95", "take_profit":"115"}
     report = _engine().evaluate(**data, now_ms=NOW)
     assert "exchange_open_algo_orders_present" in report["blockers"]
@@ -394,7 +405,7 @@ def test_open_regular_order_blocks_entry():
     data["protection_intent"] = None
     data["open_algo_orders"] = []
     data["open_regular_orders"] = [{"instId":"AAA-USDT", "ordId":"12"}]
-    data["balance"][0]["details"] = [{"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]
+    data["balance"][0]["details"] = [{"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0", "liab": "0"}]
     data["planned_entry"] = {"instrument":"AAA-USDT", "size":"1", "entry_price":"101", "stop_loss":"95", "take_profit":"115"}
     report = _engine().evaluate(**data, now_ms=NOW)
     assert "exchange_open_regular_orders_present" in report["blockers"]
@@ -408,7 +419,7 @@ def test_local_unresolved_order_intent_blocks_entry():
     data["position_fills"] = []
     data["protection_intent"] = None
     data["open_algo_orders"] = []
-    data["balance"][0]["details"] = [{"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]
+    data["balance"][0]["details"] = [{"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0", "liab": "0"}]
     data["planned_entry"] = {"instrument":"AAA-USDT", "size":"1", "entry_price":"101", "stop_loss":"95", "take_profit":"115"}
     data["local_unresolved_intents"] = [{"client_order_id":"pending1", "status":"submission_unknown"}]
     report = _engine().evaluate(**data, now_ms=NOW)

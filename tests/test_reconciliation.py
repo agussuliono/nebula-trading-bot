@@ -6,8 +6,8 @@ from nebula.reconciliation import DemoAccountReconciler, ReconciliationError
 class FakeAccount:
     def get_balance(self):
         return [{"details":[
-            {"ccy":"BTC", "availBal":"0.004", "frozenBal":"0"},
-            {"ccy":"USDT", "availBal":"100", "frozenBal":"5"},
+            {"ccy":"BTC", "availBal":"0.004", "frozenBal":"0", "liab": "0"},
+            {"ccy":"USDT", "availBal":"100", "frozenBal":"5", "liab": "0"},
         ]}]
     def get_pending_orders(self, inst_type="SPOT"):
         return [{"instId":"BTC-USDT", "ordId":"1"}]
@@ -38,7 +38,7 @@ def test_snapshot_requires_all_reads_and_valid_balance_shape():
 
 def test_flat_requires_zero_base_and_no_regular_or_algo_orders():
     class Flat(FakeAccount):
-        def get_balance(self): return [{"details":[{"ccy":"USDT","availBal":"10","frozenBal":"0"}]}]
+        def get_balance(self): return [{"details":[{"ccy":"USDT","availBal":"10","frozenBal":"0", "liab": "0"}]}]
         def get_pending_orders(self, inst_type="SPOT"): return []
         def get_pending_algo_orders(self, ord_type="oco"): return []
     snap=DemoAccountReconciler(Flat()).snapshot("BTC-USDT")
@@ -49,8 +49,8 @@ def test_snapshot_counts_pending_conditional_algo_orders_as_open():
     class Conditional(FakeAccount):
         def get_balance(self):
             return [{"details":[
-                {"ccy":"BTC", "availBal":"0", "frozenBal":"0"},
-                {"ccy":"USDT", "availBal":"100", "frozenBal":"0"},
+                {"ccy":"BTC", "availBal":"0", "frozenBal":"0", "liab": "0"},
+                {"ccy":"USDT", "availBal":"100", "frozenBal":"0", "liab": "0"},
             ]}]
         def get_pending_orders(self, inst_type="SPOT"):
             return []
