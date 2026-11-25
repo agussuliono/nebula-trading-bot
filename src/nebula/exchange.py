@@ -72,10 +72,12 @@ class OkxError(RuntimeError):
 class _PrivateReadRateLimiter:
     """Cross-process pacing for paginated private reads on Linux.
 
-    The lock file stores only a boot identifier and monotonic deadline, never
-    credentials. A shared file lock coordinates separate NEBULA processes that
-    run under the same OS user. The interval remains below the strictest covered
-    endpoint limit (5 requests/second).
+    The shared file lock is held through the actual HTTP request, not merely
+    while reserving a future slot. This prevents scheduler delays between
+    reservation and socket send from collapsing two requests into one burst.
+    The lock file stores only a boot identifier and monotonic deadline.
+    Coordination covers NEBULA processes using this file under the same OS user
+    on the same Linux host; it cannot coordinate other machines or applications.
     """
 
     INTERVAL_SECONDS = 0.21
@@ -95,8 +97,22 @@ class _PrivateReadRateLimiter:
                 "Private-read rate limiter could not validate the current boot ID"
             ) from exc
 
+    @staticmethod
+    def _write_deadline(fd: int, boot_id: str, deadline: float) -> None:
+        payload = f"{boot_id}\n{deadline:.9f}\n".encode("ascii")
+        os.lseek(fd, 0, os.SEEK_SET)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("short write while persisting private-read pacing state")
+            remaining = remaining[written:]
+        os.ftruncate(fd, len(payload))
+        os.fsync(fd)
+
     @classmethod
-    def wait_for_slot(cls, path: str | os.PathLike, *, deadline: float) -> None:
+    def run_request(cls, path: str | os.PathLike, *, deadline: float, operation):
+        """Pace and execute one request while holding the cross-process lock."""
         try:
             import fcntl
         except ImportError as exc:
@@ -120,12 +136,12 @@ class _PrivateReadRateLimiter:
                 os.close(fd)
             raise OkxError("Cannot initialize the private-read rate-limit lock") from exc
 
+        locked = False
         try:
-            # Non-blocking acquisition makes lock contention obey the same
-            # total operation deadline as pacing and retry waits.
             while True:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
                     break
                 except BlockingIOError:
                     remaining = deadline - time.monotonic()
@@ -134,6 +150,7 @@ class _PrivateReadRateLimiter:
                             "Private-read deadline expired waiting for the shared rate-limit lock"
                         )
                     time.sleep(min(0.05, remaining))
+
             boot_id = cls._boot_id()
             os.lseek(fd, 0, os.SEEK_SET)
             raw_bytes = os.read(fd, 257)
@@ -143,6 +160,7 @@ class _PrivateReadRateLimiter:
                 raw = raw_bytes.decode("ascii").splitlines()
             except UnicodeError as exc:
                 raise OkxError("Private-read rate-limit lock metadata is malformed") from exc
+
             next_allowed = 0.0
             if raw_bytes:
                 if len(raw) != 2:
@@ -167,22 +185,43 @@ class _PrivateReadRateLimiter:
                 raise OkxError("Private-read deadline would be exceeded by rate-limit pacing")
             if delay:
                 time.sleep(delay)
-            now = time.monotonic()
-            if now >= deadline:
+            if time.monotonic() >= deadline:
                 raise OkxError("Private-read deadline expired during rate-limit pacing")
 
-            payload = f"{boot_id}\n{now + cls.INTERVAL_SECONDS:.9f}\n".encode("ascii")
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.write(fd, payload)
-            os.ftruncate(fd, len(payload))
-            os.fsync(fd)
+            # Persist a write-ahead reservation before invoking the HTTP
+            # callback. If this process is killed after sending but before it can
+            # write completion metadata, the next process still observes a slot.
+            request_started_at = time.monotonic()
+            cls._write_deadline(
+                fd, boot_id, request_started_at + cls.INTERVAL_SECONDS,
+            )
+            # Hold the OS lock through the callback. On normal completion (or a
+            # handled failure), conservatively start the next interval at finish.
+            try:
+                result = operation()
+            finally:
+                completed_at = time.monotonic()
+                cls._write_deadline(
+                    fd, boot_id, completed_at + cls.INTERVAL_SECONDS,
+                )
+            if completed_at >= deadline:
+                raise OkxError("Private-read deadline expired during HTTP request")
+            return result
         except OSError as exc:
             raise OkxError("Private-read rate-limit coordination failed") from exc
         finally:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            finally:
+            if locked:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+            elif fd is not None:
                 os.close(fd)
+
+    @classmethod
+    def wait_for_slot(cls, path: str | os.PathLike, *, deadline: float) -> None:
+        """Compatibility helper for tests and callers that only reserve a slot."""
+        cls.run_request(path, deadline=deadline, operation=lambda: None)
 
 
 class _RetryablePublicFailure(OkxError):
@@ -573,19 +612,18 @@ class OkxDemoClient:
     def _private_read_get(self, path: str, params: dict, *, deadline: float):
         """Rate-limit and safely retry an idempotent private GET within one deadline."""
         for attempt in range(3):
-            _PrivateReadRateLimiter.wait_for_slot(
-                self._private_read_rate_limit_path, deadline=deadline,
-            )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise OkxError("Private read deadline expired before request")
             try:
-                result = self.request(
-                    "GET", path, params, private=True,
-                    _timeout=min(self.timeout, remaining),
+                result = _PrivateReadRateLimiter.run_request(
+                    self._private_read_rate_limit_path,
+                    deadline=deadline,
+                    operation=lambda: self.request(
+                        "GET", path, params, private=True,
+                        _timeout=min(self.timeout, deadline - time.monotonic()),
+                    ),
                 )
-                if time.monotonic() > deadline:
-                    raise OkxError("Private read deadline expired during HTTP request")
                 return result
             except OkxError as exc:
                 retryable = exc.status_code == 429 or exc.error_code == "50011"
