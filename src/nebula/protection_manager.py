@@ -252,20 +252,81 @@ class DemoProtectionManager:
 
     def _ingest_order_fills(self, instrument: str, order_id: str, *, page_limit: int = 100,
                             max_pages: int = 10) -> int:
-        """Fetch all available fill pages or fail closed instead of using a partial ledger."""
+        """Fetch and validate a complete Spot fill-history sequence before accepting it."""
+        if (not isinstance(instrument, str) or not instrument.endswith("-USDT")
+                or not isinstance(order_id, str) or not order_id.isascii()
+                or not order_id.isdigit() or isinstance(page_limit, bool)
+                or not isinstance(page_limit, int) or not 1 <= page_limit <= 100
+                or isinstance(max_pages, bool) or not isinstance(max_pages, int)
+                or not 1 <= max_pages <= 100):
+            raise ProtectionManagerError("Invalid instrument, order ID, or fill pagination bounds")
         cursor = None
+        seen_bill_ids = set()
         inserted = 0
         for page_number in range(max_pages + 1):
-            rows = self.client.get_fills_history(instrument, order_id, limit=page_limit, after=cursor)
+            try:
+                rows = self.client.get_fills_history(
+                    instrument, order_id, limit=page_limit, after=cursor
+                )
+            except Exception as exc:
+                raise ProtectionManagerError(
+                    "Fill history page could not be retrieved; ledger completeness is unknown"
+                ) from exc
+            if not isinstance(rows, list) or len(rows) > page_limit:
+                raise ProtectionManagerError("Fill history page is malformed or exceeds requested limit")
             if page_number == max_pages and rows:
-                raise ProtectionManagerError("Fill history exceeds safe pagination limit; ledger is incomplete")
+                raise ProtectionManagerError(
+                    "Fill history exceeds safe pagination limit; ledger is incomplete"
+                )
+
+            page_ids = []
             for fill in rows:
-                inserted += int(self.state.save_fill(fill))
+                if not isinstance(fill, dict):
+                    raise ProtectionManagerError("Fill history contains a non-object record")
+                bill_id = str(fill.get("billId") or "")
+                trade_id = str(fill.get("tradeId") or "")
+                if (not bill_id.isascii() or not bill_id.isdigit()
+                        or not trade_id.isascii() or not trade_id.isdigit()
+                        or bill_id in seen_bill_ids):
+                    raise ProtectionManagerError("Fill history contains a missing or duplicate bill/trade ID")
+                if (fill.get("instType") != "SPOT" or fill.get("instId") != instrument
+                        or str(fill.get("ordId")) != order_id
+                        or fill.get("side") not in {"buy", "sell"}
+                        or str(fill.get("subType")) != ("1" if fill.get("side") == "buy" else "2")
+                        or fill.get("tradeQuoteCcy") != "USDT"):
+                    raise ProtectionManagerError("Fill history record does not match the requested Spot order")
+                for field in ("fillTime", "ts"):
+                    value = str(fill.get(field) or "")
+                    if not value.isascii() or not value.isdigit():
+                        raise ProtectionManagerError("Fill history record has an invalid timestamp")
+                try:
+                    size = Decimal(str(fill.get("fillSz")))
+                    price = Decimal(str(fill.get("fillPx")))
+                    fee = Decimal(str(fill.get("fee")))
+                except Exception as exc:
+                    raise ProtectionManagerError("Fill history record has malformed monetary values") from exc
+                if (not size.is_finite() or size <= 0 or not price.is_finite()
+                        or price <= 0 or not fee.is_finite()
+                        or not str(fill.get("feeCcy") or "").strip()):
+                    raise ProtectionManagerError("Fill history record has invalid size, price, or fee")
+                page_ids.append(int(bill_id))
+
+            # OKX after-cursor pagination returns records with billId older than
+            # the cursor. Use the minimum ID so correctness is order-independent.
+            if cursor is not None and any(value >= int(cursor) for value in page_ids):
+                raise ProtectionManagerError("Fill history cursor did not move strictly toward older bills")
+            if len(set(page_ids)) != len(page_ids):
+                raise ProtectionManagerError("Fill history page contains duplicate bill IDs")
+            if rows:
+                for fill in rows:
+                    inserted += int(self.state.save_fill(fill))
+                seen_bill_ids.update(str(value) for value in page_ids)
+
             if len(rows) < page_limit:
                 return inserted
-            next_cursor = str(rows[-1].get("billId") or "")
-            if not next_cursor.isdigit() or next_cursor == cursor:
-                raise ProtectionManagerError("Fill history pagination cursor is missing or repeated")
+            next_cursor = str(min(page_ids)) if page_ids else ""
+            if not next_cursor or (cursor is not None and int(next_cursor) >= int(cursor)):
+                raise ProtectionManagerError("Fill history pagination cursor did not advance")
             cursor = next_cursor
         raise ProtectionManagerError("Fill history exceeds safe pagination limit; ledger is incomplete")
 

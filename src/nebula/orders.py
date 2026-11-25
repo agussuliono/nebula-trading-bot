@@ -177,8 +177,29 @@ class DemoOrderManager:
             raise OrderManagerError("Unknown client_order_id")
         if intent["status"] in TERMINAL_STATES:
             return intent
+        if intent["status"] == "reserved":
+            # The durable protocol marks an intent submitting before any HTTP
+            # order write. A crash that leaves it reserved therefore proves no
+            # exchange submission was attempted; close it locally, never query
+            # or retry it as an ambiguous order.
+            self.state.update_intent(client_order_id, "rejected")
+            if intent["side"] == "buy":
+                self.state.release_rejected_entry_lock(client_order_id)
+            self.state.record_event(
+                "reserved_intent_recovered_without_submission",
+                client_order_id,
+                {"exchange_reads": 0, "exchange_writes": 0},
+            )
+            return self.state.get_intent(client_order_id)
+        known_order_id = str(intent.get("exchange_order_id") or "")
         try:
-            result = self.client.get_order(intent["instrument"], client_order_id)
+            # Once an exchange ordId is known, query by that immutable ID.
+            # OKX documents that querying by clOrdId returns only the latest
+            # match if that client ID was ever reused after a terminal state.
+            if known_order_id and hasattr(self.client, "get_order_by_id"):
+                result = self.client.get_order_by_id(intent["instrument"], known_order_id)
+            else:
+                result = self.client.get_order(intent["instrument"], client_order_id)
         except Exception as exc:
             self.state.record_event("reconcile_error", client_order_id,
                                     {"error_type": type(exc).__name__})
@@ -194,7 +215,11 @@ class DemoOrderManager:
                 self.state.record_event("pending_lookup_error", client_order_id,
                                         {"error_type": type(exc).__name__})
                 raise OrderManagerError("Pending-order lookup failed; intent remains blocked") from exc
-            order = next((item for item in pending if item.get("clOrdId") == client_order_id), None)
+            order = next((
+                item for item in pending
+                if item.get("clOrdId") == client_order_id
+                and (not known_order_id or str(item.get("ordId") or "") == known_order_id)
+            ), None)
 
         if order is None:
             self.state.update_intent(client_order_id, "submission_unknown")

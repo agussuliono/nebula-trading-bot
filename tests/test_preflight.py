@@ -60,7 +60,11 @@ class ReadOnlySnapshotClient:
 
     def get_account_bills(self, *, begin=None, end=None, limit=100):
         self.calls.append("account_bills")
-        return []
+        from nebula.bill_reconciliation import _create_complete_account_bills_snapshot
+        return _create_complete_account_bills_snapshot(
+            [], begin_ms=int(begin), end_ms=int(end),
+            page_count=1, terminal_page_seen=True,
+        )
 
     def get_pending_orders(self, inst_type):
         self.calls.append("pending_regular")
@@ -151,6 +155,7 @@ def test_preflight_orchestrator_approves_candidate_without_exchange_writes(
     assert client.calls == [
         "instrument_rules", "account_config", "balance", "tickers",
         "pending_regular", "pending_oco", "pending_conditional", "account_bills",
+        "account_bills",
     ]
     assert not hasattr(client, "place_spot_limit")
     assert not hasattr(client, "place_spot_oco_exit")

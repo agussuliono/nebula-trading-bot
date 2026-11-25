@@ -132,7 +132,52 @@ class StateStore:
             return cursor.rowcount == 1
 
     def update_intent(self, client_order_id: str, status: str, exchange_order_id: str | None = None) -> None:
+        """Apply only forward, evidence-compatible order-intent transitions."""
+        allowed = {
+            "reserved": {"submitting", "rejected"},
+            "submitting": {"acknowledged", "submission_unknown", "rejected"},
+            "submission_unknown": {
+                "submission_unknown", "acknowledged", "live", "partially_filled",
+                "filled", "canceled", "mmp_canceled", "rejected",
+            },
+            "acknowledged": {
+                "submission_unknown", "live", "partially_filled",
+                "filled", "canceled", "mmp_canceled",
+            },
+            "live": {
+                "submission_unknown", "live", "partially_filled",
+                "filled", "canceled", "mmp_canceled",
+            },
+            "partially_filled": {
+                "submission_unknown", "partially_filled",
+                "filled", "canceled", "mmp_canceled",
+            },
+            "filled": {"filled"},
+            "canceled": {"canceled"},
+            "rejected": {"rejected"},
+            "mmp_canceled": {"mmp_canceled"},
+        }
+        if status not in allowed:
+            raise ValueError("Unsupported order intent state")
+        if exchange_order_id is not None:
+            value = str(exchange_order_id)
+            if not value.isascii() or not value.isdigit():
+                raise ValueError("Exchange order ID must be numeric")
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status,exchange_order_id FROM intents WHERE client_order_id=?",
+                (client_order_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError("Cannot update an unknown order intent")
+            current = str(row["status"])
+            if status not in allowed.get(current, set()):
+                raise ValueError(f"Invalid order intent transition: {current} -> {status}")
+            previous_id = str(row["exchange_order_id"] or "")
+            next_id = str(exchange_order_id) if exchange_order_id is not None else ""
+            if previous_id and next_id and previous_id != next_id:
+                raise ValueError("Exchange order ID cannot change for an existing intent")
             db.execute(
                 "UPDATE intents SET status=?, exchange_order_id=COALESCE(?, exchange_order_id), last_update=CURRENT_TIMESTAMP WHERE client_order_id=?",
                 (status, exchange_order_id, client_order_id),
@@ -336,7 +381,9 @@ class StateStore:
             return result
 
     def save_order_snapshot(self, client_order_id: str, order: dict) -> dict[str, Any]:
-        """Persist cumulative execution facts; reject fill regressions and size overflow."""
+        """Persist cumulative execution facts; reject identity, state and fill regressions."""
+        if not isinstance(order, dict):
+            raise ValueError("Exchange order snapshot must be an object")
         from decimal import Decimal, InvalidOperation
         def dec(value, name):
             try:
@@ -367,10 +414,45 @@ class StateStore:
         if cumulative > 0 and average <= 0:
             raise ValueError("Filled order has no valid average price")
         state = str(order.get("state", "unknown"))
+        order_id = str(order.get("ordId") or "")
+        if order_id and (not order_id.isascii() or not order_id.isdigit()):
+            raise ValueError("Exchange order snapshot has an invalid order ID")
+        expected_order_id = str(intent.get("exchange_order_id") or "")
+        if expected_order_id and order_id and expected_order_id != order_id:
+            raise ValueError("Exchange order ID does not match the persisted intent")
+        # When the exchange returns identity fields, bind them to the durable intent.
+        # These fields are optional here only for legacy/offline fixtures; production
+        # OKX order-detail responses include them and are checked when present.
+        identity = {
+            "instId": intent["instrument"],
+            "side": intent["side"],
+            "instType": "SPOT",
+            "tdMode": "cash",
+            "clOrdId": client_order_id,
+        }
+        for field, expected in identity.items():
+            if field in order and str(order[field]) != expected:
+                raise ValueError(f"Exchange order snapshot {field} does not match the persisted intent")
         with self._connect() as db:
-            previous = db.execute("SELECT cumulative_fill_size FROM order_snapshots WHERE client_order_id=?", (client_order_id,)).fetchone()
-            if previous and cumulative < Decimal(previous["cumulative_fill_size"]):
-                raise ValueError("Exchange cumulative fill regressed; refusing to overwrite")
+            previous = db.execute("SELECT * FROM order_snapshots WHERE client_order_id=?", (client_order_id,)).fetchone()
+            if previous:
+                if cumulative < Decimal(previous["cumulative_fill_size"]):
+                    raise ValueError("Exchange cumulative fill regressed; refusing to overwrite")
+                old_order_id = str(previous["exchange_order_id"] or "")
+                if old_order_id and order_id and old_order_id != order_id:
+                    raise ValueError("Exchange order ID changed for an existing intent")
+                if Decimal(previous["requested_size"]) != requested:
+                    raise ValueError("Exchange requested order size changed for an existing intent")
+                old_state = str(previous["exchange_state"])
+                terminal = {"filled", "canceled", "mmp_canceled"}
+                if old_state in terminal and state != old_state:
+                    raise ValueError("Exchange order state regressed after a terminal state")
+                allowed_transitions = {
+                    "live": {"live", "partially_filled", "filled", "canceled", "mmp_canceled"},
+                    "partially_filled": {"partially_filled", "filled", "canceled", "mmp_canceled"},
+                }
+                if old_state in allowed_transitions and state not in allowed_transitions[old_state]:
+                    raise ValueError("Exchange order state made an invalid lifecycle transition")
             db.execute("""INSERT INTO order_snapshots(
                 client_order_id,exchange_order_id,exchange_state,requested_size,cumulative_fill_size,
                 average_fill_price,fee,fee_currency,updated_at

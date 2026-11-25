@@ -237,3 +237,21 @@ This release is not an autonomous trading bot. Order submission remains disabled
 - Backtest CSV supports one symbol at a time; multi-asset backtest requires aligned CSVs on the exact same timestamp grid.
 - Strategy parameter selection, survivorship-free historical universe construction, correlation diagnostics, spread/order-book replay and realistic partial-fill modeling remain future work. No parameter optimization is performed, to avoid accidental overfitting.
 - This stage does not enable Demo order submission or qualify the bot for the 14-day forward test.
+
+
+## v0.16.7 — verified Spot fill-history pagination
+
+- Hardened trade-level fill ingestion for GET /api/v5/trade/fills-history. Each page must be a list within the requested limit; every record must identify the exact requested order and instrument, be SPOT, use USDT quote currency, have a buy/sell side consistent with subtype 1/2, and contain numeric bill/trade IDs, timestamps, positive size/price, and finite signed fee data.
+- Duplicate bill IDs, repeated/non-advancing cursors, pages that do not move strictly toward older bill IDs, malformed records, wrong order/instrument, unsupported product/quote currency, and pagination overflow fail closed.
+- Pagination advances with the minimum bill ID of each full page. OKX documents that after returns records earlier than the supplied bill ID; choosing the minimum avoids relying on the order of rows inside a page.
+- A page is fully validated before any row from that page is written to the idempotent fill ledger. Earlier valid pages may already be persisted if a later page fails, but the caller receives an error and cannot treat the sequence as complete; a subsequent retry safely deduplicates those earlier fills.
+- Added fault-injection coverage for multi-page cursor progression, duplicate/non-older IDs, wrong order/instrument/type, invalid side/subtype, malformed timestamps/fees, invalid bounds, and overflow.
+- GitHub Actions run #341: 446 tests passed in 2.25 seconds; compile, explicit safety settings, and fail-closed defaults all passed. Run: https://github.com/agussuliono/nebula-trading-bot/actions/runs/44897716212
+- Official API reference: https://app.okx.com/docs-v5/en/ (GET /api/v5/trade/fills-history; last 3 months, maximum 100 records per page, after/before bill ID cursors, signed fee/rebate semantics).
+- No API credentials, private OKX account connection, Demo/live order, or exchange write was used.
+
+### v0.16.7 remaining limitations
+
+- The three-month endpoint retention is not a substitute for durable local backups. If an active position's fill history falls outside exchange retention or cannot be retrieved, reconciliation must remain blocked.
+- The CI fixtures are synthetic. They verify local validation and pagination logic, not actual response ordering/behavior on an OKX Demo account.
+- The 14-day forward test has not begun. No strategy profitability claim is made.

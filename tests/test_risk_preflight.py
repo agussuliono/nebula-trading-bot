@@ -87,7 +87,11 @@ class SnapshotClient:
 
     def get_account_bills(self, *, begin=None, end=None, limit=100):
         self.read_calls.append("account_bills")
-        return self.bills
+        from nebula.bill_reconciliation import _create_complete_account_bills_snapshot
+        return _create_complete_account_bills_snapshot(
+            self.bills, begin_ms=int(begin), end_ms=int(end),
+            page_count=1, terminal_page_seen=True,
+        )
 
     def get_pending_orders(self, inst_type):
         self.read_calls.append("pending_regular")
@@ -142,6 +146,7 @@ def test_candidate_preflight_uses_private_reads_without_enabling_writes(tmp_path
     assert client.read_calls == [
         "instrument_rules", "account_config", "balance", "tickers",
         "pending_regular", "pending_oco", "pending_conditional", "account_bills",
+        "account_bills",
     ]
     assert any(
         event["event_type"] == "entry_risk_preflight_approved"
