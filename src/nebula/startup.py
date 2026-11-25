@@ -183,8 +183,17 @@ class StartupRecovery:
         config = account_config[0]
         if str(config.get("acctLv")) != "1":
             raise StartupRecoveryError("OKX account is not in Spot account mode")
-        if config.get("autoLoan") is not False or config.get("enableSpotBorrow") is not False:
-            raise StartupRecoveryError("Borrowing or auto-loan is enabled or its state is unknown")
+        if config.get("autoLoan") is not False:
+            raise StartupRecoveryError("Auto-loan is enabled or its state is unknown")
+        # The spot-borrowing feature flag is enabled by OKX in Spot mode and
+        # cannot be switched off; actual borrowing state is enforced instead
+        # (auto-repay off here, zero liabilities in the balance check below).
+        spot_borrow = config.get("enableSpotBorrow")
+        if spot_borrow is True:
+            if config.get("spotBorrowAutoRepay") is not False:
+                raise StartupRecoveryError("Spot borrow auto-repay is enabled or its state is unknown")
+        elif spot_borrow is not False:
+            raise StartupRecoveryError("Spot borrow state is unknown")
         raw_permissions = config.get("perm")
         permission_parts = raw_permissions.split(",") if isinstance(raw_permissions, str) else []
         permissions = {part.strip().lower() for part in permission_parts if part.strip()}
@@ -211,6 +220,8 @@ class StartupRecovery:
                 raise StartupRecoveryError("Account balance row is malformed")
             amount = self._positive(row.get("availBal"), "available balance")
             frozen = self._positive(row.get("frozenBal"), "frozen balance")
+            if self._positive(row.get("liab", "0"), "liability") > 0:
+                raise StartupRecoveryError("Spot borrowings are present in the account balance")
             if row["ccy"] != "USDT" and amount + frozen > 0:
                 holdings.append(row["ccy"])
         return {

@@ -149,10 +149,21 @@ class PortfolioRiskEngine:
             blockers.append("auto_borrow_enabled")
         elif str(config.get("autoLoan")).lower() != "false":
             blockers.append("account_auto_loan_status_unknown")
+        # OKX Spot mode ships with the spot-borrowing feature enabled at
+        # account level and offers no switch to disable it, so the feature
+        # flag alone no longer blocks entry. Actual borrowing state still
+        # fails closed: auto-loan off, spot auto-repay off, and zero
+        # liabilities in the balance snapshot (checked below). An unknown
+        # flag state blocks entry.
         if "enableSpotBorrow" not in config:
             blockers.append("spot_borrow_permission_status_unknown")
         elif str(config.get("enableSpotBorrow")).lower() == "true":
-            blockers.append("spot_borrow_enabled")
+            if "spotBorrowAutoRepay" not in config:
+                blockers.append("spot_borrow_auto_repay_status_unknown")
+            elif str(config.get("spotBorrowAutoRepay")).lower() == "true":
+                blockers.append("spot_borrow_auto_repay_enabled")
+            elif str(config.get("spotBorrowAutoRepay")).lower() != "false":
+                blockers.append("spot_borrow_auto_repay_status_unknown")
         elif str(config.get("enableSpotBorrow")).lower() != "false":
             blockers.append("spot_borrow_permission_status_unknown")
         permissions = {part.strip().lower() for part in str(config.get("perm", "")).split(",") if part.strip()}
@@ -204,6 +215,9 @@ class PortfolioRiskEngine:
             amount = _d(item.get("eq"), f"{ccy} equity")
             available = _d(item.get("availBal"), f"{ccy} available balance")
             frozen = _d(item.get("frozenBal"), f"{ccy} frozen balance")
+            liability = _d(item.get("liab", "0"), f"{ccy} liability")
+            if liability > 0 and "spot_borrowings_present" not in blockers:
+                blockers.append("spot_borrowings_present")
             if (available > amount + self.policy.balance_tolerance
                     or frozen > amount + self.policy.balance_tolerance
                     or available + frozen > amount + self.policy.balance_tolerance):

@@ -23,8 +23,12 @@ The command performs only these reads:
 - Pending OCO and conditional algo orders.
 
 It checks that the fixed REST host and Demo header are in use, the account is
-in Spot mode, auto-loan and Spot borrowing are disabled, and the API key has
-Read permission without Withdraw permission. Trade permission is neither
+in Spot mode, auto-loan is disabled, and the API key has
+Read permission without Withdraw permission. OKX Spot mode enables the
+spot-borrowing feature at account level with no switch to disable it, so the
+check enforces actual borrowing state instead: spot auto-repay disabled and
+zero balance liabilities (`liab`); an unknown borrowing-flag state fails
+closed. Trade permission is neither
 required nor used by this read-only verification. It reports whether Trade
 permission is present so operators can identify an over-privileged key.
 It also reports open orders and non-USDT holdings as blockers for a clean

@@ -220,13 +220,39 @@ def test_planned_entry_must_have_stop_below_entry_and_target_above():
     assert report["entry_allowed"] is False
 
 
-def test_spot_borrow_or_withdraw_permission_blocks_entry():
+def test_withdraw_permission_blocks_entry():
     data = _snapshot()
-    data["account_config"][0]["enableSpotBorrow"] = True
     data["account_config"][0]["perm"] = "read_only,trade,withdraw"
     report = _engine().evaluate(**data, now_ms=NOW)
-    assert "spot_borrow_enabled" in report["blockers"]
     assert "api_key_withdraw_permission_forbidden" in report["blockers"]
+    assert report["entry_allowed"] is False
+
+
+def test_spot_borrow_feature_enabled_without_borrowings_does_not_block_entry():
+    data = _snapshot()
+    data["account_config"][0]["enableSpotBorrow"] = True
+    data["account_config"][0]["spotBorrowAutoRepay"] = False
+    report = _engine().evaluate(**data, now_ms=NOW)
+    assert "spot_borrow_enabled" not in report["blockers"]
+    assert "spot_borrowings_present" not in report["blockers"]
+
+
+def test_spot_borrowings_present_blocks_entry():
+    data = _snapshot()
+    data["account_config"][0]["enableSpotBorrow"] = True
+    data["account_config"][0]["spotBorrowAutoRepay"] = False
+    data["balance"][0]["details"][0]["liab"] = "5"
+    report = _engine().evaluate(**data, now_ms=NOW)
+    assert "spot_borrowings_present" in report["blockers"]
+    assert report["entry_allowed"] is False
+
+
+def test_spot_borrow_auto_repay_enabled_blocks_entry():
+    data = _snapshot()
+    data["account_config"][0]["enableSpotBorrow"] = True
+    data["account_config"][0]["spotBorrowAutoRepay"] = True
+    report = _engine().evaluate(**data, now_ms=NOW)
+    assert "spot_borrow_auto_repay_enabled" in report["blockers"]
     assert report["entry_allowed"] is False
 
 

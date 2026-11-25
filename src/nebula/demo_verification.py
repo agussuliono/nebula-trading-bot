@@ -25,6 +25,8 @@ def verify_demo_read_only(client, settings) -> dict:
         "trade_permission": "not_checked",
         "account_snapshot": "not_checked",
         "open_orders": "not_checked",
+        "spot_borrow_enabled": "not_checked",
+        "borrowings_present": False,
         "non_quote_holdings": [],
         "blockers": [],
         "private_reads_attempted": False,
@@ -82,8 +84,22 @@ def verify_demo_read_only(client, settings) -> dict:
             report["blockers"].append("account_not_in_spot_mode")
         if config.get("autoLoan") is not False:
             report["blockers"].append("auto_loan_enabled_or_unknown")
-        if config.get("enableSpotBorrow") is not False:
-            report["blockers"].append("spot_borrow_enabled_or_unknown")
+        # OKX Spot mode now ships with the spot-borrowing feature enabled at
+        # account level and offers no switch to disable it. The safety
+        # invariant is therefore enforced on actual borrowing state instead:
+        # no auto-loan, no spot auto-repay, and zero liabilities (checked
+        # against the balance snapshot below). An unknown flag state still
+        # fails closed.
+        spot_borrow = config.get("enableSpotBorrow")
+        if spot_borrow is True:
+            report["spot_borrow_enabled"] = True
+            if config.get("spotBorrowAutoRepay") is not False:
+                report["blockers"].append("spot_borrow_auto_repay_enabled_or_unknown")
+        elif spot_borrow is False:
+            report["spot_borrow_enabled"] = False
+        else:
+            report["spot_borrow_enabled"] = "unknown"
+            report["blockers"].append("spot_borrow_state_unknown")
         permission_blocked = malformed_permissions
         if malformed_permissions:
             report["blockers"].append("api_key_permissions_malformed")
@@ -125,19 +141,27 @@ def verify_demo_read_only(client, settings) -> dict:
         if not isinstance(details, list):
             raise ValueError("balance_details_missing")
         non_quote = []
+        borrowings_present = False
         for row in details:
             if not isinstance(row, dict) or not row.get("ccy"):
                 raise ValueError("malformed_balance_detail")
             try:
                 available = Decimal(str(row.get("availBal", "0")))
                 frozen = Decimal(str(row.get("frozenBal", "0")))
+                liability = Decimal(str(row.get("liab", "0")))
             except (InvalidOperation, TypeError, ValueError) as exc:
                 raise ValueError("malformed_balance_amount") from exc
             if (not available.is_finite() or not frozen.is_finite()
-                    or available < 0 or frozen < 0):
+                    or not liability.is_finite()
+                    or available < 0 or frozen < 0 or liability < 0):
                 raise ValueError("invalid_balance_amount")
+            if liability > 0:
+                borrowings_present = True
             if row["ccy"] != "USDT" and available + frozen > 0:
                 non_quote.append(row["ccy"])
+        report["borrowings_present"] = borrowings_present
+        if borrowings_present:
+            report["blockers"].append("spot_borrowings_present")
         report["non_quote_holdings"] = sorted(set(non_quote))
         report["open_regular_orders"] = len(regular)
         report["open_oco_orders"] = len(pending_oco)
