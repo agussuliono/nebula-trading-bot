@@ -324,6 +324,12 @@ class OkxDemoClient:
                             {"ordType": ord_type, "state": state, "instType": "SPOT"}, private=True)
 
     def cancel_algo_order(self, *, inst_id: str, algo_id: str):
+        """Cancel a protective OCO/conditional order.
+
+        Blocked during emergency stop by validate_order_permission: cancelling
+        removes SL/TP protection from an open position. Escape hatch: cancel
+        via the OKX UI, or clear the kill switch first.
+        """
         self.settings.validate_order_permission()
         if not inst_id or not algo_id or not str(algo_id).isdigit():
             raise ValueError("Valid instrument and numeric algo_id are required")
