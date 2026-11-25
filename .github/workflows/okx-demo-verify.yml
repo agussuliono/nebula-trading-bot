@@ -20,6 +20,7 @@ jobs:
     env:
       NEBULA_ENABLE_DEMO_ORDERS: 'false'
       NEBULA_KILL_SWITCH: 'true'
+      NEBULA_OKX_REGION: 'global'
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - name: Check out source
