@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from nebula.protection_manager import DemoProtectionManager
-from nebula.startup import StartupRecovery
+from nebula.startup import StartupRecovery, StartupRecoveryError
 from nebula.state import StateStore
 
 
@@ -17,7 +17,7 @@ class CleanAccount:
                  "enableSpotBorrow": False, "perm": "read_only,trade"}]
 
     def get_balance(self):
-        return [{"details": [{"ccy": "USDT", "availBal": "1000", "frozenBal": "0"}]}]
+        return [{"details": [{"ccy": "USDT", "availBal": "1000", "frozenBal": "0", "liab": "0"}]}]
 
     def get_pending_orders(self, inst_type="SPOT"):
         return []
@@ -44,6 +44,20 @@ def test_local_database_integrity_passes_for_clean_state(tmp_path):
     report = StartupRecovery(CleanAccount(), state).validate_local_database()
     assert report["ok"] is True
     assert report["position_lock_present"] is False
+
+
+@pytest.mark.parametrize("liab", ["missing", None, "abc", "-1", "NaN", "Infinity"])
+def test_missing_or_malformed_liability_fails_closed(tmp_path, liab):
+    class BadLiabilityAccount(CleanAccount):
+        def get_balance(self):
+            detail = {"ccy": "USDT", "availBal": "1000", "frozenBal": "0"}
+            if liab != "missing":
+                detail["liab"] = liab
+            return [{"details": [detail]}]
+
+    state = StateStore(str(tmp_path / "bad-liab.db"))
+    with pytest.raises(StartupRecoveryError):
+        StartupRecovery(BadLiabilityAccount(), state)._account_without_local_position()
 
 
 def test_fill_without_known_parent_order_blocks_database_recovery(tmp_path):
@@ -173,8 +187,8 @@ def test_untracked_non_quote_balance_blocks_empty_local_state(tmp_path):
     class OrphanBalanceAccount(CleanAccount):
         def get_balance(self):
             return [{"details": [
-                {"ccy": "USDT", "availBal": "1000", "frozenBal": "0"},
-                {"ccy": "ETH", "availBal": "0.1", "frozenBal": "0"},
+                {"ccy": "USDT", "availBal": "1000", "frozenBal": "0", "liab": "0"},
+                {"ccy": "ETH", "availBal": "0.1", "frozenBal": "0", "liab": "0"},
             ]}]
 
     state = StateStore(str(tmp_path / "orphan-balance.db"))
@@ -223,8 +237,8 @@ def test_active_protection_must_match_fresh_exchange_snapshot(tmp_path):
 
         def get_balance(self):
             return [{"details": [
-                {"ccy": "BTC", "availBal": "0.009", "frozenBal": "0"},
-                {"ccy": "USDT", "availBal": "500", "frozenBal": "0"},
+                {"ccy": "BTC", "availBal": "0.009", "frozenBal": "0", "liab": "0"},
+                {"ccy": "USDT", "availBal": "500", "frozenBal": "0", "liab": "0"},
             ]}]
 
         def get_pending_algo_orders(self, ord_type="oco"):

@@ -220,7 +220,9 @@ class StartupRecovery:
                 raise StartupRecoveryError("Account balance row is malformed")
             amount = self._positive(row.get("availBal"), "available balance")
             frozen = self._positive(row.get("frozenBal"), "frozen balance")
-            if self._positive(row.get("liab", "0"), "liability") > 0:
+            if row.get("liab") is None or row.get("liab") == "":
+                raise StartupRecoveryError("Account balance liability is missing")
+            if self._positive(row.get("liab"), "liability") > 0:
                 raise StartupRecoveryError("Spot borrowings are present in the account balance")
             if row["ccy"] != "USDT" and amount + frozen > 0:
                 holdings.append(row["ccy"])

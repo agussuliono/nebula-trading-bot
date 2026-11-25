@@ -47,7 +47,7 @@ class ReadOnlySnapshotClient:
             "uTime": str(NOW_MS),
             "details": [{
                 "ccy": "USDT", "eq": "1000",
-                "availBal": "1000", "frozenBal": "0",
+                "availBal": "1000", "frozenBal": "0", "liab": "0",
             }],
         }]
 

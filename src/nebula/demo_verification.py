@@ -148,7 +148,9 @@ def verify_demo_read_only(client, settings) -> dict:
             try:
                 available = Decimal(str(row.get("availBal", "0")))
                 frozen = Decimal(str(row.get("frozenBal", "0")))
-                liability = Decimal(str(row.get("liab", "0")))
+                if "liab" not in row:
+                    raise ValueError("balance_liability_missing")
+                liability = Decimal(str(row["liab"]))
             except (InvalidOperation, TypeError, ValueError) as exc:
                 raise ValueError("malformed_balance_amount") from exc
             if (not available.is_finite() or not frozen.is_finite()

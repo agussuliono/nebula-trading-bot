@@ -237,7 +237,7 @@ def test_read_only_demo_verification_uses_only_demo_marked_get_requests():
             "perm": "read_only",
         }]}),
         Response({"code": "0", "msg": "", "data": [{
-            "details": [{"ccy": "USDT", "availBal": "100", "frozenBal": "0"}],
+            "details": [{"ccy": "USDT", "availBal": "100", "frozenBal": "0", "liab": "0"}],
         }]}),
         Response({"code": "0", "msg": "", "data": []}),
         Response({"code": "0", "msg": "", "data": []}),

@@ -1,5 +1,9 @@
 # NEBULA Trading Bot V1 — Demo-only foundation
 
+## v0.16.10 patch note
+
+- Liability validation is now fail-closed in the Demo verifier, portfolio entry gate, and startup recovery: a missing, null, malformed, negative, or non-finite `liab` balance field blocks instead of being treated as zero. Added negative tests for each case in all three paths.
+
 ## v0.16.9 patch note
 
 - OKX Spot mode now ships with the spot-borrowing feature enabled at account level (`enableSpotBorrow=true`) and offers no switch to disable it, so the Demo verifier, portfolio entry gate, and startup recovery gate no longer block on that feature flag alone. Actual borrowing state still fails closed: auto-loan must be off, spot auto-repay must be off, and total balance liabilities (`liab`) must be zero; an unknown flag state still blocks. Orders remain cash-mode only and are validated against available balance; no borrow endpoint is ever called.
@@ -23,7 +27,7 @@
 - Added regression tests for credential isolation/redaction, 403 non-JSON diagnostics, bounded retries, circuit-breaker recovery, and no retries for private reads/writes.
 - This patch does not resolve the previously observed HTTP 403 from the user's network. The rejecting layer is still unknown because the original response headers/body were not retained. No live or Demo account was accessed.
 
-**Version:** 0.16.9  
+**Version:** 0.16.10  
 **Status:** Public API diagnostics and bounded read resilience included. Strategy validation failed on the supplied historical sample; not ready for forward testing or autonomous trading.
 
 ## v0.16.5 patch note
@@ -169,9 +173,9 @@ nebula portfolio-backtest --asset BTC-USDT=btc.csv --asset ETH-USDT=eth.csv --st
 
 The ranking score is a deterministic implementation choice, not a proven predictive edge. All symbols must have the same timeframe, timestamps and timezone convention. This version still does not model cross-asset correlation, exchange lot/tick rounding, minimum notional, partial fills, market impact, or order-book depth.
 
-## Test status for v0.16.9
+## Test status for v0.16.10
 
-- 512 automated tests passed in the local build environment (2026-11-25, pytest 8.4.2, Python 3.12).
+- 530 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
 - Tests cover fee/slippage impact, next-open execution, same-bar stop priority, risk sizing, daily-loss/drawdown halts, chronological single-asset and portfolio walk-forward splits, multi-asset deterministic selection, global one-position enforcement, synchronized timestamps, portfolio cost-stress scenarios, CSV validation and public history-candle request construction.
 - Tests use local synthetic data and mocked HTTP; they do not establish OKX connectivity or exchange execution behavior.
 - No API credentials were used and no Demo or live orders were sent.

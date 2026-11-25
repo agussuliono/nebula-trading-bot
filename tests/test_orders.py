@@ -32,7 +32,7 @@ class FakeClient:
                  "perm": "read_only,trade", "uid": "test-demo-account-uid"}]
     def get_balance(self):
         return [{"uTime": "1800000000000", "details": [
-            {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]}]
+            {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0", "liab": "0"}]}]
     def get_tickers(self):
         return [{"instId": "BTC-USDT", "bidPx": "49999.95", "askPx": "50000",
                  "bidSz": "100", "askSz": "100", "ts": "1800000000000"}]
@@ -404,7 +404,7 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
                      "perm": "read_only,trade", "uid": "test-demo-account-uid"}]
         def get_balance(self):
             return [{"uTime": "1800000000000", "details": [
-                {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0"}]}]
+                {"ccy": "USDT", "eq": "1000", "availBal": "1000", "frozenBal": "0", "liab": "0"}]}]
         def get_tickers(self):
             return [{"instId": "AAA-USDT", "bidPx": "99.95", "askPx": "100",
                      "bidSz": "100", "askSz": "100", "ts": "1800000000000"}]

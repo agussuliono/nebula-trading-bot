@@ -71,6 +71,7 @@ class SnapshotClient:
                 "eq": "1000",
                 "availBal": "1000",
                 "frozenBal": "0",
+                "liab": "0",
             }],
         }]
 
