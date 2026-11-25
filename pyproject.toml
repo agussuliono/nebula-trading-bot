@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = ["requests>=2.31,<3"]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<9", "responses>=0.25,<1"]
+test = ["pytest>=8,<10", "responses>=0.25,<1"]
 
 [project.scripts]
 nebula = "nebula.cli:main"
