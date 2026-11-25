@@ -19,10 +19,16 @@ class DemoOrderManager:
     ambiguous or the order cannot be found, the intent remains blocked until a
     human resolves it; absence from the pending list is not proof of rejection.
     """
-    def __init__(self, client, state_store, circuit_breaker=None):
+    def __init__(self, client, state_store, circuit_breaker=None, risk_authorizer=None,
+                 startup_permit=None):
         self.client = client
         self.state = state_store
-        if circuit_breaker is None and hasattr(client, "settings"):
+        self.risk_authorizer = risk_authorizer
+        self.startup_permit = startup_permit
+        if hasattr(client, "install_startup_entry_permit") and startup_permit is not None:
+            client.install_startup_entry_permit(startup_permit, state_store)
+        if (circuit_breaker is None and hasattr(client, "settings")
+                and float(getattr(client.settings, "max_daily_loss_quote", 0)) > 0):
             from .risk_controls import CircuitBreaker
             circuit_breaker = CircuitBreaker(state_store, client.settings.max_daily_loss_quote)
         self.circuit_breaker = circuit_breaker
@@ -43,9 +49,75 @@ class DemoOrderManager:
         if spec.inst_id != inst_id or spec.quote_ccy != "USDT":
             raise OrderManagerError("V1 only permits the requested USDT-quoted Spot instrument")
         size, price = spec.normalize_order(side, size, price)
+        approved_risk_plan = None
+        # A real OKX client must be paired with a portfolio/risk authorization
+        # callback before any new long exposure can be reserved or submitted.
+        # Fake clients used by offline unit tests intentionally have no settings.
+        if side == "buy" and hasattr(self.client, "settings"):
+            # A generic callback can fabricate an approval and bypass portfolio
+            # controls. Real exchange clients must use the concrete fail-closed
+            # authorizer that owns the private snapshot and risk-evaluation path.
+            from .risk_authorizer import PortfolioRiskAuthorizer
+            if type(self.risk_authorizer) is not PortfolioRiskAuthorizer:
+                raise OrderManagerError(
+                    "No integrated PortfolioRiskAuthorizer; refusing Spot entry"
+                )
+            try:
+                approval = self.risk_authorizer(
+                    instrument=inst_id, requested_size=size, requested_price=price,
+                    candle_ts=candle_ts,
+                )
+            except Exception as exc:
+                raise OrderManagerError(
+                    "Portfolio risk authorization failed; refusing Spot entry"
+                ) from exc
+            if not isinstance(approval, dict) or approval.get("entry_allowed") is not True:
+                raise OrderManagerError("Portfolio risk authorization denied Spot entry")
+            approved_plan = approval.get("planned_entry")
+            if not isinstance(approved_plan, dict):
+                raise OrderManagerError("Risk authorization has no approved entry plan")
+            if (str(approved_plan.get("instrument")) != str(inst_id)
+                    or str(approved_plan.get("size")) != str(size)
+                    or str(approved_plan.get("entry_price")) != str(price)):
+                raise OrderManagerError("Approved risk plan does not match requested order")
+            try:
+                from decimal import Decimal, InvalidOperation
+                approved_risk = Decimal(str(approved_plan["risk_to_stop_quote"]))
+                stop = Decimal(str(approved_plan["stop_loss"]))
+                target = Decimal(str(approved_plan["take_profit"]))
+                entry = Decimal(price)
+                settings = self.client.settings
+                if (not all(value.is_finite() and value > 0 for value in (approved_risk, stop, target))
+                        or not stop < entry < target
+                        or approved_risk > Decimal(str(settings.max_risk_quote))):
+                    raise ValueError("approved risk or protective levels are invalid")
+                approved_risk_plan = {
+                    "instrument": inst_id, "size": size, "entry_price": price,
+                    "stop_loss": str(stop), "take_profit": str(target),
+                    "risk_to_stop_quote": str(approved_risk),
+                }
+            except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+                raise OrderManagerError("Approved risk amount or protective levels are invalid") from exc
+        # Production exchange-backed buys require a fresh permit from a
+        # clean, read-only StartupRecovery run. It is consumed before local
+        # reservation, so even a crash cannot reuse it for a second entry.
+        if side == "buy" and hasattr(self.client, "install_startup_entry_permit"):
+            if self.startup_permit is None:
+                raise OrderManagerError("No clean StartupRecovery permit; refusing Spot entry")
+            try:
+                self.startup_permit.consume(
+                    self.client, self.state, instrument=inst_id, size=size,
+                    price=price, client_order_id=client_order_id,
+                )
+            except Exception as exc:
+                raise OrderManagerError("Startup recovery permit is invalid or stale") from exc
+
         try:
             if side == "buy":
-                reserved = self.state.reserve_entry_intent(client_order_id, inst_id, candle_ts, side)
+                reserved = self.state.reserve_entry_intent(
+                    client_order_id, inst_id, candle_ts, side,
+                    risk_plan=approved_risk_plan,
+                )
             else:
                 if not position_client_order_id:
                     raise OrderManagerError("Spot sell requires the active position_client_order_id")
@@ -143,8 +215,13 @@ class DemoOrderManager:
             return self.state.get_intent(client_order_id)
 
         self.state.update_intent(client_order_id, status, order.get("ordId"))
-        if intent["side"] == "buy" and status == "canceled" and snapshot["cumulative_fill_size"] == "0":
-            self.state.release_rejected_entry_lock(client_order_id)
+        if (intent["side"] == "buy"
+                and status in {"canceled", "mmp_canceled"}
+                and snapshot["cumulative_fill_size"] == "0"):
+            # This is an exchange-confirmed terminal zero-fill, not a local
+            # rejection. Use the state transition that validates both the
+            # persisted intent and terminal exchange snapshot before unlocking.
+            self.state.release_terminal_zero_fill_entry_lock(client_order_id)
         self.state.record_event("order_reconciled", client_order_id,
                                 {"state": status, "acc_fill_sz": snapshot["cumulative_fill_size"],
                                  "avg_px": snapshot["average_fill_price"], "fee": snapshot["fee"],

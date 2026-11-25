@@ -46,6 +46,7 @@ class Settings:
     api_key: str = ""
     secret_key: str = ""
     passphrase: str = ""
+    demo_account_exclusive: bool = False
     enable_demo_orders: bool = False
     # Fail closed: even if the Demo order gate is explicitly enabled, the
     # emergency stop remains active until the operator explicitly clears it.
@@ -63,6 +64,7 @@ class Settings:
             api_key=os.getenv("OKX_API_KEY", ""),
             secret_key=os.getenv("OKX_SECRET_KEY", ""),
             passphrase=os.getenv("OKX_PASSPHRASE", ""),
+            demo_account_exclusive=_bool("NEBULA_DEMO_ACCOUNT_EXCLUSIVE"),
             enable_demo_orders=_bool("NEBULA_ENABLE_DEMO_ORDERS"),
             kill_switch=_bool("NEBULA_KILL_SWITCH", default=True),
             max_daily_loss_quote=_finite_float("NEBULA_MAX_DAILY_LOSS_QUOTE", "0"),
@@ -73,11 +75,9 @@ class Settings:
             market_data_max_age_ms=_positive_int("NEBULA_MARKET_DATA_MAX_AGE_MS", "30000"),
         )
 
-    def validate_order_permission(self) -> None:
+    def _validate_demo_write_base(self) -> None:
         if not self.enable_demo_orders:
             raise SafetyError("Demo order submission is disabled")
-        if self.kill_switch:
-            raise SafetyError("Emergency stop is active")
         if not all((self.api_key, self.secret_key, self.passphrase)):
             raise SafetyError("Demo API credentials are incomplete")
         limits = (self.max_daily_loss_quote, self.max_risk_quote, self.max_position_quote)
@@ -85,3 +85,24 @@ class Settings:
             raise SafetyError("All risk limits must be finite and explicitly configured above zero")
         if self.max_risk_quote > self.max_daily_loss_quote:
             raise SafetyError("Per-trade risk cannot exceed the daily loss limit")
+
+    def validate_private_read_permission(self) -> None:
+        """Allow authenticated Demo reads without enabling any exchange writes."""
+        if not all((self.api_key, self.secret_key, self.passphrase)):
+            raise SafetyError("Private API credentials are incomplete")
+
+    def validate_order_permission(self) -> None:
+        """Gate order submission and OCO cancellation.
+
+        OCO cancel stays blocked during emergency stop: it removes active
+        SL/TP protection and no replacement OCO can be placed while the kill
+        switch is on. Cancel a protective OCO via the OKX UI, or clear the
+        kill switch first.
+        """
+        self._validate_demo_write_base()
+        if self.kill_switch:
+            raise SafetyError("Emergency stop is active")
+
+    def validate_cancel_permission(self) -> None:
+        """Allow canceling a regular order during emergency stop; never allows new exposure."""
+        self._validate_demo_write_base()

@@ -35,13 +35,16 @@ class PortfolioPolicy:
     max_daily_loss_quote: Decimal = Decimal("0")
     max_position_risk_quote: Decimal = Decimal("0")
     max_position_notional_quote: Decimal = Decimal("0")
+    max_spread_pct: Decimal = Decimal("0.25")
     balance_tolerance: Decimal = Decimal("0.00000001")
 
     def __post_init__(self):
         if isinstance(self.max_snapshot_age_ms, bool) or not isinstance(self.max_snapshot_age_ms, int) or self.max_snapshot_age_ms <= 0:
             raise ValueError("max_snapshot_age_ms must be a positive integer")
-        for name in ("fee_bps", "slippage_bps", "max_daily_loss_quote", "max_position_risk_quote", "max_position_notional_quote", "balance_tolerance"):
+        for name in ("fee_bps", "slippage_bps", "max_daily_loss_quote", "max_position_risk_quote", "max_position_notional_quote", "max_spread_pct", "balance_tolerance"):
             object.__setattr__(self, name, _d(getattr(self, name), name))
+        if self.max_spread_pct <= 0:
+            raise ValueError("max_spread_pct must be positive")
         if self.fee_bps + self.slippage_bps >= Decimal("10000"):
             raise ValueError("combined fee and slippage assumptions must be below 10000 bps")
         if (self.max_daily_loss_quote > 0 and self.max_position_risk_quote > 0
@@ -118,8 +121,13 @@ class PortfolioRiskEngine:
                  open_algo_orders: list[dict] | None = None,
                  local_unresolved_intents: list[dict] | None = None,
                  planned_entry: dict | None = None,
-                 now_ms: int, daily_realized_pnl_quote="0") -> dict:
+                 position_fill_sync_error: str | None = None,
+                 now_ms: int, daily_realized_pnl_quote="0",
+                 daily_unrealized_pnl_quote=None, daily_account_pnl_quote=None,
+                 require_daily_account_pnl=False) -> dict:
         blockers = []
+        if position_fill_sync_error:
+            blockers.append("position_fill_sync_failed:" + str(position_fill_sync_error))
         open_regular_orders = open_regular_orders or []
         open_algo_orders = open_algo_orders or []
         local_unresolved_intents = local_unresolved_intents or []
@@ -150,8 +158,17 @@ class PortfolioRiskEngine:
         permissions = {part.strip().lower() for part in str(config.get("perm", "")).split(",") if part.strip()}
         if "read_only" not in permissions:
             blockers.append("api_key_read_permission_missing")
-        if "withdraw" in permissions:
-            blockers.append("api_key_withdraw_permission_forbidden")
+        if "trade" not in permissions:
+            blockers.append("api_key_trade_permission_missing")
+        # Execution keys are least-privilege: exactly Read + Trade.
+        # An allowlist also rejects new or unknown OKX permission labels by default.
+        for permission in sorted(permissions - {"read_only", "trade"}):
+            if permission == "withdraw":
+                blockers.append("api_key_withdraw_permission_forbidden")
+            elif permission in {"transfer", "loan", "earn", "onchain"}:
+                blockers.append("api_key_" + permission + "_permission_forbidden")
+            else:
+                blockers.append("api_key_unrecognized_or_unapproved_permission")
         if not isinstance(balance, list) or len(balance) != 1:
             raise PortfolioError("Balance snapshot is missing or ambiguous")
         account = balance[0]
@@ -222,6 +239,21 @@ class PortfolioRiskEngine:
             blockers.append("unpriced_assets:" + ",".join(sorted(unpriced)))
 
         realized = _signed_d(daily_realized_pnl_quote, "daily realized P&L")
+        daily_unrealized = (
+            _signed_d(daily_unrealized_pnl_quote, "daily unrealized P&L")
+            if daily_unrealized_pnl_quote is not None else None
+        )
+        daily_account = (
+            _signed_d(daily_account_pnl_quote, "daily account P&L")
+            if daily_account_pnl_quote is not None else None
+        )
+        if require_daily_account_pnl and daily_account is None:
+            blockers.append("daily_account_pnl_baseline_missing")
+        if position_lock and daily_unrealized is None and daily_account is None:
+            # Lifetime inventory P&L cannot be used as the current UTC day's P&L.
+            # Until a durable daily opening mark exists, report incomplete and
+            # block entry authorization rather than mixing incompatible periods.
+            blockers.append("daily_unrealized_pnl_baseline_missing")
         position = None
         if position_lock:
             blockers.append("position_already_active")
@@ -342,10 +374,22 @@ class PortfolioRiskEngine:
                 if not planned_ticker:
                     raise PortfolioError("Planned entry ticker is missing")
                 ask_px = _d(planned_ticker.get("askPx"), "planned entry ask", allow_zero=False)
+                bid_px = _d(planned_ticker.get("bidPx"), "planned entry bid", allow_zero=False)
                 ask_size = _d(planned_ticker.get("askSz"), "planned entry ask size", allow_zero=False)
                 ticker_ts = int(_d(planned_ticker.get("ts"), "planned entry ticker timestamp", allow_zero=False))
-                if ask_px < _d(planned_ticker.get("bidPx"), "planned entry bid", allow_zero=False) or now_ms < ticker_ts or now_ms - ticker_ts > self.policy.max_snapshot_age_ms:
+                if ask_px < bid_px or now_ms < ticker_ts or now_ms - ticker_ts > self.policy.max_snapshot_age_ms:
                     raise PortfolioError("Planned entry ticker is stale or invalid")
+                spread_pct = (ask_px - bid_px) / bid_px * Decimal("100")
+                if spread_pct > self.policy.max_spread_pct:
+                    raise PortfolioError("Planned entry spread exceeds the current portfolio limit")
+                # The candidate price was built from an earlier public ticker.
+                # Bound its drift against the latest ask so an old limit price
+                # cannot authorize an entry after the market has moved materially.
+                max_acceptable_buy_price = ask_px * (
+                    Decimal("1") + self.policy.slippage_bps / Decimal("10000")
+                )
+                if entry_px < ask_px or entry_px > max_acceptable_buy_price:
+                    raise PortfolioError("Planned entry price is outside the current ask/slippage band")
                 if ask_size < planned_qty:
                     raise PortfolioError("Planned entry exceeds top-of-book ask depth")
                 entry_value = planned_qty * entry_px
@@ -364,7 +408,10 @@ class PortfolioRiskEngine:
                                   "risk_to_stop_quote": str(planned_risk)}
             except (AttributeError, ValueError, InvalidOperation) as exc:
                 blockers.append("planned_entry_invalid:" + type(exc).__name__)
-        combined_daily = realized + unrealized
+        # Account equity delta already includes realized trades, fees, and marked inventory.
+        # It is authoritative when present; never add the trade ledger a second time.
+        combined_daily = (daily_account if daily_account is not None else
+                          realized + (daily_unrealized if daily_unrealized is not None else Decimal("0")))
         if self.policy.max_daily_loss_quote > 0 and combined_daily <= -self.policy.max_daily_loss_quote:
             blockers.append("daily_loss_including_unrealized_limit_reached")
         projected_daily = combined_daily - planned_risk
@@ -373,7 +420,21 @@ class PortfolioRiskEngine:
         total_risk = risk_to_stop + planned_risk
         if self.policy.max_position_risk_quote > 0 and total_risk > self.policy.max_position_risk_quote:
             blockers.append("portfolio_risk_exceeds_limit")
-        complete = not any(x.startswith(("unpriced_assets", "invalid_or_stale_ticker", "insufficient_top_bid_depth", "insufficient_position_bid_depth", "position_ticker", "stale_balance", "exchange_balance", "protective_stop", "protective_order", "position_restart", "position_context", "entry_order", "entry_exchange", "entry_fill", "unresolved_exit", "unresolved_oco", "local_unresolved_order_intents", "exchange_open_regular_orders", "exchange_oco_pending", "exchange_open_algo_orders", "account_not_spot", "auto_borrow", "account_auto_loan_status_unknown", "spot_borrow", "api_key_read_permission_missing", "api_key_withdraw_permission_forbidden", "untracked_non_usdt", "position_notional")) for x in blockers)
+        # Valuation completeness is distinct from entry eligibility. Policy
+        # blockers can forbid a new entry without making account valuation incomplete.
+        valuation_incomplete_prefixes = (
+            "unpriced_assets", "invalid_or_stale_ticker", "insufficient_top_bid_depth",
+            "insufficient_position_bid_depth", "position_ticker", "stale_balance",
+            "exchange_balance", "position_restart", "position_context",
+            "entry_order", "entry_exchange", "entry_fill", "unresolved_exit",
+            "unresolved_oco", "local_unresolved_order_intents",
+            "exchange_open_regular_orders", "exchange_oco_pending",
+            "exchange_open_algo_orders", "untracked_non_usdt",
+            "position_fill_sync_failed",
+        )
+        complete = not any(
+            blocker.startswith(valuation_incomplete_prefixes) for blocker in blockers
+        )
         return {
             "mode": "read_only_demo_portfolio_analysis", "orders_enabled": False,
             "order_submission_attempts": 0, "valuation_currency": "USDT",
@@ -382,6 +443,9 @@ class PortfolioRiskEngine:
             "holdings": holdings,
             "position": position, "planned_entry": planned_report,
             "daily_realized_pnl_quote": str(realized),
+            "daily_unrealized_pnl_quote": str(daily_unrealized) if daily_unrealized is not None else None,
+            "daily_account_pnl_quote": str(daily_account) if daily_account is not None else None,
+            "daily_unrealized_pnl_baseline_available": daily_unrealized is not None,
             "daily_combined_pnl_quote": str(combined_daily),
             "projected_daily_pnl_after_planned_stop_quote": str(projected_daily),
             "portfolio_risk_to_stop_quote": str(total_risk),

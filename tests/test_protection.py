@@ -41,6 +41,10 @@ def test_oco_payload_is_demo_marked_and_uses_market_exit():
     settings=Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True, kill_switch=False,
                       max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=50)
     session=Session(); client=OkxDemoClient(settings, session=session)
+    client.get_spot_instrument = lambda inst_id: {
+        "instType": "SPOT", "instId": inst_id, "baseCcy": "BTC", "quoteCcy": "USDT",
+        "tickSz": "0.1", "lotSz": "0.001", "minSz": "0.001", "state": "live",
+    }
     result=client.place_spot_oco_exit(inst_id="BTC-USDT", size="0.004", take_profit="52000",
                                       stop_loss="48000", algo_client_order_id="NBTP001")
     assert result[0]["algoId"] == "123"
@@ -64,3 +68,34 @@ def test_algo_order_details_lookup_uses_persisted_client_algo_id():
     args, kwargs=client.session.call
     assert args[0] == "GET" and args[1].endswith("/api/v5/trade/order-algo?algoClOrdId=NBP123")
     assert kwargs["headers"]["x-simulated-trading"] == "1"
+
+@pytest.mark.parametrize(
+    "size,tp,sl,state,error",
+    [
+        ("0.0045", "52000", "48000", "live", "lotSz"),
+        ("0.004", "52000.05", "48000", "live", "tickSz"),
+        ("0.004", "52000", "48000.05", "live", "tickSz"),
+        ("0.0005", "52000", "48000", "live", "minSz"),
+        ("0.004", "52000", "48000", "suspend", "tradable"),
+    ],
+)
+def test_oco_adapter_rejects_instrument_rule_violations_before_post(size, tp, sl, state, error):
+    settings = Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True,
+                        kill_switch=False, max_daily_loss_quote=20, max_risk_quote=2,
+                        max_position_quote=50)
+    class NeverPostSession:
+        def __init__(self): self.calls = []
+        def request(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            raise AssertionError("invalid OCO must be rejected before HTTP")
+    session = NeverPostSession()
+    client = OkxDemoClient(settings, session=session)
+    client.get_spot_instrument = lambda inst_id: {
+        "instType": "SPOT", "instId": inst_id, "baseCcy": "BTC", "quoteCcy": "USDT",
+        "tickSz": "0.1", "lotSz": "0.001", "minSz": "0.001", "state": state,
+    }
+    with pytest.raises(ValueError, match=error):
+        client.place_spot_oco_exit(inst_id="BTC-USDT", size=size, take_profit=tp,
+                                   stop_loss=sl, algo_client_order_id="NBTP001")
+    assert session.calls == []
+
