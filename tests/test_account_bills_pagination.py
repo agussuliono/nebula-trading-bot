@@ -475,10 +475,10 @@ def test_private_read_limiter_serializes_actual_requests_across_processes(tmp_pa
         assert process.exitcode == 0
     assert all(not process.is_alive() for process in processes)
 
-    starts = sorted((worker, ts) for worker, stage, ts in observed if stage == "start")
+    starts = sorted((ts, worker) for worker, stage, ts in observed if stage == "start")
     ends = {worker: ts for worker, stage, ts in observed if stage == "end"}
-    first_worker, first_start = starts[0]
-    second_worker, second_start = starts[1]
+    first_start, first_worker = starts[0]
+    second_start, second_worker = starts[1]
     assert first_worker != second_worker
     assert ends[first_worker] >= first_start
     assert second_start - ends[first_worker] >= _PrivateReadRateLimiter.INTERVAL_SECONDS - 0.02
