@@ -168,3 +168,19 @@ Earlier conversational figures such as a Rp210,000 position cap, Rp2,000 target 
 - Official reference: https://app.okx.com/docs-v5/en/ (GET /api/v5/trade/order; clOrdId lookup behavior).
 - GitHub Actions run ID 44898598648 on source commit 06d63736a1aa7e53b09178b2d6e2a64c16f28649: 460 tests passed in 5.54 seconds; compile, explicit safety settings, and fail-closed defaults passed.
 - No API credentials, authenticated account calls, or exchange writes were used.
+
+
+## v0.16.7 audit — public API isolation, diagnostics and resilience
+
+- Public-only CLI commands check-demo-public and analyze-once now use a settings loader that reads only non-secret market-data assumptions. It never accesses API credentials or order-gate environment variables.
+- HTTP errors expose bounded diagnostic fields only: status code, sanitized content type, numeric API error code, a short sanitized message, and allowlisted Server/Via/CF-Ray metadata with IP literals redacted. Non-JSON responses are identified without including response bodies, arbitrary headers, or request URLs.
+- Exchange-provided error messages redact configured API key, secret and passphrase values.
+- Public unauthenticated GET requests retry only transient network failures, HTTP 429 and HTTP 5xx, for at most three attempts with bounded exponential delays (250 ms, 500 ms). No retry is performed for 403/other 4xx, redirects, invalid JSON, or API business errors.
+- Public-market circuit breaker trips after three exhausted transient calls, stays open for 15 seconds, then allows a single half-open probe. Definitive HTTP/API responses reset the transport breaker.
+- Authenticated private GETs and every POST remain single-attempt. In particular, order submit/cancel/amend flows are not replayed automatically.
+- The fixed REST host, Demo header, endpoint allowlist and disabled redirects remain unchanged.
+- Regression tests cover credential-free public settings, 403 HTML diagnostics, secret redaction, retry bounds, transient circuit opening/recovery, and the no-retry private/write contract.
+- The observed HTTP 403 from the user's network remains unresolved. Since response headers/body were not retained and no new request was authorized, its source cannot be attributed. This patch does not bypass access restrictions.
+- CI fixtures are synthetic; they verify client policy, not real exchange connectivity or trading outcomes.
+
+Status: implemented in review branch; GitHub Actions run #369 passed 470 tests, compile, explicit safety settings and fail-closed defaults. CI fixtures are synthetic. No authenticated request or exchange write used.

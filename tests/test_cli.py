@@ -179,3 +179,39 @@ def test_verify_demo_cli_invokes_read_only_probe_only(monkeypatch, capsys):
 
     assert calls["settings"].api_key == "demo-key"
     assert '"exchange_writes": 0' in capsys.readouterr().out
+
+
+def test_check_demo_public_never_loads_api_credentials_from_environment(monkeypatch, capsys):
+    from nebula.config import Settings
+
+    monkeypatch.setenv("OKX_API_KEY", "sentinel-api-key")
+    monkeypatch.setenv("OKX_SECRET_KEY", "sentinel-secret")
+    monkeypatch.setenv("OKX_PASSPHRASE", "sentinel-passphrase")
+    monkeypatch.setattr("sys.argv", ["nebula", "check-demo-public"])
+    monkeypatch.setattr(
+        "nebula.cli.Settings.from_env",
+        lambda: pytest.fail("public command must not call Settings.from_env"),
+    )
+
+    captured = {}
+
+    class PublicClient:
+        def __init__(self, settings):
+            captured["settings"] = settings
+
+        def get_instruments(self):
+            return [{"instId": "BTC-USDT"}]
+
+        def get_tickers(self):
+            return [{"instId": "BTC-USDT"}]
+
+    monkeypatch.setattr("nebula.cli.OkxDemoClient", PublicClient)
+    main()
+
+    settings = captured["settings"]
+    assert settings.api_key == ""
+    assert settings.secret_key == ""
+    assert settings.passphrase == ""
+    assert settings.enable_demo_orders is False
+    assert settings.kill_switch is True
+    assert "1 spot instruments" in capsys.readouterr().out

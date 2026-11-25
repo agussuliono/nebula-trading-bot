@@ -1,7 +1,19 @@
 # NEBULA Trading Bot V1 — Demo-only foundation
 
-**Version:** 0.16.5  
-**Status:** Offline portfolio diagnostics and CLI help regression fix included. Strategy validation failed on the supplied historical sample; not ready for forward testing or autonomous trading.
+## v0.16.7 patch note
+
+- Public-only CLI paths (check-demo-public and analyze-once) use a dedicated settings loader that never reads API key, secret, passphrase, or order-gate environment variables.
+- HTTP errors now retain safe diagnostics (HTTP status, sanitized API code and content type). Non-JSON responses such as HTML 403 pages are classified without copying their body, arbitrary headers, or request URL; only allowlisted Server/Via/CF-Ray metadata is retained, with IP literals redacted.
+- Configured API key, secret and passphrase values are redacted from exchange-provided error messages.
+- Only unauthenticated, idempotent public GET requests retry transient connection failures, HTTP 429, and HTTP 5xx: at most 3 attempts with 250/500 ms backoff. HTTP 403, other 4xx, redirects, invalid JSON and API-level errors are not retried.
+- A public-market circuit breaker opens after 3 exhausted transient failures, pauses requests for 15 seconds, and allows one half-open probe. It does not wrap private reads or order writes.
+- Private GETs and all POST operations remain single-attempt. Order submissions are never retried automatically; ambiguous outcomes must be reconciled.
+- The REST host remains fixed to https://openapi.okx.com; every request keeps x-simulated-trading: 1, and redirects remain disabled.
+- Added regression tests for credential isolation/redaction, 403 non-JSON diagnostics, bounded retries, circuit-breaker recovery, and no retries for private reads/writes.
+- This patch does not resolve the previously observed HTTP 403 from the user's network. The rejecting layer is still unknown because the original response headers/body were not retained. No live or Demo account was accessed.
+
+**Version:** 0.16.7  
+**Status:** Public API diagnostics and bounded read resilience included. Strategy validation failed on the supplied historical sample; not ready for forward testing or autonomous trading.
 
 ## v0.16.5 patch note
 
