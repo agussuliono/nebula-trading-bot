@@ -49,7 +49,10 @@ class DemoAccountReconciler:
         # All reads must succeed. A partial set of reads is not a reconciliation.
         balances = self.client.get_balance()
         orders = self.client.get_pending_orders("SPOT")
-        algos = self.client.get_pending_algo_orders("oco")
+        algos = [
+            *self.client.get_pending_algo_orders("oco"),
+            *self.client.get_pending_algo_orders("conditional"),
+        ]
         if len(balances) != 1 or not isinstance(balances[0].get("details"), list):
             raise ReconciliationError("Account balance response is missing its details array")
         details = {row.get("ccy"): row for row in balances[0]["details"] if isinstance(row, dict)}

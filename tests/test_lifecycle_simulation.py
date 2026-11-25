@@ -111,7 +111,7 @@ class LifecycleFakeExchange:
         ]}]
 
     def get_pending_algo_orders(self, ord_type="oco"):
-        assert ord_type == "oco"
+        assert ord_type in {"oco", "conditional"}
         return []
 
 
