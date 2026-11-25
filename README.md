@@ -165,9 +165,9 @@ nebula portfolio-backtest --asset BTC-USDT=btc.csv --asset ETH-USDT=eth.csv --st
 
 The ranking score is a deterministic implementation choice, not a proven predictive edge. All symbols must have the same timeframe, timestamps and timezone convention. This version still does not model cross-asset correlation, exchange lot/tick rounding, minimum notional, partial fills, market impact, or order-book depth.
 
-## Test status for v0.14.0
+## Test status for v0.16.8
 
-- 176 automated tests passed in the local build environment.
+- 505 automated tests passed in the local build environment (2026-11-25, pytest 8.4.2, Python 3.12).
 - Tests cover fee/slippage impact, next-open execution, same-bar stop priority, risk sizing, daily-loss/drawdown halts, chronological single-asset and portfolio walk-forward splits, multi-asset deterministic selection, global one-position enforcement, synchronized timestamps, portfolio cost-stress scenarios, CSV validation and public history-candle request construction.
 - Tests use local synthetic data and mocked HTTP; they do not establish OKX connectivity or exchange execution behavior.
 - No API credentials were used and no Demo or live orders were sent.
