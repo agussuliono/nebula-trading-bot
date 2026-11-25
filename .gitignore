@@ -14,6 +14,11 @@ __pycache__/
 .coverage
 htmlcov/
 
+# Build artifacts
+*.egg-info/
+build/
+dist/
+
 # Local runtime state and private outputs
 *.sqlite3
 *.db
@@ -30,7 +35,3 @@ data/
 .idea/
 .vscode/
 
-# Python build metadata and distribution outputs
-*.egg-info/
-build/
-dist/
