@@ -287,6 +287,16 @@ This release is not an autonomous trading bot. Order submission remains disabled
 
 - Added a closed host mapping in `config.py`: `global → https://openapi.okx.com`, `us_au → https://us.okx.com`, and `eea → https://eea.okx.com`.
 - The account-registration region is selected with `NEBULA_OKX_REGION`; default is `global`. A caller cannot provide a raw REST URL. Every selected host still uses the mandatory Demo header `x-simulated-trading: 1`, redirects remain disabled, and the adapter has no production-mode switch.
-- Official OKX documentation says US/AU accounts registered through app.okx.com must use `us.okx.com`, EEA accounts registered through my.okx.com must use `eea.okx.com`, while global accounts use `openapi.okx.com`. The user's registration region has not been established from this chat and must not be inferred from the current IP/location.
+- Official OKX documentation says US/AU accounts registered through app.okx.com must use `us.okx.com`, EEA accounts registered through my.okx.com must use `eea.okx.com`, while global accounts use `openapi.okx.com`. The user confirmed that the account-registration region for this project is `global`; the workflow on the current review stack pins `NEBULA_OKX_REGION=global`. This confirmation does not establish public endpoint reachability or authenticated Demo connectivity.
 - Offline contract tests cover all three allowlisted hosts, mandatory Demo header, redirect prevention, and rejection of arbitrary domains.
 - No OKX request or account read was executed for this change. The selected account region, public reachability, private Demo authentication, and all exchange-side behavior remain unverified. The order gate remains disabled.
+
+
+## 2026-11-24 — v0.16.8 shadow credential isolation and scanner data-quality gate
+
+- Default `orchestrate-once` now uses public-only settings. Private API credentials are loaded only when `--execute-demo` is explicitly selected.
+- Scanner data completeness now counts confirmed, finite, positive OHLCV candles. Runtime rejects a candidate when valid traded history is below `min_data_points` and reports the reason in `data_quality_rejected`.
+- Regression tests cover credential selection and insufficient valid traded history.
+- Package version is aligned to README patch version 0.16.8.
+- Final GitHub Actions CI run #422 on commit c7e1c47766b8f3a23d5b7b0aedde1a2788ee4168 passed 502 tests in 10.27 seconds; compile, explicit Demo safety settings, and fail-closed defaults passed.
+- These checks are offline only. OKX public reachability, authenticated Demo read-only verification, exchange OCO/partial-fill behavior, and 14-day forward testing remain unverified/not started. No account or order operation was performed.

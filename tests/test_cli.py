@@ -113,7 +113,18 @@ def test_orchestrate_cli_passes_explicit_demo_execution_choice(
     if execute_flag:
         argv.append("--execute-demo")
     monkeypatch.setattr("sys.argv", argv)
-    monkeypatch.setattr("nebula.cli.Settings.from_env", lambda: Settings())
+    settings_sources = []
+
+    def public_settings():
+        settings_sources.append("public")
+        return Settings()
+
+    def private_settings():
+        settings_sources.append("private")
+        return Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass")
+
+    monkeypatch.setattr("nebula.cli.Settings.from_public_env", public_settings)
+    monkeypatch.setattr("nebula.cli.Settings.from_env", private_settings)
 
     class FakeOrchestrator:
         def __init__(self, client, state, settings, *, bar):
@@ -130,6 +141,7 @@ def test_orchestrate_cli_passes_explicit_demo_execution_choice(
     main()
 
     assert calls == {"bar": "1H", "execute": expected}
+    assert settings_sources == (["private"] if expected else ["public"])
     assert '"status": "test"' in capsys.readouterr().out
 
 

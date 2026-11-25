@@ -11,7 +11,10 @@ import math
 
 from .entry_plan import EntryPlanPolicy, build_entry_plan
 from .instruments import SpotInstrument
-from .scanner import build_candidates, candle_range_volatility, rank_candidates
+from .scanner import (
+    build_candidates, candle_range_volatility, rank_candidates,
+    valid_traded_candle_count,
+)
 from .strategy import trend_signal, closed_candles
 
 
@@ -144,6 +147,7 @@ class ReadOnlyRuntime:
         enriched = []
         candles_by_id = {}
         stale = []
+        data_quality_rejected = []
         errors = []
         interval = self.BAR_MS[self.policy.bar]
 
@@ -164,10 +168,21 @@ class ReadOnlyRuntime:
                 if age_ms < 0 or age_ms > interval * self.policy.max_candle_age_intervals:
                     stale.append(candidate.inst_id)
                     continue
+                points = valid_traded_candle_count(candles)
+                if points < self.policy.min_data_points:
+                    data_quality_rejected.append({
+                        "instrument": candidate.inst_id,
+                        "valid_traded_candles": points,
+                        "required": self.policy.min_data_points,
+                    })
+                    continue
                 volatility, volatility_points = candle_range_volatility(candles, window=24)
-                points = len(closed)
                 if volatility_points == 0:
-                    stale.append(candidate.inst_id)
+                    data_quality_rejected.append({
+                        "instrument": candidate.inst_id,
+                        "valid_traded_candles": points,
+                        "required": self.policy.min_data_points,
+                    })
                     continue
                 candles_by_id[candidate.inst_id] = candles
                 enriched.append(type(candidate)(candidate.inst_id, candidate.quote_volume,
@@ -242,6 +257,7 @@ class ReadOnlyRuntime:
             "analyzed_count": min(len(raw_candidates), self.policy.max_symbols_to_analyze),
             "eligible_count": len(ranked),
             "stale_instruments": stale,
+            "data_quality_rejected": data_quality_rejected,
             "errors": errors,
             "position_lock_active": bool(lock),
             "risk_controls": breaker_status,
