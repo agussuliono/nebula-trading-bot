@@ -64,3 +64,37 @@ def test_snapshot_counts_pending_conditional_algo_orders_as_open():
     assert snap.has_open_orders
     assert not snap.is_flat("0.00001")
     assert len(snap.open_algo_orders) == 1
+
+
+def _account_with_details(details):
+    class Account(FakeAccount):
+        def get_balance(self):
+            return [{"details": details}]
+        def get_pending_orders(self, inst_type="SPOT"):
+            return []
+    return Account()
+
+
+@pytest.mark.parametrize("field", ["availBal", "frozenBal"])
+@pytest.mark.parametrize("value", ["missing", None, False, "", "abc", "-1", "NaN", "Infinity"])
+def test_invalid_balance_amounts_fail_closed(field, value):
+    row = {"ccy": "BTC", "availBal": "0", "frozenBal": "0", "liab": "0"}
+    if value == "missing":
+        del row[field]
+    else:
+        row[field] = value
+    with pytest.raises(ReconciliationError):
+        DemoAccountReconciler(_account_with_details([row])).snapshot("BTC-USDT")
+
+
+@pytest.mark.parametrize("details", [
+    [{"ccy": "BTC", "availBal": "0", "frozenBal": "0", "liab": "0"},
+     {"ccy": "BTC", "availBal": "1", "frozenBal": "0", "liab": "0"}],
+    ["not-a-row"],
+    [{"availBal": "0", "frozenBal": "0", "liab": "0"}],
+    [{"ccy": "", "availBal": "0", "frozenBal": "0", "liab": "0"}],
+    [{"ccy": "BTC", "availBal": "0", "frozenBal": "0"}],
+])
+def test_malformed_balance_rows_fail_closed(details):
+    with pytest.raises(ReconciliationError):
+        DemoAccountReconciler(_account_with_details(details)).snapshot("BTC-USDT")
