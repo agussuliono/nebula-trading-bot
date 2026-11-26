@@ -88,7 +88,7 @@ def test_direct_authenticated_buy_request_cannot_bypass_startup_gate():
 
     settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        enable_demo_orders=True, kill_switch=False,
+        enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
     client = OkxDemoClient(settings, session=NeverCallSession())
@@ -106,7 +106,7 @@ def test_permit_cannot_be_reused_for_a_different_buy_payload(tmp_path):
 
     settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        enable_demo_orders=True, kill_switch=False,
+        enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
     client = OkxDemoClient(settings, session=NeverCallSession())

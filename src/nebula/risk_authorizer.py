@@ -61,7 +61,8 @@ class PortfolioRiskAuthorizer:
         )
 
     def _daily_account_pnl(self, *, account_config, balance, tickers,
-                           regular, oco, conditional, lock, unresolved, now_ms, daily_realized):
+                           regular, oco, conditional, lock, unresolved, now_ms, daily_realized,
+                           enforce_drawdown=False):
         """Reconcile durable UTC equity baseline and every account bill since it."""
         if getattr(self.settings, "demo_account_exclusive", False) is not True:
             raise RiskAuthorizationError("Dedicated Demo account attestation is required")
@@ -145,6 +146,19 @@ class PortfolioRiskAuthorizer:
             equity_quote=equity, timestamp_ms=now_ms,
             account_fingerprint=fingerprint,
         )
+        if enforce_drawdown:
+            try:
+                drawdown = ledger.cumulative_drawdown(
+                    timestamp_ms=now_ms, account_fingerprint=fingerprint,
+                    max_drawdown_pct=getattr(self.settings, "max_drawdown_pct", 0),
+                )
+            except Exception as exc:
+                raise RiskAuthorizationError(
+                    "Cumulative drawdown cannot be verified: " + str(exc)) from exc
+            if drawdown["tripped"]:
+                raise RiskAuthorizationError(
+                    "Cumulative drawdown limit reached: "
+                    f"{drawdown['drawdown_pct']} >= {drawdown['max_drawdown_pct']}")
         result = ledger.daily_equity_delta(
             timestamp_ms=now_ms, reconciliation=reconciliation,
             account_fingerprint=fingerprint,
@@ -243,7 +257,7 @@ class PortfolioRiskAuthorizer:
                 account_config=account_config, balance=balance, tickers=tickers,
                 regular=regular, oco=oco, conditional=conditional,
                 lock=lock, unresolved=unresolved, now_ms=now_ms,
-                daily_realized=daily_realized,
+                daily_realized=daily_realized, enforce_drawdown=require_order_gate,
             )
             policy = PortfolioPolicy(
                 max_snapshot_age_ms=self.settings.market_data_max_age_ms,

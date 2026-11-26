@@ -9,14 +9,14 @@ def test_orders_disabled_by_default():
 
 
 def test_kill_switch_blocks_orders():
-    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True,
+    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True, max_drawdown_pct=0.05,
                  kill_switch=True, max_daily_loss_quote=10, max_risk_quote=2, max_position_quote=20)
     with pytest.raises(SafetyError):
         s.validate_order_permission()
 
 
 def test_risk_limits_required():
-    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True, kill_switch=False)
+    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False)
     with pytest.raises(SafetyError):
         s.validate_order_permission()
 
@@ -43,7 +43,7 @@ def test_order_request_is_guarded_and_marked_demo(tmp_path):
             return Response()
 
     s = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-                 enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
+                 enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False, max_daily_loss_quote=20,
                  max_risk_quote=2, max_position_quote=100)
     session = Session()
     client = OkxDemoClient(s, session=session)
@@ -78,14 +78,14 @@ def test_live_host_cannot_be_selected_from_environment(monkeypatch):
 
 
 def test_non_finite_risk_limits_rejected():
-    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True, kill_switch=False,
+    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
                  max_daily_loss_quote=float("inf"), max_risk_quote=2, max_position_quote=20)
     with pytest.raises(SafetyError):
         s.validate_order_permission()
 
 
 def test_order_id_must_be_alphanumeric():
-    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True, kill_switch=False,
+    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
                  max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100)
     client = OkxDemoClient(s)
     with pytest.raises(ValueError):
@@ -93,14 +93,14 @@ def test_order_id_must_be_alphanumeric():
 
 
 def test_per_trade_risk_cannot_exceed_daily_loss_limit():
-    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True, kill_switch=False,
+    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
                  max_daily_loss_quote=5, max_risk_quote=10, max_position_quote=100)
     with pytest.raises(SafetyError):
         s.validate_order_permission()
 
 
 def test_nan_order_size_rejected():
-    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True, kill_switch=False,
+    s = Settings(api_key="a", secret_key="b", passphrase="c", enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
                  max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100)
     client = OkxDemoClient(s)
     with pytest.raises(ValueError):
@@ -142,7 +142,7 @@ def test_write_timeout_is_ambiguous_and_never_retried(monkeypatch):
 
     settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        enable_demo_orders=True, kill_switch=False,
+        enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
     session = TimeoutSession()
@@ -160,7 +160,7 @@ def test_cancel_order_is_demo_gated_and_uses_fixed_demo_header():
         def __init__(self): self.call=None
         def request(self, *args, **kwargs): self.call=(args,kwargs); return Response()
     settings=Settings(api_key="demo-key",secret_key="demo-secret",passphrase="demo-pass",
-        enable_demo_orders=True, kill_switch=False,max_daily_loss_quote=20,max_risk_quote=2,max_position_quote=100)
+        enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,max_daily_loss_quote=20,max_risk_quote=2,max_position_quote=100)
     session=Session(); client=OkxDemoClient(settings,session=session)
     result=client.cancel_order(inst_id="BTC-USDT",order_id="123")
     assert result[0]["sCode"] == "0"
@@ -175,7 +175,7 @@ def test_cancel_order_requires_gate_and_valid_exchange_id():
     client=OkxDemoClient(Settings())
     with pytest.raises(SafetyError):
         client.cancel_order(inst_id="BTC-USDT",order_id="123")
-    enabled=Settings(api_key="a",secret_key="b",passphrase="c",enable_demo_orders=True, kill_switch=False,
+    enabled=Settings(api_key="a",secret_key="b",passphrase="c",enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=20,max_risk_quote=2,max_position_quote=100)
     with pytest.raises(ValueError):
         OkxDemoClient(enabled).cancel_order(inst_id="BTC-USDT",order_id="bad")
@@ -277,7 +277,7 @@ def test_history_candles_uses_public_endpoint_and_validates_cursor():
     ],
 )
 def test_limit_adapter_rejects_instrument_rule_violations_before_post(size, price, state, error):
-    settings = Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True,
+    settings = Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True, max_drawdown_pct=0.05,
                         kill_switch=False, max_daily_loss_quote=20, max_risk_quote=2,
                         max_position_quote=100)
     class NeverPostSession:
@@ -332,7 +332,7 @@ def test_regular_order_cancel_remains_available_during_emergency_stop():
             self.calls += 1
             return Response()
     settings = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        enable_demo_orders=True, kill_switch=True, max_daily_loss_quote=20,
+        enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=True, max_daily_loss_quote=20,
         max_risk_quote=2, max_position_quote=100)
     session = Session()
     client = OkxDemoClient(settings, session=session)
@@ -374,7 +374,7 @@ def test_http_redirects_are_rejected_without_following_or_replaying_private_head
         api_key="demo-key",
         secret_key="demo-secret",
         passphrase="demo-pass",
-        enable_demo_orders=True,
+        enable_demo_orders=True, max_drawdown_pct=0.05,
         kill_switch=False,
         max_daily_loss_quote=20,
         max_risk_quote=2,

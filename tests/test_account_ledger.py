@@ -188,3 +188,44 @@ def test_bill_reconciliation_rejects_raw_lists_and_snapshot_mutation():
         snapshot.rows.append({"billId": "1"})
     with pytest.raises(BillReconciliationError, match="exact requested interval"):
         _reconcile(snapshot, "demo-account-hash", ts, ts + 999)
+
+
+def test_cumulative_drawdown_trips_at_five_percent_peak_decline(tmp_path):
+    ledger = AccountLedger(StateStore(str(tmp_path / "ledger.db")))
+    fp = "demo-account-hash"
+    day1 = 1795132800000
+    ledger.establish_daily_baseline(equity_quote="1000", timestamp_ms=day1,
+                                    account_fingerprint=fp)
+    ledger.record_equity_mark(equity_quote="1100", timestamp_ms=day1 + 1000,
+                              account_fingerprint=fp)
+    day2 = day1 + 86_400_000
+    ledger.establish_daily_baseline(equity_quote="1100", timestamp_ms=day2,
+                                    account_fingerprint=fp)
+    ledger.record_equity_mark(equity_quote="1045", timestamp_ms=day2 + 1000,
+                              account_fingerprint=fp)
+    result = ledger.cumulative_drawdown(timestamp_ms=day2 + 1000,
+                                        account_fingerprint=fp,
+                                        max_drawdown_pct="0.05")
+    assert result["peak_equity_quote"] == "1100"
+    assert result["current_equity_quote"] == "1045"
+    assert result["tripped"] is True
+
+
+def test_cumulative_drawdown_fails_closed_without_fresh_mark(tmp_path):
+    ledger = AccountLedger(StateStore(str(tmp_path / "ledger.db")))
+    fp = "demo-account-hash"
+    ts = 1795132800000
+    ledger.establish_daily_baseline(equity_quote="1000", timestamp_ms=ts,
+                                    account_fingerprint=fp)
+    with pytest.raises(AccountLedgerError, match="fresh equity mark"):
+        ledger.cumulative_drawdown(timestamp_ms=ts + 1000,
+                                   account_fingerprint=fp,
+                                   max_drawdown_pct="0.05")
+    with pytest.raises(AccountLedgerError, match="different account"):
+        ledger.cumulative_drawdown(timestamp_ms=ts,
+                                   account_fingerprint="other-account",
+                                   max_drawdown_pct="0.05")
+    with pytest.raises(AccountLedgerError, match="max_drawdown_pct"):
+        ledger.cumulative_drawdown(timestamp_ms=ts,
+                                   account_fingerprint=fp,
+                                   max_drawdown_pct="0")

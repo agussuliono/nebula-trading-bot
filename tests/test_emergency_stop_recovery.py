@@ -18,7 +18,7 @@ def stopped_settings():
         api_key="demo-key",
         secret_key="demo-secret",
         passphrase="demo-pass",
-        enable_demo_orders=True,
+        enable_demo_orders=True, max_drawdown_pct=0.05,
         kill_switch=True,
         max_daily_loss_quote=20,
         max_risk_quote=2,

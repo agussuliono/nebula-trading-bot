@@ -216,3 +216,38 @@ class AccountLedger:
                 "current_equity_quote": latest["equity_quote"],
                 "external_flows_quote": str(flows),
                 "reconciled_bill_count": reconciliation.bill_count, "complete": True}
+
+    def cumulative_drawdown(self, *, timestamp_ms, account_fingerprint,
+                            max_drawdown_pct):
+        """Peak-to-current drawdown across every reconciled equity mark.
+
+        Fails closed when evidence is missing, stale, or bound to another
+        account. Equity marks only exist on the reconciled daily path, so a
+        missing mark can never read as zero drawdown.
+        """
+        try:
+            limit = Decimal(str(max_drawdown_pct))
+        except Exception as exc:
+            raise AccountLedgerError("max_drawdown_pct must be a finite fraction in (0, 1]") from exc
+        if not limit.is_finite() or limit <= 0 or limit > 1:
+            raise AccountLedgerError("max_drawdown_pct must be a finite fraction in (0, 1]")
+        ts = int(timestamp_ms)
+        with self.state._connect() as db:
+            fingerprints = db.execute(
+                "SELECT DISTINCT account_fingerprint FROM daily_equity_baselines").fetchall()
+            marks = db.execute(
+                "SELECT timestamp_ms,equity_quote FROM daily_equity_marks WHERE timestamp_ms<=? "
+                "ORDER BY timestamp_ms", (ts,)).fetchall()
+        if not fingerprints or any(row[0] != str(account_fingerprint) for row in fingerprints):
+            raise AccountLedgerError("Equity history is missing or belongs to a different account")
+        if not marks or int(marks[-1]["timestamp_ms"]) != ts:
+            raise AccountLedgerError("A fresh equity mark for the requested timestamp is required")
+        equities = [Decimal(row["equity_quote"]) for row in marks]
+        if any(not value.is_finite() or value <= 0 for value in equities):
+            raise AccountLedgerError("Equity history contains an invalid mark")
+        peak = max(equities)
+        current = equities[-1]
+        drawdown = (peak - current) / peak
+        return {"peak_equity_quote": str(peak), "current_equity_quote": str(current),
+                "drawdown_pct": str(drawdown), "max_drawdown_pct": str(limit),
+                "tripped": drawdown >= limit, "mark_count": len(equities)}
