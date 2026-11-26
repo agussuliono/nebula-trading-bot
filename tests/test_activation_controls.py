@@ -835,7 +835,6 @@ def test_rejected_legacy_sell_with_execution_evidence_fails_closed(tmp_path):
 def test_manual_reconciliation_attributes_legacy_sell_to_owner(tmp_path):
     state = StateStore(str(tmp_path / "state.db"))
     _filled_entry_named(state, "NBentryA", "111", "1")
-    _filled_entry_named(state, "NBentryB", "222", "0.6")
     assert state.reserve_intent("NBlegacy", "BTC-USDT", 5, "sell")
     state.update_intent("NBlegacy", "submitting", "333")
     state.update_intent("NBlegacy", "acknowledged", "333")
@@ -845,17 +844,24 @@ def test_manual_reconciliation_attributes_legacy_sell_to_owner(tmp_path):
                      "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBlegacy"})
     with state._connect() as db:
         with pytest.raises(ValueError, match="legacy sell"):
-            state._net_inventory(db, "NBentryB", "BTC-USDT")
+            state._net_inventory(db, "NBentryA", "BTC-USDT")
         db.execute("UPDATE intents SET position_client_order_id='NBentryA'"
                    " WHERE client_order_id='NBlegacy'")
         assert state._net_inventory(db, "NBentryA", "BTC-USDT") == Decimal("0.6")
+        db.execute("DELETE FROM position_lock")
+    _filled_entry_named(state, "NBentryB", "222", "0.6")
+    with state._connect() as db:
         assert state._net_inventory(db, "NBentryB", "BTC-USDT") == Decimal("0.6")
 
 
 def test_rebate_rebuild_preserves_proven_values_and_integrity(tmp_path):
     import sqlite3
     path = tmp_path / "premigrated-data.db"
+    seed = StateStore(str(path))
+    assert seed.reserve_intent("NBkeep", "BTC-USDT", 1, "buy")
+    assert seed.reserve_intent("NBunknown", "BTC-USDT", 2, "buy")
     conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE order_snapshots")
     conn.execute("""CREATE TABLE order_snapshots (
         client_order_id TEXT PRIMARY KEY, exchange_order_id TEXT,
         exchange_state TEXT NOT NULL, requested_size TEXT NOT NULL,
