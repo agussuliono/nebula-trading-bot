@@ -182,6 +182,8 @@ class Protocol:
     prospective_min_duration_days: int
     prospective_min_completeness: float
     preregistered_exclusions: Mapping = field(default_factory=dict)
+    ema_step: int = 1
+    atr_step: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -208,6 +210,8 @@ class Protocol:
                 "prospective_min_duration_days": self.prospective_min_duration_days,
                 "prospective_min_completeness": self.prospective_min_completeness,
                 "preregistered_exclusions": {str(k): v for k, v in sorted(self.preregistered_exclusions.items())},
+                "ema_step": self.ema_step,
+                "atr_step": self.atr_step,
             }
         )
 
@@ -634,26 +638,29 @@ def _best_trial_id(registry, experiment_id: str) -> str:
     return max(stored, key=lambda item: _sharpe(list(item[1])))[0]
 
 
-def _plateau_stable(registry, experiment_id: str, candidate_id) -> bool:
-    """Plateau across neighboring registered parameter trials."""
-    params = registry.trial_params(experiment_id)
+def _plateau_stable(registry, experiment_id: str, candidate_id, frozen) -> bool:
+    """Plateau across frozen-grid neighbors in the same completed trial group."""
+    params = registry.trial_params(experiment_id, frozen.protocol.trial_group)
     stored = dict(registry.trial_returns(experiment_id))
     if candidate_id not in params or candidate_id not in stored:
         return False
     candidate = params[candidate_id]
     if not isinstance(candidate, dict) or set(candidate) != {"ema", "atr"}:
         return False
-    ema_values = sorted({p["ema"] for p in params.values() if isinstance(p, dict) and "ema" in p})
-    atr_values = sorted({p["atr"] for p in params.values() if isinstance(p, dict) and "atr" in p})
-    def adjacent(values, value):
-        idx = values.index(value)
-        return {values[idx - 1] if idx > 0 else None, values[idx + 1] if idx + 1 < len(values) else None} - {None}
+    if frozen.protocol.ema_step <= 0 or frozen.protocol.atr_step <= 0:
+        return False
     neighbors = []
     for trial_id, p in params.items():
         if trial_id == candidate_id or not isinstance(p, dict):
             continue
-        ema_step = p.get("ema") in adjacent(ema_values, candidate["ema"]) and p.get("atr") == candidate["atr"]
-        atr_step = p.get("atr") in adjacent(atr_values, candidate["atr"]) and p.get("ema") == candidate["ema"]
+        ema_step = (
+            abs(p.get("ema", 0) - candidate["ema"]) == frozen.protocol.ema_step
+            and p.get("atr") == candidate["atr"]
+        )
+        atr_step = (
+            abs(p.get("atr", 0) - candidate["atr"]) == frozen.protocol.atr_step
+            and p.get("ema") == candidate["ema"]
+        )
         if ema_step or atr_step:
             neighbors.append(trial_id)
     if len(neighbors) < 2:
@@ -712,7 +719,7 @@ def _artifact_passed(
             sharpes.append(_sharpe([float(v) for v in fold]))
         if min(sharpes) < 0 or sum(sharpes) / len(sharpes) <= 0:
             return False
-        return _plateau_stable(registry, experiment_id, payload.get("trial_id"))
+        return _plateau_stable(registry, experiment_id, payload.get("trial_id"), frozen)
     if method == "stress":
         gross = payload.get("gross_returns")
         if payload.get("schema") != "stress-v1" or not isinstance(gross, list) or len(gross) < 2:

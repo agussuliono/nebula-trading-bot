@@ -779,11 +779,12 @@ class ResearchRegistry:
                 reasons.setdefault(index, set()).add(payload.get("reason"))
         return reasons
 
-    def trial_params(self, experiment_id: str) -> dict:
-        """Stored parameters per trial_id."""
+    def trial_params(self, experiment_id: str, trial_group: str = "") -> dict:
+        """Stored parameters per completed trial_id in the trial group."""
         rows = self._conn.execute(
-            "SELECT trial_id, parameters_json FROM experiment_trials WHERE experiment_id = ?",
-            (experiment_id,),
+            "SELECT trial_id, parameters_json FROM experiment_trials "
+            "WHERE experiment_id = ? AND status = 'completed' AND trial_group = ?",
+            (experiment_id, trial_group),
         ).fetchall()
         return {trial_id: json.loads(params) for trial_id, params in rows}
 

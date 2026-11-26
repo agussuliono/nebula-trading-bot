@@ -89,6 +89,8 @@ def protocol(**overrides):
         prospective_min_duration_days=14,
         prospective_min_completeness=0.95,
         preregistered_exclusions={},
+        ema_step=1,
+        atr_step=1,
     )
     base.update(overrides)
     return Protocol(**base)
@@ -270,6 +272,25 @@ def test_walk_forward_rejects_single_peak(tmp_path, frozen):
     run = reg.latest_validation("exp1", "walk_forward")
     assert run["artifacts"]["passed"] is False
     reg.close()
+
+
+def test_walk_forward_rejects_distant_parameters(tmp_path, frozen):
+    reg = ResearchRegistry(str(tmp_path / "distant.db"))
+    reg.register_experiment("exp1", "hyp", frozen.sha256, "d" * 64, "abc123", "c" * 64)
+    reg.freeze_protocol("exp1", "test")
+    distant = [{"ema": 20, "atr": 14}, {"ema": 40, "atr": 14}, {"ema": 20, "atr": 30}]
+    for idx, returns in enumerate(TRIALS):
+        reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", distant[idx], {"returns": returns})
+    record_artifact_validation(reg, "exp1", "walk_forward", _wf_bytes(frozen), frozen)
+    assert reg.latest_validation("exp1", "walk_forward")["artifacts"]["passed"] is False
+    reg.close()
+
+
+def test_walk_forward_rejects_unregistered_trial(registry, frozen):
+    payload = json.loads(_wf_bytes(frozen))
+    payload["trial_id"] = "ghost"
+    record_artifact_validation(registry, "exp1", "walk_forward", json.dumps(payload).encode(), frozen)
+    assert registry.latest_validation("exp1", "walk_forward")["artifacts"]["passed"] is False
 
 
 def test_promotion_computes_prospective_itself(registry, frozen):
