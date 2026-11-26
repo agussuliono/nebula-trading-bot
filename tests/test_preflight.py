@@ -1,8 +1,9 @@
+import json
 from decimal import Decimal
 
 from nebula.config import Settings
 from nebula.entry_plan import EntryPlanPolicy
-from nebula.preflight import run_read_only_preflight
+from nebula.preflight import _redact_financials, run_read_only_preflight
 from nebula.state import StateStore
 
 
@@ -38,6 +39,7 @@ class ReadOnlySnapshotClient:
         self.calls.append("account_config")
         return [{
             "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+            "spotBorrowAutoRepay": False,
             "perm": "read_only,trade", "uid": "test-demo-account-uid",
         }]
 
@@ -105,7 +107,7 @@ def policy():
     )
 
 
-def test_preflight_orchestrator_does_not_read_private_data_without_candidate(
+def test_preflight_orchestrator_verifies_private_auth_without_candidate(
     monkeypatch, tmp_path
 ):
     monkeypatch.setattr("nebula.preflight.ReadOnlyRuntime", FakeRuntime)
@@ -118,9 +120,40 @@ def test_preflight_orchestrator_does_not_read_private_data_without_candidate(
     )
 
     assert report["status"] == "no_candidate"
+    assert report["private_api_auth"]["status"] == "auth_verified"
+    assert report["private_api_auth"]["permissions_ok"] is True
     assert report["orders_enabled"] is False
     assert report["order_submission_attempts"] == 0
-    assert client.calls == []
+    assert client.calls == ["account_config", "balance"]
+
+
+def test_preflight_orchestrator_fails_closed_when_key_permissions_wrong(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("nebula.preflight.ReadOnlyRuntime", FakeRuntime)
+    client = ReadOnlySnapshotClient()
+    original = client.get_account_config
+
+    def wrong_permissions():
+        rows = original()
+        rows[0]["perm"] = "read_only,trade,withdraw"
+        return rows
+
+    client.get_account_config = wrong_permissions
+    state = StateStore(str(tmp_path / "bad-key.sqlite3"))
+
+    report = run_read_only_preflight(
+        client, state, settings_read_only(),
+        bar="1H", entry_plan_policy=policy(), clock_ms=lambda: NOW_MS,
+    )
+
+    assert report["status"] == "auth_failed"
+    assert report["private_api_auth"]["permissions_ok"] is False
+    assert "api_key_permissions_not_exactly_read_only_trade" in (
+        report["private_api_auth"]["blockers"]
+    )
+    assert report["market_analysis"] is None
+    assert report["order_submission_attempts"] == 0
 
 
 def test_preflight_orchestrator_approves_candidate_without_exchange_writes(
@@ -153,12 +186,69 @@ def test_preflight_orchestrator_approves_candidate_without_exchange_writes(
     assert report["order_submission_attempts"] == 0
     assert report["risk_preflight"]["execution"] == "not_submitted_preflight_only"
     assert client.calls == [
+        "account_config", "balance",
         "instrument_rules", "account_config", "balance", "tickers",
         "pending_regular", "pending_oco", "pending_conditional", "account_bills",
         "account_bills",
     ]
+    assert "candidate" not in report["risk_preflight"]
+    serialized = json.dumps(report, indent=2, sort_keys=True)
+    for financial_field in (
+        "account_equity_usdt", "available_usdt",
+        "projected_daily_pnl_after_planned_stop_quote",
+        '"candidate":', "candidate_entry_plan", "entry_price", "stop_loss",
+        "take_profit", "notional_quote", '"size":', '"0.1"',
+    ):
+        assert financial_field not in serialized
     assert not hasattr(client, "place_spot_limit")
     assert not hasattr(client, "place_spot_oco_exit")
+
+
+def test_redaction_removes_nested_sensitive_fields_but_keeps_status():
+    report = {
+        "status": "approved",
+        "selected_instrument": "AAA-USDT",
+        "risk_preflight": {
+            "execution": "not_submitted_preflight_only",
+            "candidate": {
+                "instrument": "AAA-USDT", "size": "0.1",
+                "entry_price": "100", "stop_loss": "90",
+            },
+            "account_equity_usdt": "1000",
+            "available_usdt": "900",
+            "projected_daily_pnl_after_planned_stop_quote": "-10",
+            "authorization": {
+                "planned_entry": {"entry_price": "100", "size": "0.1"},
+                "balance_details": [{"ccy": "USDT", "availBal": "900", "liab": "0"}],
+                "position_size": "0.1",
+                "notional_quote": "10",
+            },
+        },
+        "market_analysis": {
+            "signals": [{
+                "instrument": "AAA-USDT",
+                "candidate_entry_plan": {"entry_price": "100", "stop_loss": "90"},
+                "account_id": "demo-account",
+                "uid": "demo-uid",
+                "api_key": "must-not-leak",
+            }],
+        },
+    }
+
+    redacted = _redact_financials(report)
+    serialized = json.dumps(redacted, indent=2, sort_keys=True)
+
+    assert redacted["status"] == "approved"
+    assert redacted["selected_instrument"] == "AAA-USDT"
+    assert redacted["risk_preflight"]["execution"] == "not_submitted_preflight_only"
+    for sensitive in (
+        "account_equity_usdt", "available_usdt", "projected_daily_pnl",
+        '"candidate":', "planned_entry", "candidate_entry_plan", "entry_price",
+        "stop_loss", "balance_details", "availBal", "liab", "position_size",
+        "notional_quote", "account_id", "uid", "api_key", "must-not-leak",
+        '"size":', '"0.1"', "1000", "900",
+    ):
+        assert sensitive not in serialized
 
 
 
