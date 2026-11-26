@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import shutil
 import uuid
 import sqlite3
 import stat
@@ -748,6 +749,59 @@ class StateStore:
                 "INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
                 (event_type, client_order_id, payload),
             )
+
+    def backup_to(self, destination: str) -> dict[str, Any]:
+        """Write a consistent SQLite backup and verify its integrity."""
+        if self.path == ":memory:":
+            raise ValueError("Cannot back up an in-memory state database")
+        target = str(destination)
+        if os.path.abspath(target) == os.path.abspath(self.path):
+            raise ValueError("Backup destination must differ from the state database")
+        with self._connect() as source:
+            backup = sqlite3.connect(target)
+            try:
+                source.backup(backup)
+                integrity = backup.execute("PRAGMA integrity_check").fetchone()[0]
+            finally:
+                backup.close()
+        if integrity != "ok":
+            raise ValueError("State backup failed its integrity check")
+        os.chmod(target, 0o600)
+        return {"status": "state_backup_created", "integrity": integrity}
+
+    def restore_from(self, source_path: str) -> dict[str, Any]:
+        """Replace state with a verified backup; safety state must be intact."""
+        if self.path == ":memory:":
+            raise ValueError("Cannot restore into an in-memory state database")
+        source = str(source_path)
+        if os.path.abspath(source) == os.path.abspath(self.path):
+            raise ValueError("Restore source must differ from the state database")
+        probe = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+        try:
+            integrity = probe.execute("PRAGMA integrity_check").fetchone()[0]
+            tables = {row[0] for row in probe.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            required = {"emergency_stop", "daily_pnl_events", "audit_events"}
+            stop_row = None
+            if required.issubset(tables):
+                stop_row = probe.execute(
+                    "SELECT engaged FROM emergency_stop WHERE singleton=1"
+                ).fetchone()
+        finally:
+            probe.close()
+        if integrity != "ok" or stop_row is None:
+            raise ValueError("Restore source failed integrity or safety-state validation")
+        staging = f"{self.path}.restore-staging"
+        shutil.copyfile(source, staging)
+        os.chmod(staging, 0o600)
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.remove(self.path + suffix)
+            except FileNotFoundError:
+                pass
+        os.replace(staging, self.path)
+        return {"status": "state_restored", "integrity": integrity,
+                "emergency_stop_engaged": bool(stop_row[0])}
 
     def list_events(self, limit: int = 100) -> list[dict[str, Any]]:
         if not 1 <= limit <= 1000:

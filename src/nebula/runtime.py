@@ -264,11 +264,17 @@ class ReadOnlyRuntime:
             "signals": reports,
             "order_submission_attempts": 0,
         }
+        candle_timestamps = [
+            report["candle_ts"] for report in reports
+            if isinstance(report.get("candle_ts"), int) and report["candle_ts"] > 0
+        ]
         self.state.record_event("runtime_cycle_completed", None, {
             "bar": self.policy.bar, "universe_count": result["universe_count"],
             "eligible_count": result["eligible_count"],
             "signal_count": len(reports), "errors": len(errors),
             "mode": result["mode"],
+            "timestamp_utc": result["timestamp_utc"],
+            "latest_candle_ts": max(candle_timestamps) if candle_timestamps else None,
         })
         return result
 
