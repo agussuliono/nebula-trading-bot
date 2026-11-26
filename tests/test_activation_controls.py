@@ -284,6 +284,49 @@ def test_outcome_observation_runs_when_cycle_fails(tmp_path, monkeypatch, capsys
     assert output["outcome_observation"]["recorded_events"] == 0
 
 
+def test_cycle_gap_report_rejects_mixed_timeframes_and_supports_4h(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    four_h = 4 * HOUR_MS
+    base_4h = 1_699_992_000_000  # aligned to an exact 4H slot
+    state.record_event("runtime_cycle_completed", None, {
+        "latest_candle_ts": base_4h, "bar": "4H",
+    })
+    report = _cycle_gap_report(state, now_ms=base_4h + 2 * four_h + 60_000)
+    assert report["bar"] == "4H"
+    assert report["gaps"] == [base_4h + four_h]
+    state.record_event("runtime_cycle_completed", None, {
+        "latest_candle_ts": base_4h + HOUR_MS, "bar": "1H",
+    })
+    report = _cycle_gap_report(state, now_ms=base_4h + 2 * four_h)
+    assert report["status"] == "mixed_timeframes_not_supported"
+
+
+def test_outcome_observation_after_submission_failure(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "state.db")
+
+    class FailingAfterEntryOrchestrator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run_once(self, execute=False):
+            state = StateStore(db)
+            risk_plan = {"instrument": "BTC-USDT", "size": "1", "entry_price": "100",
+                         "stop_loss": "90", "take_profit": "130", "risk_to_stop_quote": "10"}
+            assert state.reserve_entry_intent("NBentry", "BTC-USDT", 1, "buy", risk_plan)
+            raise RuntimeError("boom after submission")
+
+    monkeypatch.setattr(
+        "nebula.orchestrator.ExecutionOrchestrator", FailingAfterEntryOrchestrator,
+    )
+    monkeypatch.setattr(sys, "argv", ["nebula", "orchestrate-once", "--db", db])
+    with pytest.raises(SystemExit):
+        main()
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "cycle_failed"
+    assert output["order_submission_attempts"] is None
+    assert output["outcome_observation"]["recorded_events"] >= 1
+
+
 def test_outcome_observation_summary_on_empty_state(tmp_path):
     state = StateStore(str(tmp_path / "state.db"))
     summary = _outcome_observation_summary(state)

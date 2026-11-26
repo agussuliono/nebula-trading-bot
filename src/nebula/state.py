@@ -11,6 +11,31 @@ from pathlib import Path
 from typing import Any
 
 
+class _RestoreLockedConnection:
+    """sqlite3 connection wrapper holding a shared restore lock.
+
+    ``__exit__`` preserves sqlite3 transaction semantics, then closes the
+    connection and releases the lock so restore can take it exclusively.
+    """
+
+    def __init__(self, conn, lock_handle):
+        self._conn = conn
+        self._lock_handle = lock_handle
+
+    def __enter__(self):
+        return self._conn.__enter__()
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return self._conn.__exit__(exc_type, exc, tb)
+        finally:
+            self._conn.close()
+            self._lock_handle.close()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 class StateStore:
     def __init__(self, path: str = "nebula.sqlite3"):
         self.path = str(path)
@@ -64,8 +89,16 @@ class StateStore:
             self._secure_regular_file(self.path + suffix)
 
     def _connect(self):
+        lock_handle = None
         if self.path != ":memory:":
             self._secure_storage_files()
+            # Every connection holds a shared restore lock for its lifetime;
+            # restore takes the exclusive lock, so no writer can interleave
+            # with the file swap.
+            import fcntl
+
+            lock_handle = open(f"{self.path}.restore-lock", "w")
+            fcntl.flock(lock_handle, fcntl.LOCK_SH)
         conn = sqlite3.connect(self.path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         try:
@@ -74,10 +107,14 @@ class StateStore:
             conn.execute("PRAGMA foreign_keys=ON")
             if self.path != ":memory:":
                 self._secure_storage_files()
-            return conn
         except Exception:
             conn.close()
+            if lock_handle is not None:
+                lock_handle.close()
             raise
+        if lock_handle is not None:
+            return _RestoreLockedConnection(conn, lock_handle)
+        return conn
 
     def _init_db(self):
         with self._connect() as db:
@@ -389,7 +426,7 @@ class StateStore:
 
     def reserve_exit_intent(self, client_order_id: str, instrument: str, candle_ts: int,
                             side: str, position_client_order_id: str,
-                            size: str | None = None) -> bool:
+                            size: str) -> bool:
         """Reserve an exit only for the currently locked position."""
         if side != "sell":
             raise ValueError("exit intents must be Spot sell orders")
@@ -420,7 +457,7 @@ class StateStore:
                 raise RuntimeError(
                     "Independent sell order is blocked while a durable OCO protection intent exists"
                 )
-            if size is not None:
+            if True:
                 # A sell may never exceed the position's reconciled net
                 # inventory from linked fills, regardless of other balances.
                 try:
@@ -461,6 +498,8 @@ class StateStore:
                                 net -= abs(Decimal(str(fill["fee"])))
                         elif fill["side"] == "sell":
                             net -= fill_size
+                            if fill["fee_currency"] == base_ccy:
+                                net -= abs(Decimal(str(fill["fee"])))
                 if requested > net:
                     raise RuntimeError(
                         "Exit size exceeds the position's reconciled net inventory"

@@ -186,7 +186,7 @@ def test_base_fee_exit_classified_by_net_inventory(tmp_path):
     buy = _fill("111", "1", "buy", "1", "100", "NBentry")
     buy["fee"], buy["feeCcy"] = "-0.01", "BTC"
     assert state.save_fill(buy)
-    state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry")
+    state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="0.99")
     state.save_order_snapshot("NBexit", {"ordId": "222", "state": "filled", "sz": "0.99",
                                          "accFillSz": "0.99", "avgPx": "110", "fee": "-0.001", "feeCcy": "USDT"})
     _advance(state, "NBexit", "filled", "222")

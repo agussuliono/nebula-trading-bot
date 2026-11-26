@@ -91,14 +91,19 @@ def _cycle_gap_report(state, *, now_ms=None, start_ms=None):
     import time as _time
 
     processed = []
-    bar = "1H"
+    bars = set()
     for event in state.list_cycle_events():
         details = event.get("details") or {}
         candle_ts = details.get("latest_candle_ts")
         if isinstance(candle_ts, int) and candle_ts > 0:
             processed.append(candle_ts)
         if details.get("bar") in _BAR_STEP_MS:
-            bar = details["bar"]
+            bars.add(details["bar"])
+    if len(bars) > 1:
+        return {"status": "mixed_timeframes_not_supported",
+                "processed_cycles": len(set(processed)),
+                "bars": sorted(bars), "gap_count": None, "gaps": []}
+    bar = bars.pop() if bars else "1H"
     processed = sorted(set(processed))
     step_ms = _BAR_STEP_MS[bar]
     if now_ms is None:
@@ -352,7 +357,8 @@ def main():
                 "mode": "demo_execution" if args.execute_demo else "shadow_only",
                 "status": "cycle_failed",
                 "error_type": type(exc).__name__,
-                "order_submission_attempts": 0,
+                # Unknown: the failure may have happened after a submission.
+                "order_submission_attempts": None,
             }
             try:
                 failure["outcome_observation"] = _outcome_observation_summary(state)
