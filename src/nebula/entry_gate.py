@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import secrets
 
 
 class StartupPermitError(RuntimeError):
@@ -104,9 +105,9 @@ class RiskEntryPermit:
         self._client = client
         self._state = state
         self._pid = os.getpid()
-        self._key_digest = hashlib.sha256(
-            str(getattr(getattr(client, "settings", None), "api_key", "")).encode()
-        ).hexdigest()
+        # Identity binding compares the in-process key reference directly;
+        # the key is never persisted, logged, or hashed for storage.
+        self._api_key = str(getattr(getattr(client, "settings", None), "api_key", ""))
         self._account_uid = str(account_uid or "")
         self._order_binding = {"instId": str(instrument), "sz": str(size), "px": str(price)}
         self._client_order_id = None
@@ -127,10 +128,8 @@ class RiskEntryPermit:
         if (client is not self._client or os.getpid() != self._pid
                 or not self._consumed or self._write_started):
             raise StartupPermitError("Fresh one-shot risk authorization permit required")
-        current_key = hashlib.sha256(
-            str(getattr(getattr(client, "settings", None), "api_key", "")).encode()
-        ).hexdigest()
-        if current_key != self._key_digest or not isinstance(payload, dict):
+        current_key = str(getattr(getattr(client, "settings", None), "api_key", ""))
+        if not secrets.compare_digest(current_key, self._api_key) or not isinstance(payload, dict):
             raise StartupPermitError("Risk permit identity or order payload mismatch")
         if payload.get("side") != "buy" or payload.get("tdMode") != "cash":
             raise StartupPermitError("Risk permit only authorizes a Spot cash buy")
