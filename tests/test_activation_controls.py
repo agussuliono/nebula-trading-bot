@@ -569,6 +569,117 @@ def test_filled_snapshot_without_fee_evidence_rejected(tmp_path):
                                               "accFillSz": "2", "avgPx": "100"})
 
 
+def test_reserved_sell_blocks_later_oco_reservation(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="2")
+    assert state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="1")
+    with pytest.raises(ValueError, match="unresolved independent sell"):
+        state.reserve_protection_intent(
+            entry_client_order_id="NBentry", instrument="BTC-USDT",
+            algo_client_order_id="NBalgo", filled_size="2",
+            take_profit="130", stop_loss="90",
+        )
+
+
+def test_live_sell_without_fill_blocks_oco_reservation(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="2")
+    assert state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="1")
+    state.update_intent("NBexit", "submitting", "222")
+    state.update_intent("NBexit", "acknowledged", "222")
+    state.update_intent("NBexit", "live", "222")
+    state.save_order_snapshot("NBexit", {"ordId": "222", "state": "live", "sz": "1",
+                                         "accFillSz": "0", "avgPx": "0",
+                                         "fee": "0", "feeCcy": "USDT"})
+    with pytest.raises(ValueError, match="unresolved independent sell"):
+        state.reserve_protection_intent(
+            entry_client_order_id="NBentry", instrument="BTC-USDT",
+            algo_client_order_id="NBalgo", filled_size="2",
+            take_profit="130", stop_loss="90",
+        )
+
+
+def test_empty_fee_values_are_incomplete_evidence(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    risk_plan = {"instrument": "BTC-USDT", "size": "2", "entry_price": "100",
+                 "stop_loss": "90", "take_profit": "130", "risk_to_stop_quote": "20"}
+    assert state.reserve_entry_intent("NBentry", "BTC-USDT", 1, "buy", risk_plan)
+    state.update_intent("NBentry", "submitting", "111")
+    with pytest.raises(ValueError, match="fee evidence"):
+        state.save_order_snapshot("NBentry", {"ordId": "111", "state": "filled", "sz": "2",
+                                              "accFillSz": "2", "avgPx": "100",
+                                              "fee": None, "feeCcy": ""})
+
+
+def test_snapshot_newer_and_stale_than_ledger(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="1")
+    state.save_order_snapshot("NBentry", {"ordId": "111", "state": "filled", "sz": "2",
+                                          "accFillSz": "2", "avgPx": "100",
+                                          "fee": "-0.1", "feeCcy": "USDT"})
+    with state._connect() as db:
+        assert state._net_inventory(db, "NBentry", "BTC-USDT") == Decimal("2")
+    state2 = StateStore(str(tmp_path / "state2.db"))
+    _filled_entry(state2, size="2")
+    state2.save_order_snapshot("NBentry", {"ordId": "111", "state": "partially_filled", "sz": "2",
+                                           "accFillSz": "1", "avgPx": "100",
+                                           "fee": "-0.1", "feeCcy": "USDT"})
+    with state2._connect() as db:
+        assert state2._net_inventory(db, "NBentry", "BTC-USDT") == Decimal("2")
+
+
+def test_split_rebate_on_tie_uses_snapshot_components(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="2")
+    state.save_order_snapshot("NBentry", {"ordId": "111", "state": "filled", "sz": "2",
+                                          "accFillSz": "2", "avgPx": "100",
+                                          "fee": "-0.2", "feeCcy": "USDT",
+                                          "rebate": "0.1", "rebateCcy": "BTC"})
+    with state._connect() as db:
+        assert state._net_inventory(db, "NBentry", "BTC-USDT") == Decimal("2.1")
+
+
+def test_child_split_rebate_reconciled(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="1")
+    state.reserve_protection_intent(
+        entry_client_order_id="NBentry", instrument="BTC-USDT",
+        algo_client_order_id="NBalgo", filled_size="1",
+        take_profit="130", stop_loss="90",
+    )
+    state.save_exit_child_orders("NBentry", "BTC-USDT", ["222"])
+    state.update_exit_child_order("NBentry", "222", {
+        "state": "filled", "sz": "0.5", "accFillSz": "0.5", "avgPx": "110",
+        "fee": "-0.1", "feeCcy": "USDT", "rebate": "0.01", "rebateCcy": "BTC",
+    })
+    with state._connect() as db:
+        assert state._net_inventory(db, "NBentry", "BTC-USDT") == Decimal("0.51")
+
+
+def test_legacy_child_table_migration_keeps_null_fee_incomplete(tmp_path):
+    import sqlite3
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute("""CREATE TABLE exit_child_orders (
+        entry_client_order_id TEXT NOT NULL, exchange_order_id TEXT NOT NULL,
+        instrument TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'unknown',
+        requested_size TEXT NOT NULL DEFAULT '0', cumulative_fill_size TEXT NOT NULL DEFAULT '0',
+        average_fill_price TEXT NOT NULL DEFAULT '0',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(entry_client_order_id, exchange_order_id))""")
+    conn.execute("INSERT INTO exit_child_orders VALUES('NBentry','222','BTC-USDT','filled','0.5','0.5','110',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+    conn.commit()
+    conn.close()
+    state = StateStore(str(path))
+    with state._connect() as db:
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(exit_child_orders)")}
+        assert {"fee", "fee_currency", "rebate", "rebate_currency"} <= columns
+    _filled_entry(state, size="1")
+    with state._connect() as db:
+        with pytest.raises(ValueError, match="incomplete"):
+            state._net_inventory(db, "NBentry", "BTC-USDT")
+
+
 def test_outcome_observation_summary_on_empty_state(tmp_path):
     state = StateStore(str(tmp_path / "state.db"))
     summary = _outcome_observation_summary(state)

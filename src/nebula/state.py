@@ -542,10 +542,10 @@ class StateStore:
                         + base_rebate(child_row["rebate"], child_row["rebate_currency"])
                     )
 
-            if fills and (snapshot_cumulative is None or fills_gross >= snapshot_cumulative):
-                gross, fee = fills_gross, fills_fee
-            elif snapshot_cumulative is not None:
+            if snapshot_cumulative is not None and snapshot_cumulative >= fills_gross:
                 gross, fee = snapshot_cumulative, snapshot_fee
+            elif fills:
+                gross, fee = fills_gross, fills_fee
             elif exchange_order_id or status not in ("reserved", "rejected"):
                 raise ValueError(
                     "Position inventory reconciliation is incomplete: a submitted"
@@ -1124,8 +1124,12 @@ class StateStore:
             raise ValueError("Cumulative fill exceeds requested order size")
         if cumulative > 0 and average <= 0:
             raise ValueError("Filled order has no valid average price")
-        if cumulative > 0 and ("fee" not in order or "feeCcy" not in order):
+        if cumulative > 0 and (
+            order.get("fee") in (None, "") or str(order.get("feeCcy") or "").strip() == ""
+        ):
             raise ValueError("Filled order snapshot is missing fee evidence")
+        if rebate_value > 0 and str(order.get("rebateCcy") or "").strip() == "":
+            raise ValueError("Order snapshot rebate is missing its currency")
         state = str(order.get("state", "unknown"))
         order_id = str(order.get("ordId") or "")
         if order_id and (not order_id.isascii() or not order_id.isdigit()):
@@ -1217,6 +1221,18 @@ class StateStore:
                 if not same:
                     raise ValueError("Protection intent already exists with different parameters; reconcile before changing")
                 return dict(existing)
+            unresolved_sell = db.execute(
+                "SELECT client_order_id FROM intents WHERE position_client_order_id=?"
+                " AND side='sell' AND status IN"
+                " ('reserved','submitting','submission_unknown','acknowledged','live','partially_filled')"
+                " LIMIT 1",
+                (entry_client_order_id,),
+            ).fetchone()
+            if unresolved_sell:
+                raise ValueError(
+                    "Protection reservation is blocked while an unresolved independent"
+                    " sell intent claims the same inventory"
+                )
             db.execute("""INSERT INTO protection_intents(
                 entry_client_order_id,instrument,algo_client_order_id,filled_size,take_profit,stop_loss,status
             ) VALUES(?,?,?,?,?,?, 'reserved')""",
@@ -1332,7 +1348,10 @@ class StateStore:
         state = str(order.get("state", "unknown"))
         if state not in {"live", "partially_filled", "filled", "canceled", "mmp_canceled"}:
             raise ValueError("Unrecognized OCO child order state")
-        fee_evidence_present = "fee" in order and "feeCcy" in order
+        fee_evidence_present = (
+            order.get("fee") not in (None, "")
+            and str(order.get("feeCcy") or "").strip() != ""
+        )
         try:
             child_fee = Decimal(str(order.get("fee", "0") or "0"))
             child_rebate = Decimal(str(order.get("rebate", "0") or "0"))
@@ -1340,6 +1359,8 @@ class StateStore:
             raise ValueError("Invalid fee or rebate in OCO child order") from exc
         if not child_fee.is_finite() or not child_rebate.is_finite() or child_rebate < 0:
             raise ValueError("Invalid fee or rebate in OCO child order")
+        if child_rebate > 0 and str(order.get("rebateCcy") or "").strip() == "":
+            fee_evidence_present = False
         if filled > 0 and not fee_evidence_present:
             child_fee_value = None
             child_fee_currency = None
