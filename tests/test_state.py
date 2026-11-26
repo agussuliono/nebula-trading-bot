@@ -127,6 +127,13 @@ def test_partially_failed_protection_state_cannot_be_resubmitted_or_regressed(tm
 
     store = StateStore(str(tmp_path / "partial-oco.db"))
     store.reserve_entry_intent("NBENTRY1", "BTC-USDT", 123, "buy")
+    store.update_intent("NBENTRY1", "submitting", "1001")
+    store.update_intent("NBENTRY1", "acknowledged", "1001")
+    store.update_intent("NBENTRY1", "filled", "1001")
+    store.save_fill({"instId": "BTC-USDT", "ordId": "1001", "tradeId": "1",
+                     "clOrdId": "NBENTRY1", "side": "buy", "fillSz": "0.004",
+                     "fillPx": "50000", "fee": "-0.01", "feeCcy": "USDT",
+                     "fillTime": "2026-11-26T00:00:00Z"})
     store.reserve_protection_intent(
         entry_client_order_id="NBENTRY1",
         instrument="BTC-USDT",
