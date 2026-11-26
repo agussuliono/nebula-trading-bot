@@ -56,13 +56,14 @@ def test_utc_day_requires_timezone_aware_datetime():
         CircuitBreaker.utc_day(datetime(2026, 11, 19))
 
 
-def test_manual_emergency_stop_blocks_both_buy_and_sell(tmp_path):
+def test_manual_emergency_stop_blocks_entries_but_allows_risk_reducing_sell(tmp_path):
     breaker = CircuitBreaker(StateStore(str(tmp_path / "risk.db")), "10")
     breaker.engage_emergency_stop("operator stop")
     with pytest.raises(SafetyError, match="emergency stop"):
         breaker.check_order_allowed("buy")
-    with pytest.raises(SafetyError, match="emergency stop"):
-        breaker.check_order_allowed("sell")
+    # Risk-reducing sells stay available so an open position can be closed
+    # while the stop is engaged (activation audit P2 separation).
+    assert breaker.check_order_allowed("sell")["manual_stop"] is True
 
 
 def test_daily_loss_halt_allows_risk_reducing_sell(tmp_path):

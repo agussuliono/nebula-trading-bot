@@ -186,10 +186,20 @@ def test_sell_requires_matching_active_position_lock(tmp_path):
     assert client.place_calls == 0
 
 
+def _record_entry_fill(manager, client_order_id):
+    assert manager.state.save_fill({
+        "instId": "BTC-USDT", "ordId": "123", "tradeId": "9001",
+        "clOrdId": client_order_id, "side": "buy", "fillSz": "0.01",
+        "fillPx": "50000", "fee": "-0.01", "feeCcy": "USDT",
+        "fillTime": "2026-11-26T00:00:00Z",
+    })
+
+
 def test_sell_is_linked_to_locked_position(tmp_path):
     client = FakeClient()
     manager = setup(tmp_path, client)
     submit(manager, "NBENTRY3")
+    _record_entry_fill(manager, "NBENTRY3")
     result = manager.submit_limit(inst_id="BTC-USDT", side="sell", size="0.01", price="51000",
                                   client_order_id="NBEXIT3", candle_ts=126,
                                   position_client_order_id="NBENTRY3")
@@ -574,6 +584,7 @@ def test_second_unresolved_sell_exit_is_blocked_for_single_position(tmp_path):
     client = FakeClient()
     manager = setup(tmp_path, client)
     submit(manager, "NBEXITLOCK")
+    _record_entry_fill(manager, "NBEXITLOCK")
     first = manager.submit_limit(
         inst_id="BTC-USDT", side="sell", size="0.01", price="51000",
         client_order_id="NBEXITLOCK1", candle_ts=127,
@@ -595,6 +606,7 @@ def test_independent_sell_exit_is_blocked_when_oco_protection_exists(tmp_path):
     client = FakeClient()
     manager = setup(tmp_path, client)
     submit(manager, "NBOCOLOCK")
+    _record_entry_fill(manager, "NBOCOLOCK")
     manager.state.reserve_protection_intent(
         entry_client_order_id="NBOCOLOCK",
         instrument="BTC-USDT",

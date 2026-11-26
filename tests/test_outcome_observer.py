@@ -186,7 +186,7 @@ def test_base_fee_exit_classified_by_net_inventory(tmp_path):
     buy = _fill("111", "1", "buy", "1", "100", "NBentry")
     buy["fee"], buy["feeCcy"] = "-0.01", "BTC"
     assert state.save_fill(buy)
-    state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry")
+    state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="0.99")
     state.save_order_snapshot("NBexit", {"ordId": "222", "state": "filled", "sz": "0.99",
                                          "accFillSz": "0.99", "avgPx": "110", "fee": "-0.001", "feeCcy": "USDT"})
     _advance(state, "NBexit", "filled", "222")
@@ -208,6 +208,10 @@ def test_base_fee_exit_classified_by_net_inventory(tmp_path):
 def test_protection_transition_payload_distinguishes_status(tmp_path):
     state = StateStore(str(tmp_path / "state.sqlite3"))
     episode = _open_episode(state)
+    state.save_order_snapshot("NBentry", {"ordId": "111", "state": "filled", "sz": "2",
+                                          "accFillSz": "2", "avgPx": "100", "fee": "-0.1", "feeCcy": "USDT"})
+    _advance(state, "NBentry", "filled", "111")
+    assert state.save_fill(_fill("111", "1", "buy", "2", "100", "NBentry"))
     state.reserve_protection_intent(entry_client_order_id="NBentry", instrument="BTC-USDT",
                                     algo_client_order_id="NBalgo", filled_size="2",
                                     take_profit="130", stop_loss="90")

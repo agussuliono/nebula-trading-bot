@@ -131,7 +131,7 @@ class DemoOrderManager:
                 if not position_client_order_id:
                     raise OrderManagerError("Spot sell requires the active position_client_order_id")
                 reserved = self.state.reserve_exit_intent(client_order_id, inst_id, candle_ts, side,
-                                                          position_client_order_id)
+                                                          position_client_order_id, size=size)
         except RuntimeError as exc:
             raise OrderManagerError(str(exc)) from exc
         if not reserved:

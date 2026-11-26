@@ -2,12 +2,38 @@
 import hashlib
 import json
 import os
+import shutil
 import uuid
 import sqlite3
 import stat
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+
+
+class _RestoreLockedConnection:
+    """sqlite3 connection wrapper holding a shared restore lock.
+
+    ``__exit__`` preserves sqlite3 transaction semantics, then closes the
+    connection and releases the lock so restore can take it exclusively.
+    """
+
+    def __init__(self, conn, lock_handle):
+        self._conn = conn
+        self._lock_handle = lock_handle
+
+    def __enter__(self):
+        return self._conn.__enter__()
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return self._conn.__exit__(exc_type, exc, tb)
+        finally:
+            self._conn.close()
+            self._lock_handle.close()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
 
 
 class StateStore:
@@ -63,8 +89,16 @@ class StateStore:
             self._secure_regular_file(self.path + suffix)
 
     def _connect(self):
+        lock_handle = None
         if self.path != ":memory:":
             self._secure_storage_files()
+            # Every connection holds a shared restore lock for its lifetime;
+            # restore takes the exclusive lock, so no writer can interleave
+            # with the file swap.
+            import fcntl
+
+            lock_handle = open(f"{self.path}.restore-lock", "w")
+            fcntl.flock(lock_handle, fcntl.LOCK_SH)
         conn = sqlite3.connect(self.path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         try:
@@ -73,10 +107,14 @@ class StateStore:
             conn.execute("PRAGMA foreign_keys=ON")
             if self.path != ":memory:":
                 self._secure_storage_files()
-            return conn
         except Exception:
             conn.close()
+            if lock_handle is not None:
+                lock_handle.close()
             raise
+        if lock_handle is not None:
+            return _RestoreLockedConnection(conn, lock_handle)
+        return conn
 
     def _init_db(self):
         with self._connect() as db:
@@ -124,6 +162,8 @@ class StateStore:
                 average_fill_price TEXT NOT NULL,
                 fee TEXT NOT NULL,
                 fee_currency TEXT NOT NULL,
+                rebate TEXT,
+                rebate_currency TEXT,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )""")
             db.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -136,6 +176,10 @@ class StateStore:
                 requested_size TEXT NOT NULL DEFAULT '0',
                 cumulative_fill_size TEXT NOT NULL DEFAULT '0',
                 average_fill_price TEXT NOT NULL DEFAULT '0',
+                fee TEXT,
+                fee_currency TEXT,
+                rebate TEXT,
+                rebate_currency TEXT,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY(entry_client_order_id, exchange_order_id)
             )""")
@@ -150,6 +194,8 @@ class StateStore:
                 fill_price TEXT NOT NULL,
                 fee TEXT NOT NULL,
                 fee_currency TEXT NOT NULL,
+                rebate TEXT NOT NULL DEFAULT '0',
+                rebate_currency TEXT NOT NULL DEFAULT '',
                 fill_time TEXT NOT NULL DEFAULT '',
                 raw_json TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -248,6 +294,48 @@ class StateStore:
                             value TEXT NOT NULL
                         )""")
                         db.execute("INSERT OR IGNORE INTO nebula_schema_meta(key,value) VALUES('initialized','1')")
+            for table, column, ddl in (
+                ("order_snapshots", "rebate", "ALTER TABLE order_snapshots ADD COLUMN rebate TEXT"),
+                ("order_snapshots", "rebate_currency", "ALTER TABLE order_snapshots ADD COLUMN rebate_currency TEXT"),
+                ("fills", "rebate", "ALTER TABLE fills ADD COLUMN rebate TEXT NOT NULL DEFAULT '0'"),
+                ("fills", "rebate_currency", "ALTER TABLE fills ADD COLUMN rebate_currency TEXT NOT NULL DEFAULT ''"),
+                ("exit_child_orders", "fee", "ALTER TABLE exit_child_orders ADD COLUMN fee TEXT"),
+                ("exit_child_orders", "fee_currency", "ALTER TABLE exit_child_orders ADD COLUMN fee_currency TEXT"),
+                ("exit_child_orders", "rebate", "ALTER TABLE exit_child_orders ADD COLUMN rebate TEXT"),
+                ("exit_child_orders", "rebate_currency", "ALTER TABLE exit_child_orders ADD COLUMN rebate_currency TEXT"),
+            ):
+                existing_columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                if existing_columns and column not in existing_columns:
+                    db.execute(ddl)
+            snapshot_columns = {row["name"]: row for row in db.execute("PRAGMA table_info(order_snapshots)")}
+            rebate_column = snapshot_columns.get("rebate")
+            if rebate_column is not None and rebate_column["notnull"]:
+                db.execute("""CREATE TABLE order_snapshots_rebuilt (
+                    client_order_id TEXT PRIMARY KEY REFERENCES intents(client_order_id),
+                    exchange_order_id TEXT,
+                    exchange_state TEXT NOT NULL,
+                    requested_size TEXT NOT NULL,
+                    cumulative_fill_size TEXT NOT NULL,
+                    average_fill_price TEXT NOT NULL,
+                    fee TEXT NOT NULL,
+                    fee_currency TEXT NOT NULL,
+                    rebate TEXT,
+                    rebate_currency TEXT,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )""")
+                db.execute("""INSERT INTO order_snapshots_rebuilt(
+                    client_order_id,exchange_order_id,exchange_state,requested_size,
+                    cumulative_fill_size,average_fill_price,fee,fee_currency,rebate,
+                    rebate_currency,updated_at)
+                    SELECT client_order_id,exchange_order_id,exchange_state,requested_size,
+                    cumulative_fill_size,average_fill_price,fee,fee_currency,
+                    CASE WHEN CAST(rebate AS REAL) != 0 OR rebate_currency != ''
+                        THEN rebate ELSE NULL END,
+                    CASE WHEN CAST(rebate AS REAL) != 0 OR rebate_currency != ''
+                        THEN rebate_currency ELSE NULL END,
+                    updated_at FROM order_snapshots""")
+                db.execute("DROP TABLE order_snapshots")
+                db.execute("ALTER TABLE order_snapshots_rebuilt RENAME TO order_snapshots")
 
     @staticmethod
     def make_client_order_id(strategy: str, instrument: str, candle_ts: int, side: str) -> str:
@@ -386,8 +474,184 @@ class StateStore:
             )
             return True
 
+    @staticmethod
+    def _net_inventory(db, position_client_order_id: str, instrument: str):
+        """Reconciled net base inventory for one position, fail-closed.
+
+        Every related order (entry, exit intents, OCO child orders) is
+        reconciled from its fill ledger and/or its order snapshot without
+        double counting: when the snapshot cumulative fill exceeds the
+        ledger, the ledger is incomplete and the snapshot is the evidence.
+        Base-currency fees keep their sign (negative fee, positive rebate).
+        A submitted order with neither fills nor snapshot evidence makes
+        the reconciliation incomplete and raises.
+        """
+        base_ccy = instrument.split("-")[0]
+
+        def signed_base_fee(fee, fee_currency):
+            return Decimal(str(fee)) if fee_currency == base_ccy else Decimal("0")
+
+        def base_rebate(rebate, rebate_currency):
+            if rebate is None or rebate_currency != base_ccy:
+                return Decimal("0")
+            return Decimal(str(rebate))
+
+        orders = []  # (side, client_order_id or None, exchange_order_id or None, child_cumulative or None)
+        entry = db.execute(
+            "SELECT exchange_order_id FROM intents WHERE client_order_id=? AND side='buy'",
+            (position_client_order_id,),
+        ).fetchone()
+        if entry is None:
+            return Decimal("0")
+        entry_status = db.execute(
+            "SELECT status FROM intents WHERE client_order_id=?",
+            (position_client_order_id,),
+        ).fetchone()["status"]
+        orders.append(("buy", position_client_order_id, entry["exchange_order_id"], None, entry_status))
+        legacy_sells = db.execute(
+            "SELECT client_order_id,status,exchange_order_id FROM intents"
+            " WHERE side='sell' AND position_client_order_id IS NULL AND instrument=?",
+            (instrument,),
+        ).fetchall()
+        ambiguous_legacy = []
+        for legacy in legacy_sells:
+            if legacy["status"] != "rejected":
+                ambiguous_legacy.append(legacy)
+                continue
+            if legacy["exchange_order_id"]:
+                ambiguous_legacy.append(legacy)
+                continue
+            snapshot = db.execute(
+                "SELECT cumulative_fill_size FROM order_snapshots WHERE client_order_id=?",
+                (legacy["client_order_id"],),
+            ).fetchone()
+            if snapshot is not None and Decimal(str(snapshot["cumulative_fill_size"])) > 0:
+                ambiguous_legacy.append(legacy)
+                continue
+            ledger_fill = db.execute(
+                "SELECT 1 FROM fills WHERE client_order_id=? LIMIT 1",
+                (legacy["client_order_id"],),
+            ).fetchone()
+            if ledger_fill is not None:
+                ambiguous_legacy.append(legacy)
+        if ambiguous_legacy:
+            raise ValueError(
+                "Position inventory reconciliation is incomplete: a legacy sell"
+                " without a position link cannot be attributed safely"
+            )
+        for row in db.execute(
+            "SELECT client_order_id,exchange_order_id,status FROM intents"
+            " WHERE side='sell' AND position_client_order_id=?",
+            (position_client_order_id,),
+        ).fetchall():
+            orders.append(("sell", row["client_order_id"], row["exchange_order_id"], None, row["status"]))
+        for row in db.execute(
+            "SELECT exchange_order_id,cumulative_fill_size,state,fee,fee_currency,rebate,rebate_currency"
+            " FROM exit_child_orders WHERE entry_client_order_id=?",
+            (position_client_order_id,),
+        ).fetchall():
+            orders.append(("sell", None, row["exchange_order_id"], row, row["state"]))
+
+        related_exchange_ids = {
+            str(order[2]) for order in orders if order[2]
+        }
+        orphan_sell_fills = db.execute(
+            "SELECT exchange_order_id FROM fills WHERE instrument=? AND side='sell'"
+            " AND (client_order_id IS NULL OR client_order_id='')",
+            (instrument,),
+        ).fetchall()
+        if any(str(row["exchange_order_id"]) not in related_exchange_ids
+               for row in orphan_sell_fills):
+            raise ValueError(
+                "Position inventory reconciliation is incomplete: an orphan sell"
+                " fill cannot be attributed to a known order"
+            )
+        net = Decimal("0")
+        for side, client_order_id, exchange_order_id, child_row, status in orders:
+            if status in ("submitting", "submission_unknown") and not exchange_order_id:
+                raise ValueError(
+                    "Position inventory reconciliation is incomplete: an order"
+                    " may have been submitted but its exchange outcome is unknown"
+                )
+            fills = []
+            if exchange_order_id:
+                fills = db.execute(
+                    "SELECT fill_size,fee,fee_currency,rebate,rebate_currency FROM fills"
+                    " WHERE instrument=? AND exchange_order_id=?",
+                    (instrument, str(exchange_order_id)),
+                ).fetchall()
+            fills_gross = sum((Decimal(str(f["fill_size"])) for f in fills), Decimal("0"))
+            fills_fee = sum(
+                (signed_base_fee(f["fee"], f["fee_currency"])
+                 + base_rebate(f["rebate"], f["rebate_currency"]) for f in fills),
+                Decimal("0"),
+            )
+            snapshot_cumulative = None
+            snapshot_fee = Decimal("0")
+            snapshot_fee_complete = True
+            if client_order_id is not None:
+                snapshot = db.execute(
+                    "SELECT cumulative_fill_size,fee,fee_currency,rebate,rebate_currency"
+                    " FROM order_snapshots WHERE client_order_id=?",
+                    (client_order_id,),
+                ).fetchone()
+                if snapshot is not None:
+                    snapshot_cumulative = Decimal(str(snapshot["cumulative_fill_size"]))
+                    if snapshot["rebate"] is None:
+                        snapshot_fee_complete = False
+                    snapshot_fee = (
+                        signed_base_fee(snapshot["fee"], snapshot["fee_currency"])
+                        + base_rebate(snapshot["rebate"], snapshot["rebate_currency"])
+                    )
+            elif child_row is not None:
+                if child_row["state"] == "unknown":
+                    raise ValueError(
+                        "Position inventory reconciliation is incomplete: an OCO"
+                        " child order state is unknown"
+                    )
+                snapshot_cumulative = Decimal(str(child_row["cumulative_fill_size"]))
+                if child_row["fee"] is None or child_row["rebate"] is None:
+                    snapshot_fee_complete = False
+                if child_row["fee"] is not None:
+                    snapshot_fee = (
+                        signed_base_fee(child_row["fee"], child_row["fee_currency"])
+                        + base_rebate(child_row["rebate"], child_row["rebate_currency"])
+                    )
+
+            if snapshot_cumulative is not None and snapshot_cumulative > fills_gross:
+                if not snapshot_fee_complete:
+                    raise ValueError(
+                        "Position inventory reconciliation is incomplete: snapshot"
+                        " fee evidence is incomplete"
+                    )
+                gross, fee = snapshot_cumulative, snapshot_fee
+            elif (
+                snapshot_cumulative is not None
+                and snapshot_cumulative == fills_gross
+                and snapshot_fee_complete
+            ):
+                gross, fee = snapshot_cumulative, snapshot_fee
+            elif fills:
+                gross, fee = fills_gross, fills_fee
+            elif snapshot_cumulative is not None:
+                gross, fee = snapshot_cumulative, snapshot_fee
+            elif exchange_order_id or status not in ("reserved", "rejected"):
+                raise ValueError(
+                    "Position inventory reconciliation is incomplete: a submitted"
+                    " order has neither fill ledger nor snapshot evidence"
+                )
+            else:
+                gross, fee = Decimal("0"), Decimal("0")
+            if side == "buy":
+                net += gross + fee
+            else:
+                net -= gross
+                net += fee
+        return net
+
     def reserve_exit_intent(self, client_order_id: str, instrument: str, candle_ts: int,
-                            side: str, position_client_order_id: str) -> bool:
+                            side: str, position_client_order_id: str,
+                            size: str) -> bool:
         """Reserve an exit only for the currently locked position."""
         if side != "sell":
             raise ValueError("exit intents must be Spot sell orders")
@@ -417,6 +681,22 @@ class StateStore:
             if protection:
                 raise RuntimeError(
                     "Independent sell order is blocked while a durable OCO protection intent exists"
+                )
+            # A sell may never exceed the position's reconciled net
+            # inventory from linked fills, regardless of other balances.
+            try:
+                requested = Decimal(str(size))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise RuntimeError("Exit size is not a valid decimal") from exc
+            if not requested.is_finite() or requested <= 0:
+                raise RuntimeError("Exit size must be a finite positive decimal")
+            try:
+                net = self._net_inventory(db, position_client_order_id, instrument)
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            if requested > net:
+                raise RuntimeError(
+                    "Exit size exceeds the position's reconciled net inventory"
                 )
             db.execute("INSERT INTO intents(client_order_id,instrument,candle_ts,side,status,position_client_order_id) VALUES(?,?,?,?,'reserved',?)",
                        (client_order_id, instrument, candle_ts, side, position_client_order_id))
@@ -749,6 +1029,139 @@ class StateStore:
                 (event_type, client_order_id, payload),
             )
 
+    def backup_to(self, destination: str) -> dict[str, Any]:
+        """Write a consistent SQLite backup and verify its integrity."""
+        if self.path == ":memory:":
+            raise ValueError("Cannot back up an in-memory state database")
+        target = str(destination)
+        if os.path.abspath(target) == os.path.abspath(self.path):
+            raise ValueError("Backup destination must differ from the state database")
+        with self._connect() as source:
+            backup = sqlite3.connect(target)
+            try:
+                source.backup(backup)
+                integrity = backup.execute("PRAGMA integrity_check").fetchone()[0]
+            finally:
+                backup.close()
+        if integrity != "ok":
+            raise ValueError("State backup failed its integrity check")
+        os.chmod(target, 0o600)
+        return {"status": "state_backup_created", "integrity": integrity}
+
+    def restore_from(self, source_path: str) -> dict[str, Any]:
+        """Replace state with a verified backup; safety state must be intact."""
+        if self.path == ":memory:":
+            raise ValueError("Cannot restore into an in-memory state database")
+        source = str(source_path)
+        if os.path.abspath(source) == os.path.abspath(self.path):
+            raise ValueError("Restore source must differ from the state database")
+        probe = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+        try:
+            integrity = probe.execute("PRAGMA integrity_check").fetchone()[0]
+            tables = {row[0] for row in probe.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            required = {
+                "emergency_stop", "daily_pnl_events", "audit_events",
+                "intents", "position_lock", "nebula_schema_meta",
+            }
+            stop_row = None
+            if required.issubset(tables):
+                stop_row = probe.execute(
+                    "SELECT engaged FROM emergency_stop WHERE singleton=1"
+                ).fetchone()
+        finally:
+            probe.close()
+        if integrity != "ok" or stop_row is None:
+            raise ValueError("Restore source failed integrity or safety-state validation")
+        # Hold an exclusive restore lock for the whole operation so no other
+        # restore or operator action can interleave with the file swap.
+        import fcntl
+
+        lock_handle = open(f"{self.path}.restore-lock", "w")
+        try:
+            try:
+                fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise ValueError("Another restore is in progress; restore refused") from exc
+            guard = sqlite3.connect(self.path, timeout=0)
+            try:
+                checkpoint = guard.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if checkpoint is None or checkpoint[0] != 0 or checkpoint[1] != checkpoint[2]:
+                    raise ValueError("WAL checkpoint incomplete; restore refused")
+                guard.execute("BEGIN IMMEDIATE")
+                current_stop = guard.execute(
+                    "SELECT engaged FROM emergency_stop WHERE singleton=1"
+                ).fetchone()
+                lock_row = guard.execute(
+                    "SELECT 1 FROM position_lock WHERE singleton=1"
+                ).fetchone()
+                open_intent = guard.execute(
+                    "SELECT client_order_id FROM intents WHERE status NOT IN"
+                    " ('filled','canceled','rejected','mmp_canceled','expired') LIMIT 1"
+                ).fetchone()
+                open_protection = guard.execute(
+                    "SELECT entry_client_order_id FROM protection_intents WHERE status NOT IN"
+                    " ('completed','canceled','expired','rejected') LIMIT 1"
+                ).fetchone()
+                guard.execute("ROLLBACK")
+            except sqlite3.OperationalError as exc:
+                raise ValueError("State database is in use; restore refused") from exc
+            finally:
+                guard.close()
+            if lock_row is not None or open_intent is not None or open_protection is not None:
+                raise ValueError(
+                    "Restore refused while a position, order, or protection is active"
+                )
+            currently_engaged = bool(current_stop and current_stop[0])
+            staging = f"{self.path}.restore-staging"
+            shutil.copyfile(source, staging)
+            os.chmod(staging, 0o600)
+            engaged = bool(stop_row[0])
+            if currently_engaged and not engaged:
+                # Make the stop monotonic inside the staging copy before the
+                # atomic replace, so no crash window can clear it.
+                staging_db = sqlite3.connect(staging)
+                try:
+                    staging_db.execute(
+                        "UPDATE emergency_stop SET engaged=1,reason=?,"
+                        "updated_at=CURRENT_TIMESTAMP WHERE singleton=1",
+                        ("emergency stop preserved across state restore",),
+                    )
+                    staging_db.execute(
+                        "INSERT INTO audit_events(event_type,client_order_id,details_json)"
+                        " VALUES(?,?,?)",
+                        ("emergency_stop_preserved_on_restore", None, "{}"),
+                    )
+                    staging_db.commit()
+                finally:
+                    staging_db.close()
+                engaged = True
+            for suffix in ("-wal", "-shm"):
+                try:
+                    os.remove(self.path + suffix)
+                except FileNotFoundError:
+                    pass
+            os.replace(staging, self.path)
+            return {"status": "state_restored", "integrity": integrity,
+                    "emergency_stop_engaged": engaged}
+        finally:
+            lock_handle.close()
+
+    def list_cycle_events(self) -> list[dict[str, Any]]:
+        """All completed-cycle events, without the general event-list cap."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM audit_events WHERE event_type=?"
+                " ORDER BY id ASC",
+                ("runtime_cycle_completed",),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["details"] = json.loads(item.pop("details_json"))
+                result.append(item)
+            return result
+
     def list_events(self, limit: int = 100) -> list[dict[str, Any]]:
         if not 1 <= limit <= 1000:
             raise ValueError("limit must be between 1 and 1000")
@@ -788,12 +1201,24 @@ class StateStore:
             raise ValueError("Invalid fee in exchange order snapshot")
         # Preserve OKX sign: negative is a fee, positive is a rebate.
         fee = fee_value
+        try:
+            rebate_value = Decimal(str(order.get("rebate", "0") or "0"))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("Invalid rebate in exchange order snapshot") from exc
+        if not rebate_value.is_finite() or rebate_value < 0:
+            raise ValueError("Invalid rebate in exchange order snapshot")
         if requested <= 0:
             raise ValueError("Exchange order snapshot has no valid requested size")
         if cumulative > requested:
             raise ValueError("Cumulative fill exceeds requested order size")
         if cumulative > 0 and average <= 0:
             raise ValueError("Filled order has no valid average price")
+        if cumulative > 0 and (
+            order.get("fee") in (None, "") or str(order.get("feeCcy") or "").strip() == ""
+        ):
+            raise ValueError("Filled order snapshot is missing fee evidence")
+        if rebate_value > 0 and str(order.get("rebateCcy") or "").strip() == "":
+            raise ValueError("Order snapshot rebate is missing its currency")
         state = str(order.get("state", "unknown"))
         order_id = str(order.get("ordId") or "")
         if order_id and (not order_id.isascii() or not order_id.isdigit()):
@@ -836,15 +1261,17 @@ class StateStore:
                     raise ValueError("Exchange order state made an invalid lifecycle transition")
             db.execute("""INSERT INTO order_snapshots(
                 client_order_id,exchange_order_id,exchange_state,requested_size,cumulative_fill_size,
-                average_fill_price,fee,fee_currency,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                average_fill_price,fee,fee_currency,rebate,rebate_currency,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
             ON CONFLICT(client_order_id) DO UPDATE SET
                 exchange_order_id=excluded.exchange_order_id, exchange_state=excluded.exchange_state,
                 requested_size=excluded.requested_size,cumulative_fill_size=excluded.cumulative_fill_size,
                 average_fill_price=excluded.average_fill_price,fee=excluded.fee,
-                fee_currency=excluded.fee_currency,updated_at=CURRENT_TIMESTAMP""",
+                fee_currency=excluded.fee_currency,rebate=excluded.rebate,
+                rebate_currency=excluded.rebate_currency,updated_at=CURRENT_TIMESTAMP""",
                 (client_order_id, str(order.get("ordId") or ""), state, str(requested), str(cumulative),
-                 str(average), str(fee), str(order.get("feeCcy") or "")))
+                 str(average), str(fee), str(order.get("feeCcy") or ""),
+                 str(rebate_value), str(order.get("rebateCcy") or "")))
             row = db.execute("SELECT * FROM order_snapshots WHERE client_order_id=?", (client_order_id,)).fetchone()
             return dict(row)
 
@@ -870,6 +1297,11 @@ class StateStore:
                                (entry_client_order_id,)).fetchone()
             if not entry or entry["side"] != "buy" or entry["instrument"] != instrument:
                 raise ValueError("Protection must belong to the matching Spot buy entry")
+            net_inventory = self._net_inventory(db, entry_client_order_id, instrument)
+            if qty > net_inventory:
+                raise ValueError(
+                    "Protection size exceeds the position's reconciled net inventory"
+                )
             existing = db.execute("SELECT * FROM protection_intents WHERE entry_client_order_id=?",
                                   (entry_client_order_id,)).fetchone()
             if existing:
@@ -878,6 +1310,20 @@ class StateStore:
                 if not same:
                     raise ValueError("Protection intent already exists with different parameters; reconcile before changing")
                 return dict(existing)
+            unresolved_sell = db.execute(
+                "SELECT client_order_id FROM intents WHERE side='sell'"
+                " AND (position_client_order_id=?"
+                " OR (position_client_order_id IS NULL AND instrument=?))"
+                " AND status IN"
+                " ('reserved','submitting','submission_unknown','acknowledged','live','partially_filled')"
+                " LIMIT 1",
+                (entry_client_order_id, instrument),
+            ).fetchone()
+            if unresolved_sell:
+                raise ValueError(
+                    "Protection reservation is blocked while an unresolved independent"
+                    " sell intent claims the same inventory"
+                )
             db.execute("""INSERT INTO protection_intents(
                 entry_client_order_id,instrument,algo_client_order_id,filled_size,take_profit,stop_loss,status
             ) VALUES(?,?,?,?,?,?, 'reserved')""",
@@ -993,6 +1439,29 @@ class StateStore:
         state = str(order.get("state", "unknown"))
         if state not in {"live", "partially_filled", "filled", "canceled", "mmp_canceled"}:
             raise ValueError("Unrecognized OCO child order state")
+        fee_evidence_present = (
+            order.get("fee") not in (None, "")
+            and str(order.get("feeCcy") or "").strip() != ""
+        )
+        try:
+            child_fee = Decimal(str(order.get("fee", "0") or "0"))
+            child_rebate = Decimal(str(order.get("rebate", "0") or "0"))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("Invalid fee or rebate in OCO child order") from exc
+        if not child_fee.is_finite() or not child_rebate.is_finite() or child_rebate < 0:
+            raise ValueError("Invalid fee or rebate in OCO child order")
+        if child_rebate > 0 and str(order.get("rebateCcy") or "").strip() == "":
+            fee_evidence_present = False
+        if filled > 0 and not fee_evidence_present:
+            child_fee_value = None
+            child_fee_currency = None
+            child_rebate_value = None
+            child_rebate_currency = None
+        else:
+            child_fee_value = str(child_fee)
+            child_fee_currency = str(order.get("feeCcy") or "")
+            child_rebate_value = str(child_rebate)
+            child_rebate_currency = str(order.get("rebateCcy") or "")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute("SELECT cumulative_fill_size FROM exit_child_orders WHERE entry_client_order_id=? AND exchange_order_id=?",
@@ -1002,9 +1471,12 @@ class StateStore:
             if filled < Decimal(old["cumulative_fill_size"]):
                 raise ValueError("OCO child cumulative fill regressed")
             db.execute("""UPDATE exit_child_orders SET state=?,requested_size=?,cumulative_fill_size=?,
-                average_fill_price=?,updated_at=CURRENT_TIMESTAMP
+                average_fill_price=?,fee=?,fee_currency=?,rebate=?,rebate_currency=?,
+                updated_at=CURRENT_TIMESTAMP
                 WHERE entry_client_order_id=? AND exchange_order_id=?""",
-                (state,str(requested),str(filled),str(average),entry_client_order_id,str(exchange_order_id)))
+                (state,str(requested),str(filled),str(average),child_fee_value,
+                 child_fee_currency,child_rebate_value,
+                 child_rebate_currency,entry_client_order_id,str(exchange_order_id)))
             row = db.execute("SELECT * FROM exit_child_orders WHERE entry_client_order_id=? AND exchange_order_id=?",
                              (entry_client_order_id,str(exchange_order_id))).fetchone()
             return dict(row)
@@ -1028,6 +1500,9 @@ class StateStore:
         size = parse(fill["fillSz"], "fillSz")
         price = parse(fill["fillPx"], "fillPx")
         fee = parse(fill["fee"], "fee", signed=True)
+        rebate = parse(fill.get("rebate", "0") or "0", "rebate", signed=True)
+        if rebate < 0:
+            raise ValueError("Invalid rebate in OKX fill")
         instrument, order_id, trade_id = str(fill["instId"]), str(fill["ordId"]), str(fill["tradeId"])
         if not order_id.isdigit() or not trade_id.lstrip("-").isdigit():
             raise ValueError("Invalid OKX order/trade ID")
@@ -1039,18 +1514,252 @@ class StateStore:
             if existing:
                 if existing["raw_json"] != raw:
                     # Fields like ts may vary in representation; compare economic fields instead.
-                    old = db.execute("SELECT side,fill_size,fill_price,fee,fee_currency FROM fills WHERE instrument=? AND exchange_order_id=? AND trade_id=?",
+                    old = db.execute("SELECT side,fill_size,fill_price,fee,fee_currency,rebate,rebate_currency FROM fills WHERE instrument=? AND exchange_order_id=? AND trade_id=?",
                                      (instrument,order_id,trade_id)).fetchone()
-                    new_values = (fill["side"],str(size),str(price),str(fee),str(fill["feeCcy"]))
+                    new_values = (fill["side"],str(size),str(price),str(fee),str(fill["feeCcy"]),
+                                  str(rebate),str(fill.get("rebateCcy") or ""))
                     if tuple(old) != new_values:
                         raise ValueError("Conflicting duplicate OKX trade ID; ledger integrity check failed")
                 return False
             db.execute("""INSERT INTO fills(instrument,exchange_order_id,trade_id,client_order_id,side,
-                fill_size,fill_price,fee,fee_currency,fill_time,raw_json)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                fill_size,fill_price,fee,fee_currency,rebate,rebate_currency,fill_time,raw_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (instrument,order_id,trade_id,str(fill.get("clOrdId") or ""),fill["side"],str(size),str(price),
-                 str(fee),str(fill["feeCcy"]),str(fill.get("fillTime") or fill.get("ts") or ""),raw))
+                 str(fee),str(fill["feeCcy"]),str(rebate),str(fill.get("rebateCcy") or ""),
+                 str(fill.get("fillTime") or fill.get("ts") or ""),raw))
             return True
+
+    def reconcile_legacy_sell(self, sell_client_order_id: str,
+                              position_client_order_id: str, evidence: str) -> dict[str, Any]:
+        """Manually attribute one legacy sell to its owning buy position, audited."""
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ValueError("Manual legacy reconciliation requires supporting evidence")
+        evidence = evidence.strip()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            sell = db.execute(
+                "SELECT instrument,side,position_client_order_id,exchange_order_id"
+                " FROM intents WHERE client_order_id=?",
+                (sell_client_order_id,),
+            ).fetchone()
+            if sell is None or sell["side"] != "sell" or sell["position_client_order_id"] is not None:
+                raise ValueError("Only an unlinked legacy sell intent can be reconciled")
+            if not sell["exchange_order_id"] or evidence != str(sell["exchange_order_id"]):
+                raise ValueError(
+                    "Legacy reconciliation evidence must be the sell exchange order ID"
+                )
+            position = db.execute(
+                "SELECT instrument,side,exchange_order_id FROM intents WHERE client_order_id=?",
+                (position_client_order_id,),
+            ).fetchone()
+            if position is None or position["side"] != "buy":
+                raise ValueError("Legacy sell owner must be an existing Spot buy position")
+            if position["instrument"] != sell["instrument"]:
+                raise ValueError("Legacy sell instrument does not match the owning position")
+            if not position["exchange_order_id"]:
+                raise ValueError(
+                    "Legacy sell ownership cannot be proven without a position exchange order ID"
+                )
+
+            def parse_fill_time_ms(value: Any) -> int:
+                text = str(value or "").strip()
+                if text.isdigit():
+                    return int(text)
+                try:
+                    from datetime import datetime
+
+                    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise ValueError("Legacy sell ownership cannot be proven from a malformed fill timestamp") from exc
+                if parsed.tzinfo is None:
+                    raise ValueError("Legacy sell ownership cannot be proven from a malformed fill timestamp")
+                return int(parsed.timestamp() * 1000)
+
+            def validated_fills(client_order_id: str, exchange_order_id: str, side: str):
+                rows = db.execute(
+                    "SELECT side,client_order_id,exchange_order_id,fill_size,fill_time"
+                    " FROM fills WHERE instrument=?"
+                    " AND (client_order_id=? OR exchange_order_id=?)",
+                    (sell["instrument"], client_order_id, exchange_order_id),
+                ).fetchall()
+                if not rows:
+                    raise ValueError("Legacy sell ownership cannot be proven without timed fills")
+                total = Decimal("0")
+                times: list[int] = []
+                for row in rows:
+                    if row["side"] != side:
+                        raise ValueError(
+                            f"Legacy sell ownership cannot be proven from a non-{side} fill"
+                        )
+                    if str(row["exchange_order_id"]) != exchange_order_id:
+                        raise ValueError(
+                            "Legacy sell fill exchange order ID does not match the reconciled order"
+                        )
+                    fill_client = str(row["client_order_id"] or "")
+                    if fill_client not in {"", client_order_id}:
+                        raise ValueError(
+                            "Legacy sell fill client order ID does not match the reconciled order"
+                        )
+                    try:
+                        size = Decimal(str(row["fill_size"]))
+                    except (InvalidOperation, TypeError, ValueError) as exc:
+                        raise ValueError("Legacy sell ownership cannot be proven from an invalid fill size") from exc
+                    if not size.is_finite() or size <= 0:
+                        raise ValueError("Legacy sell ownership cannot be proven from an invalid fill size")
+                    total += size
+                    times.append(parse_fill_time_ms(row["fill_time"]))
+                return total, min(times), len(rows)
+
+            sell_total, first_sell_fill_ms, sell_fill_count = validated_fills(
+                sell_client_order_id, str(sell["exchange_order_id"]), "sell")
+            position_total, first_position_fill_ms, position_fill_count = validated_fills(
+                position_client_order_id, str(position["exchange_order_id"]), "buy")
+            if first_sell_fill_ms < first_position_fill_ms:
+                raise ValueError("Legacy sell predates the candidate owning position")
+            other_position_rows = db.execute(
+                "SELECT i.client_order_id AS intent_client_order_id,"
+                " f.client_order_id AS fill_client_order_id,f.fill_size,f.fill_time FROM intents i"
+                " JOIN fills f ON f.instrument=i.instrument"
+                " AND f.exchange_order_id=i.exchange_order_id AND f.side='buy'"
+                " WHERE i.instrument=? AND i.side='buy' AND i.client_order_id<>?",
+                (sell["instrument"], position_client_order_id),
+            ).fetchall()
+            other_positions: dict[str, dict[str, Any]] = {}
+            for row in other_position_rows:
+                other_id = str(row["intent_client_order_id"])
+                fill_client = str(row["fill_client_order_id"] or "")
+                if fill_client not in {"", other_id}:
+                    raise ValueError(
+                        "Legacy sell ownership is ambiguous because another buy fill identity conflicts"
+                    )
+                try:
+                    fill_size = Decimal(str(row["fill_size"]))
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "Legacy sell ownership cannot be proven from an invalid fill size"
+                    ) from exc
+                if not fill_size.is_finite() or fill_size <= 0:
+                    raise ValueError(
+                        "Legacy sell ownership cannot be proven from an invalid fill size"
+                    )
+                fill_ms = parse_fill_time_ms(row["fill_time"])
+                other = other_positions.setdefault(
+                    other_id, {"first_ms": fill_ms, "buy_total": Decimal("0"), "buy_events": []})
+                other["first_ms"] = min(fill_ms, other["first_ms"])
+                other["buy_total"] += fill_size
+                other["buy_events"].append((fill_ms, fill_size))
+
+            def proven_closed_before(other_id: str, buy_total: Decimal,
+                                     buy_events: list[tuple[int, Decimal]]) -> bool:
+                sell_events: list[tuple[int, Decimal]] = []
+                last_sell_ms: int | None = None
+                sell_orders: list[tuple[str, str]] = []
+                for row in db.execute(
+                    "SELECT client_order_id,exchange_order_id FROM intents"
+                    " WHERE instrument=? AND side='sell' AND position_client_order_id=?"
+                    " AND exchange_order_id IS NOT NULL",
+                    (sell["instrument"], other_id),
+                ).fetchall():
+                    sell_orders.append(
+                        (str(row["client_order_id"]), str(row["exchange_order_id"])))
+                for row in db.execute(
+                    "SELECT exchange_order_id,instrument FROM exit_child_orders"
+                    " WHERE entry_client_order_id=?",
+                    (other_id,),
+                ).fetchall():
+                    if row["instrument"] != sell["instrument"]:
+                        return False
+                    sell_orders.append(("", str(row["exchange_order_id"])))
+                for sell_client, sell_exchange in sell_orders:
+                    for row in db.execute(
+                        "SELECT client_order_id,fill_size,fill_time FROM fills"
+                        " WHERE instrument=? AND side='sell' AND exchange_order_id=?",
+                        (sell["instrument"], sell_exchange),
+                    ).fetchall():
+                        fill_client = str(row["client_order_id"] or "")
+                        if fill_client not in {"", sell_client}:
+                            return False
+                        try:
+                            fill_size = Decimal(str(row["fill_size"]))
+                        except (InvalidOperation, TypeError, ValueError):
+                            return False
+                        if not fill_size.is_finite() or fill_size <= 0:
+                            return False
+                        fill_ms = parse_fill_time_ms(row["fill_time"])
+                        sell_events.append((fill_ms, fill_size))
+                        last_sell_ms = fill_ms if last_sell_ms is None else max(
+                            fill_ms, last_sell_ms)
+                if last_sell_ms is None or last_sell_ms >= first_position_fill_ms:
+                    return False
+                inventory = Decimal("0")
+                buy_index = 0
+                sorted_buys = sorted(buy_events)
+                for sell_ms, sell_size in sorted(sell_events):
+                    while buy_index < len(sorted_buys) and sorted_buys[buy_index][0] < sell_ms:
+                        inventory += sorted_buys[buy_index][1]
+                        buy_index += 1
+                    if sell_size > inventory:
+                        return False
+                    inventory -= sell_size
+                while buy_index < len(sorted_buys):
+                    inventory += sorted_buys[buy_index][1]
+                    buy_index += 1
+                return inventory == 0
+
+            for other_id, other in other_positions.items():
+                other_ms = other["first_ms"]
+                if other_ms > first_sell_fill_ms:
+                    continue
+                if other_ms >= first_position_fill_ms:
+                    raise ValueError(
+                        "Legacy sell ownership is ambiguous because another buy position intervenes"
+                    )
+                if not proven_closed_before(other_id, other["buy_total"], other["buy_events"]):
+                    raise ValueError(
+                        "Legacy sell ownership is ambiguous because an earlier buy position "
+                        "is not proven closed"
+                    )
+            known_buy_exchange_ids = {
+                str(row["exchange_order_id"])
+                for row in db.execute(
+                    "SELECT exchange_order_id FROM intents"
+                    " WHERE instrument=? AND side='buy' AND exchange_order_id IS NOT NULL",
+                    (sell["instrument"],),
+                ).fetchall()
+            }
+            for row in db.execute(
+                "SELECT exchange_order_id,fill_time FROM fills"
+                " WHERE instrument=? AND side='buy'",
+                (sell["instrument"],),
+            ).fetchall():
+                if str(row["exchange_order_id"]) in known_buy_exchange_ids:
+                    continue
+                fill_ms = parse_fill_time_ms(row["fill_time"])
+                if fill_ms <= first_sell_fill_ms:
+                    raise ValueError(
+                        "Legacy sell ownership is ambiguous because an unknown buy fill intervenes"
+                    )
+            if sell_total > position_total:
+                raise ValueError("Legacy sell exceeds the candidate owning position fills")
+            db.execute(
+                "UPDATE intents SET position_client_order_id=? WHERE client_order_id=?",
+                (position_client_order_id, sell_client_order_id),
+            )
+            db.execute(
+                "INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
+                ("legacy_sell_reconciled", sell_client_order_id,
+                 json.dumps({"position_client_order_id": position_client_order_id,
+                             "instrument": sell["instrument"],
+                             "evidence": evidence,
+                             "sell_fill_count": sell_fill_count,
+                             "position_fill_count": position_fill_count,
+                             "first_sell_fill_time_ms": first_sell_fill_ms,
+                             "first_position_fill_time_ms": first_position_fill_ms},
+                            sort_keys=True)),
+            )
+            row = db.execute("SELECT * FROM intents WHERE client_order_id=?",
+                             (sell_client_order_id,)).fetchone()
+            return dict(row)
 
     def get_position_context(self, position_client_order_id: str) -> dict[str, Any]:
         """Return restart-reconciliation facts for the active position only."""

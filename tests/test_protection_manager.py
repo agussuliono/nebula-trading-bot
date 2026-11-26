@@ -182,7 +182,7 @@ def test_prepare_requires_position_lock_owner(tmp_path):
     store.update_intent('NBENTRY1','submitting')
     store.update_intent('NBENTRY1','acknowledged','1')
     store.update_intent('NBENTRY1','filled','1')
-    store.save_order_snapshot('NBENTRY1', {'ordId':'1','state':'filled','sz':'1','accFillSz':'1','avgPx':'10'})
+    store.save_order_snapshot('NBENTRY1', {'ordId':'1','state':'filled','sz':'1','accFillSz':'1','avgPx':'10','fee':'-0.01','feeCcy':'USDT'})
     with pytest.raises(ProtectionManagerError, match='lock'):
         DemoProtectionManager(PublicDemoStub(), store).prepare(entry_client_order_id='NBENTRY1', take_profit='12', stop_loss='9')
 
@@ -438,7 +438,7 @@ def test_protection_intent_survives_state_store_restart(tmp_path):
     store.update_intent('NBENTRY1','acknowledged','10001')
     store.update_intent('NBENTRY1','filled','10001')
     store.save_order_snapshot('NBENTRY1', {'ordId':'10001','state':'filled','sz':'0.01',
-        'accFillSz':'0.004','avgPx':'50000'})
+        'accFillSz':'0.004','avgPx':'50000','fee':'-0.01','feeCcy':'USDT'})
     DemoProtectionManager(PublicDemoStub(), store).prepare(
         entry_client_order_id='NBENTRY1', take_profit='52000', stop_loss='48000')
     restarted = StateStore(str(path))

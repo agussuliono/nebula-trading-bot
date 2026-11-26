@@ -111,10 +111,12 @@ class CircuitBreaker:
         if side not in {"buy", "sell"}:
             raise ValueError("side must be buy or sell")
         state = self.status(now=now)
-        # Manual emergency stop blocks all new regular orders. The exchange-level
-        # kill switch independently blocks every write endpoint, including OCO.
-        if state["manual_stop"]:
-            raise SafetyError("Order submission blocked by emergency stop")
+        # Manual emergency stop blocks new risk-taking entries. Risk-reducing
+        # sells stay allowed so an open position can still be closed while the
+        # stop is engaged; the exchange-level kill switch independently blocks
+        # every write endpoint, including OCO.
+        if side == "buy" and state["manual_stop"]:
+            raise SafetyError("New entries blocked by emergency stop")
         # Daily loss lockout blocks new risk-taking entries, not risk-reducing sells.
         if side == "buy" and state["daily_loss_tripped"]:
             raise SafetyError("New entries blocked by daily loss circuit breaker")
