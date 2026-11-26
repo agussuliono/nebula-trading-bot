@@ -151,7 +151,7 @@ def test_full_spot_position_lifecycle_survives_restart_and_releases_only_when_fl
         entry_client_order_id=ENTRY_ID, take_profit="110", stop_loss="90",
     )
     assert reserved["status"] == "reserved"
-    assert reserved["filled_size"] == "0.01"
+    assert reserved["filled_size"] == "0.009"  # net of the -0.001 BTC base fee
 
     active = protection.submit_reserved(ENTRY_ID)
     assert active["status"] == "active"
