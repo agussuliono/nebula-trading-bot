@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Mapping, Optional, Sequence
 
+from nebula.research_events import ed25519_sign, ed25519_verify
 from nebula.research_registry import (
     StatResult,
     canonical_json,
@@ -31,6 +32,12 @@ ALLOWED_HYPOTHESIS_FAMILIES = frozenset(
     {"regime_filter", "ema_atr_plateau", "volatility_position_scale"}
 )
 FIXTURE_KINDS = frozenset({"public", "synthetic"})
+# Pinned catalog-signing public key (Ed25519). The matching private seed is
+# held by the catalog operator outside this repository; rotating the key
+# requires a reviewed code change.
+CATALOG_SIGNING_PUBLIC_KEY_HEX = (
+    "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,11 @@ def catalog_digest(entries: Mapping[str, CatalogEntry]) -> str:
         for source_id, entry in sorted(entries.items())
     }
     return sha256_hex(canonical_json(payload))
+
+
+def sign_catalog(entries: Mapping[str, CatalogEntry], seed: bytes) -> str:
+    """Sign a catalog digest with the operator seed (hex signature)."""
+    return ed25519_sign(seed, bytes.fromhex(catalog_digest(entries))).hex()
 
 
 @dataclass(frozen=True)
@@ -92,6 +104,7 @@ def verify_fixture(
     manifest: FixtureManifest,
     dataset: bytes,
     catalog_entries: Mapping[str, CatalogEntry],
+    catalog_signature_hex: str,
     frozen: "FrozenProtocol",
     *,
     deployment_gate_passed: bool = False,
@@ -108,6 +121,18 @@ def verify_fixture(
         reasons.append("frozen protocol hash mismatch")
     if catalog_digest(catalog_entries) != frozen.protocol.catalog_sha256:
         reasons.append("fixture catalog does not match frozen trust anchor")
+    try:
+        signature_ok = ed25519_verify(
+            bytes.fromhex(CATALOG_SIGNING_PUBLIC_KEY_HEX),
+            bytes.fromhex(catalog_digest(catalog_entries)),
+            bytes.fromhex(catalog_signature_hex),
+        )
+    except (ValueError, TypeError):
+        signature_ok = False
+    if not signature_ok:
+        reasons.append("fixture catalog signature invalid")
+    if manifest.sha256 not in frozen.protocol.dataset_hashes.values():
+        reasons.append("fixture hash not in frozen dataset hashes")
     if not manifest.sha256:
         reasons.append("manifest hash missing")
     elif hashlib.sha256(dataset).hexdigest() != manifest.sha256:
@@ -198,6 +223,15 @@ def freeze_protocol(protocol: Protocol) -> FrozenProtocol:
         raise ValueError("prospective minimum duration must be positive")
     if not 0.0 < protocol.prospective_min_completeness <= 1.0:
         raise ValueError("prospective minimum completeness must be within (0, 1]")
+    if (
+        not math.isfinite(protocol.promotion_threshold)
+        or not 0.0 < protocol.promotion_threshold < 1.0
+    ):
+        raise ValueError("promotion threshold must be finite and within (0, 1)")
+    if not math.isfinite(protocol.fee_bps) or protocol.fee_bps < 0:
+        raise ValueError("fee_bps must be finite and non-negative")
+    if not math.isfinite(protocol.slippage_bps) or protocol.slippage_bps < 0:
+        raise ValueError("slippage_bps must be finite and non-negative")
     if not protocol.dataset_hashes or any(
         not value for value in protocol.dataset_hashes.values()
     ):
@@ -298,26 +332,34 @@ def _correlation_digest(trials: Sequence[Sequence[float]]) -> str:
     return sha256_hex(canonical_json({"correlation": matrix}))
 
 
-def build_dsr_artifacts(
-    trials: Sequence[Sequence[float]], registry_trial_count: int
-) -> DsrArtifacts:
+def build_dsr_artifacts(registry, experiment_id: str) -> DsrArtifacts:
+    trials = [returns for _, returns in registry.trial_returns(experiment_id)]
     sample_count = len(trials[0]) if trials else 0
     return DsrArtifacts(
         trial_returns_sha256=_trials_digest(trials),
         correlation_sha256=_correlation_digest(trials),
         sample_count=sample_count,
-        registry_trial_count=registry_trial_count,
+        registry_trial_count=len(trials),
     )
 
 
 def evaluate_dsr_gate(
-    trials: Sequence[Sequence[float]],
-    selected_index: int,
-    artifacts: DsrArtifacts,
     registry,
     experiment_id: str,
+    selected_trial_id: str,
+    artifacts: DsrArtifacts,
 ) -> StatResult:
-    """DSR gate: artifacts must bind to the actual trial returns."""
+    """DSR gate: returns are loaded from the registry by trial_id."""
+    try:
+        stored = registry.trial_returns(experiment_id)
+    except Exception:
+        return StatResult.inconclusive("registry trial returns unavailable")
+    trials = [returns for _, returns in stored]
+    selected_index = next(
+        (i for i, (tid, _) in enumerate(stored) if tid == selected_trial_id), -1
+    )
+    if selected_index < 0:
+        return StatResult.inconclusive("selected trial not in registry")
     if not trials:
         return StatResult.inconclusive("DSR artifact missing")
     if any(not math.isfinite(value) for trial in trials for value in trial):
@@ -341,9 +383,7 @@ class PromotionEvidence:
 
     snapshot_sha256: str
     walk_forward_sha256: str
-    walk_forward_plateau: bool
     stress_sha256: str
-    stress_passed: bool
     trial_ids: tuple[str, ...]
 
 
@@ -369,8 +409,6 @@ def evaluate_promotion(
     experiment_id: str,
     fixture_decision: FixtureDecision,
     prospective: ProspectiveDecision,
-    pbo: StatResult,
-    dsr: StatResult,
     evidence: PromotionEvidence,
 ) -> PromotionDecision:
     """Promotion requires registry-bound evidence and the frozen threshold.
@@ -390,20 +428,32 @@ def evaluate_promotion(
     if not prospective.eligible:
         reasons.extend(prospective.reasons or ("prospective sample insufficient",))
     threshold = frozen.protocol.promotion_threshold
-    if pbo.status != "ok" or pbo.value is None or not math.isfinite(pbo.value):
-        reasons.append("PBO inconclusive")
-    elif pbo.value > 1.0 - threshold:
+    pbo_run = registry.latest_validation(experiment_id, "pbo")
+    pbo_value = (pbo_run or {}).get("result", {}).get("value")
+    if not pbo_run or pbo_run["status"] != "ok" or not isinstance(pbo_value, (int, float)) or not math.isfinite(pbo_value):
+        reasons.append("PBO validation missing or inconclusive")
+    elif pbo_value > 1.0 - threshold:
         reasons.append("PBO above frozen promotion threshold")
-    if dsr.status != "ok" or dsr.value is None or not math.isfinite(dsr.value):
-        reasons.append("DSR inconclusive")
-    elif dsr.value < threshold:
+    dsr_run = registry.latest_validation(experiment_id, "dsr")
+    dsr_value = (dsr_run or {}).get("result", {}).get("value")
+    if not dsr_run or dsr_run["status"] != "ok" or not isinstance(dsr_value, (int, float)) or not math.isfinite(dsr_value):
+        reasons.append("DSR validation missing or inconclusive")
+    elif dsr_value < threshold:
         reasons.append("DSR below frozen promotion threshold")
-    if not _is_digest(evidence.snapshot_sha256):
-        reasons.append("snapshot artifact missing")
-    if not _is_digest(evidence.walk_forward_sha256) or not evidence.walk_forward_plateau:
-        reasons.append("walk-forward plateau not proven")
-    if not _is_digest(evidence.stress_sha256) or not evidence.stress_passed:
-        reasons.append("fee/slippage stress not passed")
+    for method, expected_hash, label in (
+        ("snapshot", evidence.snapshot_sha256, "snapshot"),
+        ("walk_forward", evidence.walk_forward_sha256, "walk-forward plateau"),
+        ("stress", evidence.stress_sha256, "fee/slippage stress"),
+    ):
+        run = registry.latest_validation(experiment_id, method)
+        artifacts = (run or {}).get("artifacts", {})
+        if (
+            not run
+            or run["status"] != "ok"
+            or artifacts.get("artifact_sha256") != expected_hash
+            or artifacts.get("passed") is not True
+        ):
+            reasons.append(f"{label} artifact not verified in registry")
     if tuple(sorted(evidence.trial_ids)) != registry.trial_ids(experiment_id):
         reasons.append("cumulative trial set does not match registry")
     return PromotionDecision(eligible=not reasons, reasons=tuple(reasons))

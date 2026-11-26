@@ -705,20 +705,72 @@ class ResearchRegistry:
         ).fetchall()
         return tuple(row[0] for row in rows)
 
+    def record_candidate_exclusion(
+        self,
+        experiment_id: str,
+        candidate_index: int,
+        reason: str,
+        *,
+        performance_seen: bool,
+        actor: str,
+    ) -> None:
+        """Append a timestamped exclusion event with its performance chronology."""
+        payload = canonical_json(
+            {
+                "candidate_index": candidate_index,
+                "reason": reason,
+                "performance_seen": performance_seen,
+            }
+        )
+        self._append_experiment_status(
+            experiment_id, "candidate_excluded", payload, actor
+        )
+
     def post_performance_exclusions(self, experiment_id: str) -> frozenset:
-        """Candidate indexes recorded as excluded after performance was seen."""
+        """Candidate indexes excluded after performance was seen (event log)."""
         rows = self._conn.execute(
-            "SELECT metrics_json FROM experiment_trials WHERE experiment_id = ?",
+            "SELECT reason FROM experiment_status_events WHERE experiment_id = ? "
+            "AND new_status = 'candidate_excluded'",
             (experiment_id,),
         ).fetchall()
         excluded = set()
-        for (metrics_json,) in rows:
-            metrics = json.loads(metrics_json)
-            if metrics.get("excluded_after_performance") is True:
-                index = metrics.get("candidate_index")
+        for (reason,) in rows:
+            payload = json.loads(reason)
+            if payload.get("performance_seen") is True:
+                index = payload.get("candidate_index")
                 if isinstance(index, int) and not isinstance(index, bool):
                     excluded.add(index)
         return frozenset(excluded)
+
+    def trial_returns(self, experiment_id: str) -> tuple[tuple[str, tuple[float, ...]], ...]:
+        """Stored per-trial returns keyed by trial_id, in trial_id order."""
+        rows = self._conn.execute(
+            "SELECT trial_id, metrics_json FROM experiment_trials "
+            "WHERE experiment_id = ? ORDER BY trial_id",
+            (experiment_id,),
+        ).fetchall()
+        result = []
+        for trial_id, metrics_json in rows:
+            returns = json.loads(metrics_json).get("returns")
+            if not isinstance(returns, list) or not returns:
+                raise RegistryError(f"trial {trial_id} has no stored returns")
+            result.append((trial_id, tuple(float(v) for v in returns)))
+        return tuple(result)
+
+    def latest_validation(self, experiment_id: str, method: str):
+        """Latest stored validation run for a method, or None."""
+        row = self._conn.execute(
+            "SELECT status, artifacts_json, result_json FROM validation_runs "
+            "WHERE experiment_id = ? AND method = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (experiment_id, method),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "status": row[0],
+            "artifacts": json.loads(row[1]),
+            "result": json.loads(row[2]),
+        }
 
     def trial_count(self, experiment_id: str) -> int:
         """Every recorded trial counts, including failed/aborted/invalid."""
