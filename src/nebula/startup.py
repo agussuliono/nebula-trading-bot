@@ -3,9 +3,13 @@
 This module reconciles durable local intents against authenticated Demo reads.
 It never submits, cancels, replaces, or releases an exchange order/position lock.
 """
+import re
 import sqlite3
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+
+_CCY_PATTERN = re.compile(r"^[A-Z0-9]{2,15}$")
 
 
 class StartupRecoveryError(RuntimeError):
@@ -35,6 +39,22 @@ class StartupRecovery:
     def _positive(value, field):
         try:
             number = Decimal(str(value or "0"))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise StartupRecoveryError(f"Invalid {field} in account snapshot") from exc
+        if not number.is_finite() or number < 0:
+            raise StartupRecoveryError(f"Invalid {field} in account snapshot")
+        return number
+
+    @staticmethod
+    def _balance_amount(value, field):
+        # Strict balance parsing without truthiness fallback, matching the
+        # reconciliation standard: missing/invalid amounts never read as 0.
+        if isinstance(value, bool) or value is None or isinstance(value, (list, dict)):
+            raise StartupRecoveryError(f"Invalid {field} in account snapshot")
+        if isinstance(value, str) and not value.strip():
+            raise StartupRecoveryError(f"Invalid {field} in account snapshot")
+        try:
+            number = Decimal(str(value))
         except (InvalidOperation, TypeError, ValueError) as exc:
             raise StartupRecoveryError(f"Invalid {field} in account snapshot") from exc
         if not number.is_finite() or number < 0:
@@ -231,11 +251,20 @@ class StartupRecovery:
         if len(balances) != 1 or not isinstance(balances[0].get("details"), list):
             raise StartupRecoveryError("Account balance snapshot is malformed")
         holdings = []
+        seen_currencies = set()
         for row in balances[0]["details"]:
-            if not isinstance(row, dict) or not row.get("ccy"):
+            if not isinstance(row, dict):
                 raise StartupRecoveryError("Account balance row is malformed")
-            amount = self._positive(row.get("availBal"), "available balance")
-            frozen = self._positive(row.get("frozenBal"), "frozen balance")
+            if not isinstance(row.get("ccy"), str) or not _CCY_PATTERN.fullmatch(row["ccy"]):
+                raise StartupRecoveryError("Account balance row has a non-canonical currency")
+            if row["ccy"] in seen_currencies:
+                raise StartupRecoveryError("Account balance response has duplicate currencies")
+            seen_currencies.add(row["ccy"])
+            for field in ("availBal", "frozenBal"):
+                if field not in row:
+                    raise StartupRecoveryError(f"Account balance {field} is missing")
+            amount = self._balance_amount(row.get("availBal"), "available balance")
+            frozen = self._balance_amount(row.get("frozenBal"), "frozen balance")
             if "liab" not in row:
                 raise StartupRecoveryError("Account balance liability is missing")
             if self._liability(row.get("liab")) > 0:
@@ -253,11 +282,20 @@ class StartupRecovery:
         balances = self.client.get_balance()
         if len(balances) != 1 or not isinstance(balances[0].get("details"), list):
             raise StartupRecoveryError("Account balance snapshot is malformed")
+        seen_currencies = set()
         for row in balances[0]["details"]:
-            if not isinstance(row, dict) or not row.get("ccy"):
+            if not isinstance(row, dict):
                 raise StartupRecoveryError("Account balance row is malformed")
-            total = (self._positive(row.get("availBal"), "available balance")
-                     + self._positive(row.get("frozenBal"), "frozen balance"))
+            if not isinstance(row.get("ccy"), str) or not _CCY_PATTERN.fullmatch(row["ccy"]):
+                raise StartupRecoveryError("Account balance row has a non-canonical currency")
+            if row["ccy"] in seen_currencies:
+                raise StartupRecoveryError("Account balance response has duplicate currencies")
+            seen_currencies.add(row["ccy"])
+            for field in ("availBal", "frozenBal"):
+                if field not in row:
+                    raise StartupRecoveryError(f"Account balance {field} is missing")
+            total = (self._balance_amount(row.get("availBal"), "available balance")
+                     + self._balance_amount(row.get("frozenBal"), "frozen balance"))
             if row["ccy"] not in {"USDT", base_currency} and total > 0:
                 raise StartupRecoveryError("Untracked non-position asset balance exists")
 

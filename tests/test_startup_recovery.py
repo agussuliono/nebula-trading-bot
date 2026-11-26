@@ -60,6 +60,79 @@ def test_missing_or_malformed_liability_fails_closed(tmp_path, liab):
         StartupRecovery(BadLiabilityAccount(), state)._account_without_local_position()
 
 
+@pytest.mark.parametrize("field", ["availBal", "frozenBal"])
+@pytest.mark.parametrize("value", ["missing", None, False, "", "abc", "-1", "NaN", "Infinity"])
+def test_invalid_balance_amounts_fail_closed(tmp_path, field, value):
+    class BadAmountAccount(CleanAccount):
+        def get_balance(self):
+            detail = {"ccy": "USDT", "availBal": "1000", "frozenBal": "0", "liab": "0"}
+            if value == "missing":
+                del detail[field]
+            else:
+                detail[field] = value
+            return [{"details": [detail]}]
+
+    state = StateStore(str(tmp_path / "bad-amount.db"))
+    recovery = StartupRecovery(BadAmountAccount(), state)
+    result = recovery.run()
+
+    assert result["status"] == "blocked_reconciliation_failure"
+    assert result["entry_authorized"] is False
+    assert recovery.entry_permit is None
+    assert result["exchange_writes"] == 0
+
+
+def test_positive_liability_blocks_entry_permit(tmp_path):
+    class BorrowingAccount(CleanAccount):
+        def get_balance(self):
+            return [{"details": [
+                {"ccy": "USDT", "availBal": "1000", "frozenBal": "0", "liab": "10"},
+            ]}]
+
+    state = StateStore(str(tmp_path / "borrowing.db"))
+    recovery = StartupRecovery(BorrowingAccount(), state)
+    result = recovery.run()
+
+    assert result["status"] == "blocked_reconciliation_failure"
+    assert result["entry_authorized"] is False
+    assert recovery.entry_permit is None
+    assert result["exchange_writes"] == 0
+
+
+@pytest.mark.parametrize("ccy", ["usdt", "USDT ", " USDT", "US DT", "USDT\n", 123, None])
+def test_noncanonical_currency_blocks_entry_permit(tmp_path, ccy):
+    class BadCurrencyAccount(CleanAccount):
+        def get_balance(self):
+            return [{"details": [
+                {"ccy": ccy, "availBal": "0", "frozenBal": "0", "liab": "0"},
+            ]}]
+
+    state = StateStore(str(tmp_path / "bad-ccy.db"))
+    recovery = StartupRecovery(BadCurrencyAccount(), state)
+    result = recovery.run()
+
+    assert result["status"] == "blocked_reconciliation_failure"
+    assert result["entry_authorized"] is False
+    assert recovery.entry_permit is None
+    assert result["exchange_writes"] == 0
+
+
+def test_duplicate_currency_blocks_entry_permit(tmp_path):
+    class DuplicateAccount(CleanAccount):
+        def get_balance(self):
+            return [{"details": [
+                {"ccy": "USDT", "availBal": "1000", "frozenBal": "0", "liab": "0"},
+                {"ccy": "USDT", "availBal": "5", "frozenBal": "0", "liab": "0"},
+            ]}]
+
+    state = StateStore(str(tmp_path / "dup-ccy.db"))
+    recovery = StartupRecovery(DuplicateAccount(), state)
+    result = recovery.run()
+
+    assert result["status"] == "blocked_reconciliation_failure"
+    assert recovery.entry_permit is None
+
+
 def test_fill_without_known_parent_order_blocks_database_recovery(tmp_path):
     state = StateStore(str(tmp_path / "orphan-fill.db"))
     seed_filled_position(state)
