@@ -6,7 +6,9 @@ def test_exit_intent_fills_are_linked_to_active_entry_only(tmp_path):
     assert state.reserve_entry_intent("entry001", "AAA-USDT", 100, "buy")
     state.update_intent("entry001", "submitting")
     state.update_intent("entry001", "acknowledged", "1001")
-    assert state.reserve_exit_intent("exit001", "AAA-USDT", 101, "sell", "entry001")
+    state.save_fill({"instId":"AAA-USDT","ordId":"1001","tradeId":"1","side":"buy",
+                     "fillSz":"1","fillPx":"100","fee":"-0.1","feeCcy":"USDT"})
+    assert state.reserve_exit_intent("exit001", "AAA-USDT", 101, "sell", "entry001", size="0.2")
     state.update_intent("exit001", "submitting")
     state.update_intent("exit001", "acknowledged", "1002")
     # Fill rows are associated through exchange order IDs; unrelated same-symbol
@@ -71,7 +73,9 @@ def test_position_context_exposes_terminal_entry_and_unresolved_exit_state(tmp_p
         db.execute("""INSERT INTO order_snapshots(client_order_id,exchange_order_id,exchange_state,
             requested_size,cumulative_fill_size,average_fill_price,fee,fee_currency)
             VALUES('entry1','1001','filled','1','1','100','-0.1','USDT')""")
-    assert state.reserve_exit_intent("exit1", "AAA-USDT", 2, "sell", "entry1")
+    state.save_fill({"instId":"AAA-USDT","ordId":"1001","tradeId":"1","side":"buy",
+                     "fillSz":"1","fillPx":"100","fee":"-0.1","feeCcy":"USDT"})
+    assert state.reserve_exit_intent("exit1", "AAA-USDT", 2, "sell", "entry1", size="1")
     state.update_intent("exit1", "submitting")
     state.update_intent("exit1", "acknowledged", "1002")
     state.update_intent("exit1", "live", "1002")
