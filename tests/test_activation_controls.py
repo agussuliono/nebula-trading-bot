@@ -1040,6 +1040,75 @@ def test_manual_reconciliation_detects_intervening_position_with_null_fill_clien
     _assert_legacy_sell_unlinked(state)
 
 
+def _earlier_position_with_child(state, *, child_fill_size="0.6", child_fill_time="700",
+                                 child_client_id=""):
+    _filled_entry_named(state, "NBentryB", "222", "0.6", fill_time="500")
+    state.reserve_protection_intent(entry_client_order_id="NBentryB", instrument="BTC-USDT",
+                                    algo_client_order_id="NBalgoB", filled_size="0.6",
+                                    take_profit="130", stop_loss="90")
+    state.save_exit_child_orders("NBentryB", "BTC-USDT", ["555"])
+    state.save_fill({"instId": "BTC-USDT", "ordId": "555", "tradeId": "9555",
+                     "side": "sell", "fillSz": child_fill_size, "fillPx": "110",
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": child_client_id,
+                     "fillTime": child_fill_time})
+    with state._connect() as db:
+        db.execute("DELETE FROM position_lock")
+    _legacy_sell_with_fill(state, entry_fill_time="1000", fill_time="2000")
+
+
+def test_manual_reconciliation_rejects_buy_partial_after_closing_sell(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry_named(state, "NBentryB", "222", "0.3", fill_time="500")
+    state.save_fill({"instId": "BTC-USDT", "ordId": "222", "tradeId": "9223",
+                     "side": "buy", "fillSz": "0.3", "fillPx": "100",
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBentryB",
+                     "fillTime": "900"})
+    assert state.reserve_exit_intent("NBexitB", "BTC-USDT", 5, "sell", "NBentryB", size="0.3")
+    state.update_intent("NBexitB", "submitting", "444")
+    state.update_intent("NBexitB", "acknowledged", "444")
+    state.update_intent("NBexitB", "filled", "444")
+    state.save_fill({"instId": "BTC-USDT", "ordId": "444", "tradeId": "9444",
+                     "side": "sell", "fillSz": "0.6", "fillPx": "110",
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBexitB",
+                     "fillTime": "700"})
+    with state._connect() as db:
+        db.execute("DELETE FROM position_lock")
+    _legacy_sell_with_fill(state, entry_fill_time="1000", fill_time="2000")
+    with pytest.raises(ValueError, match="not proven closed|ambiguous|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_accepts_child_closed_earlier_position(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _earlier_position_with_child(state)
+    state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+
+
+def test_manual_reconciliation_rejects_child_fill_with_conflicting_client_id(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _earlier_position_with_child(state, child_client_id="NBother")
+    with pytest.raises(ValueError, match="not proven closed|ambiguous|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_rejects_partial_child_closure(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _earlier_position_with_child(state, child_fill_size="0.3")
+    with pytest.raises(ValueError, match="not proven closed|ambiguous|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_rejects_child_closure_after_candidate(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _earlier_position_with_child(state, child_fill_time="1500")
+    with pytest.raises(ValueError, match="not proven closed|ambiguous|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
 def test_rebate_rebuild_preserves_proven_values_and_integrity(tmp_path):
     import sqlite3
     path = tmp_path / "premigrated-data.db"

@@ -1644,12 +1644,14 @@ class StateStore:
                     )
                 fill_ms = parse_fill_time_ms(row["fill_time"])
                 other = other_positions.setdefault(
-                    other_id, {"first_ms": fill_ms, "buy_total": Decimal("0")})
+                    other_id, {"first_ms": fill_ms, "buy_total": Decimal("0"), "buy_events": []})
                 other["first_ms"] = min(fill_ms, other["first_ms"])
                 other["buy_total"] += fill_size
+                other["buy_events"].append((fill_ms, fill_size))
 
-            def proven_closed_before(other_id: str, buy_total: Decimal) -> bool:
-                sell_total = Decimal("0")
+            def proven_closed_before(other_id: str, buy_total: Decimal,
+                                     buy_events: list[tuple[int, Decimal]]) -> bool:
+                sell_events: list[tuple[int, Decimal]] = []
                 last_sell_ms: int | None = None
                 sell_orders: list[tuple[str, str]] = []
                 for row in db.execute(
@@ -1681,15 +1683,26 @@ class StateStore:
                             return False
                         if not fill_size.is_finite() or fill_size <= 0:
                             return False
-                        sell_total += fill_size
                         fill_ms = parse_fill_time_ms(row["fill_time"])
+                        sell_events.append((fill_ms, fill_size))
                         last_sell_ms = fill_ms if last_sell_ms is None else max(
                             fill_ms, last_sell_ms)
-                return (
-                    sell_total >= buy_total
-                    and last_sell_ms is not None
-                    and last_sell_ms < first_position_fill_ms
-                )
+                if last_sell_ms is None or last_sell_ms >= first_position_fill_ms:
+                    return False
+                inventory = Decimal("0")
+                buy_index = 0
+                sorted_buys = sorted(buy_events)
+                for sell_ms, sell_size in sorted(sell_events):
+                    while buy_index < len(sorted_buys) and sorted_buys[buy_index][0] < sell_ms:
+                        inventory += sorted_buys[buy_index][1]
+                        buy_index += 1
+                    if sell_size > inventory:
+                        return False
+                    inventory -= sell_size
+                while buy_index < len(sorted_buys):
+                    inventory += sorted_buys[buy_index][1]
+                    buy_index += 1
+                return inventory == 0
 
             for other_id, other in other_positions.items():
                 other_ms = other["first_ms"]
@@ -1699,7 +1712,7 @@ class StateStore:
                     raise ValueError(
                         "Legacy sell ownership is ambiguous because another buy position intervenes"
                     )
-                if not proven_closed_before(other_id, other["buy_total"]):
+                if not proven_closed_before(other_id, other["buy_total"], other["buy_events"]):
                     raise ValueError(
                         "Legacy sell ownership is ambiguous because an earlier buy position "
                         "is not proven closed"
