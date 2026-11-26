@@ -934,6 +934,55 @@ def test_manual_reconciliation_rejects_owner_superseded_by_later_position(tmp_pa
         assert state._net_inventory(db, "NBentryB", "BTC-USDT") == Decimal("0.2")
 
 
+def test_manual_reconciliation_detects_intervening_position_with_empty_fill_client_id(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _legacy_sell_with_fill(state, entry_fill_time="1000", fill_time="2000")
+    with state._connect() as db:
+        db.execute("DELETE FROM position_lock")
+    _filled_entry_named(state, "NBentryB", "222", "0.6", fill_time="1500")
+    with state._connect() as db:
+        db.execute("UPDATE fills SET client_order_id='' WHERE exchange_order_id='222'")
+    with pytest.raises(ValueError, match="intervenes|ambiguous|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_rejects_intervening_fill_with_conflicting_client_id(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _legacy_sell_with_fill(state, entry_fill_time="1000", fill_time="2000")
+    with state._connect() as db:
+        db.execute("DELETE FROM position_lock")
+    _filled_entry_named(state, "NBentryB", "222", "0.6", fill_time="1500")
+    with state._connect() as db:
+        db.execute("UPDATE fills SET client_order_id='NBentryA' WHERE exchange_order_id='222'")
+    with pytest.raises(ValueError, match="conflict|ambiguous|ownership|exchange order ID"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_rejects_unknown_buy_fill_in_ownership_window(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _legacy_sell_with_fill(state, entry_fill_time="1000", fill_time="2000")
+    state.save_fill({"instId": "BTC-USDT", "ordId": "777", "tradeId": "9777",
+                     "side": "buy", "fillSz": "0.1", "fillPx": "100",
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "",
+                     "fillTime": "1500"})
+    with pytest.raises(ValueError, match="ambiguous|ownership|unknown"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_rejects_same_first_fill_time_positions(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _legacy_sell_with_fill(state, entry_fill_time="1000", fill_time="2000")
+    with state._connect() as db:
+        db.execute("DELETE FROM position_lock")
+    _filled_entry_named(state, "NBentryB", "222", "0.6", fill_time="1000")
+    with pytest.raises(ValueError, match="intervenes|ambiguous|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
 def test_rebate_rebuild_preserves_proven_values_and_integrity(tmp_path):
     import sqlite3
     path = tmp_path / "premigrated-data.db"

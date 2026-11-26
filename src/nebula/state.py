@@ -1617,16 +1617,21 @@ class StateStore:
             if first_sell_fill_ms < first_position_fill_ms:
                 raise ValueError("Legacy sell predates the candidate owning position")
             other_position_rows = db.execute(
-                "SELECT i.client_order_id,f.fill_time FROM intents i"
+                "SELECT i.client_order_id AS intent_client_order_id,"
+                " f.client_order_id AS fill_client_order_id,f.fill_time FROM intents i"
                 " JOIN fills f ON f.instrument=i.instrument"
-                " AND f.client_order_id=i.client_order_id"
                 " AND f.exchange_order_id=i.exchange_order_id AND f.side='buy'"
                 " WHERE i.instrument=? AND i.side='buy' AND i.client_order_id<>?",
                 (sell["instrument"], position_client_order_id),
             ).fetchall()
             other_first_fills: dict[str, int] = {}
             for row in other_position_rows:
-                other_id = str(row["client_order_id"])
+                other_id = str(row["intent_client_order_id"])
+                fill_client = str(row["fill_client_order_id"] or "")
+                if fill_client not in {"", other_id}:
+                    raise ValueError(
+                        "Legacy sell ownership is ambiguous because another buy fill identity conflicts"
+                    )
                 fill_ms = parse_fill_time_ms(row["fill_time"])
                 other_first_fills[other_id] = min(fill_ms, other_first_fills.get(other_id, fill_ms))
             if any(first_position_fill_ms <= other_ms <= first_sell_fill_ms
@@ -1634,6 +1639,26 @@ class StateStore:
                 raise ValueError(
                     "Legacy sell ownership is ambiguous because another buy position intervenes"
                 )
+            known_buy_exchange_ids = {
+                str(row["exchange_order_id"])
+                for row in db.execute(
+                    "SELECT exchange_order_id FROM intents"
+                    " WHERE instrument=? AND side='buy' AND exchange_order_id IS NOT NULL",
+                    (sell["instrument"],),
+                ).fetchall()
+            }
+            for row in db.execute(
+                "SELECT exchange_order_id,fill_time FROM fills"
+                " WHERE instrument=? AND side='buy'",
+                (sell["instrument"],),
+            ).fetchall():
+                if str(row["exchange_order_id"]) in known_buy_exchange_ids:
+                    continue
+                fill_ms = parse_fill_time_ms(row["fill_time"])
+                if first_position_fill_ms <= fill_ms <= first_sell_fill_ms:
+                    raise ValueError(
+                        "Legacy sell ownership is ambiguous because an unknown buy fill intervenes"
+                    )
             if sell_total > position_total:
                 raise ValueError("Legacy sell exceeds the candidate owning position fills")
             db.execute(
