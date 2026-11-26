@@ -190,12 +190,13 @@ def test_preflight_orchestrator_approves_candidate_without_exchange_writes(
         "pending_regular", "pending_oco", "pending_conditional", "account_bills",
         "account_bills",
     ]
+    assert "candidate" not in report["risk_preflight"]
     serialized = str(report)
     for financial_field in (
         "account_equity_usdt", "available_usdt",
         "projected_daily_pnl_after_planned_stop_quote",
-        "candidate_entry_plan", "entry_price", "stop_loss",
-        "take_profit", "notional_quote",
+        "'candidate':", "candidate_entry_plan", "entry_price", "stop_loss",
+        "take_profit", "notional_quote", "'size':", "'0.1'",
     ):
         assert financial_field not in serialized
     assert not hasattr(client, "place_spot_limit")
@@ -208,6 +209,10 @@ def test_redaction_removes_nested_sensitive_fields_but_keeps_status():
         "selected_instrument": "AAA-USDT",
         "risk_preflight": {
             "execution": "not_submitted_preflight_only",
+            "candidate": {
+                "instrument": "AAA-USDT", "size": "0.1",
+                "entry_price": "100", "stop_loss": "90",
+            },
             "account_equity_usdt": "1000",
             "available_usdt": "900",
             "projected_daily_pnl_after_planned_stop_quote": "-10",
@@ -237,10 +242,10 @@ def test_redaction_removes_nested_sensitive_fields_but_keeps_status():
     assert redacted["risk_preflight"]["execution"] == "not_submitted_preflight_only"
     for sensitive in (
         "account_equity_usdt", "available_usdt", "projected_daily_pnl",
-        "planned_entry", "candidate_entry_plan", "entry_price", "stop_loss",
-        "balance_details", "availBal", "liab", "position_size",
+        "'candidate':", "planned_entry", "candidate_entry_plan", "entry_price",
+        "stop_loss", "balance_details", "availBal", "liab", "position_size",
         "notional_quote", "account_id", "uid", "api_key", "must-not-leak",
-        "1000", "900",
+        "'size':", "'0.1'", "1000", "900",
     ):
         assert sensitive not in serialized
 

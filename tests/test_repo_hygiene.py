@@ -54,6 +54,16 @@ def test_build_and_runtime_dependencies_are_hash_locked():
     assert "--hash=sha256:" in runtime_lock
 
 
+def test_vm_workflow_install_blocks_are_indented_yaml():
+    for name in ("okx-demo-preflight.yml", "okx-demo-forward-test.yml"):
+        text = (REPO_ROOT / ".github" / "workflows" / name).read_text(
+            encoding="utf-8"
+        )
+        assert "        run: |\n          python -m pip install" in text, (
+            f"{name} install commands must be indented inside the run block"
+        )
+
+
 def test_gitignore_covers_build_artifacts():
     ignored = {
         line.strip()
