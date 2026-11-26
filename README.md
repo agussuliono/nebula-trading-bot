@@ -1,5 +1,9 @@
 # NEBULA Trading Bot V1 — Demo-only foundation
 
+## v0.16.18 patch note
+
+- Added the Fase 0D research shadow runbook (`docs/RESEARCH_SHADOW_RUNBOOK.md`): shadow procedure, data-completeness checks, reproducibility rules, monitoring, recovery, and the shadow report template. Documentation only; shadow mode uses public fixtures until the Deployment Security Gate passes.
+
 ## v0.16.17 patch note
 
 - Added the Fase 0C outcome observer: each reserved entry creates one durable opaque `trade_episode_id` in trading state, and lifecycle outcomes (fills, remainder cancellation, protection activation, exit fills, closure, and finalized accounting) are reconstructed idempotently without exporting raw order IDs. Research-only; export failures never change order behaviour.
@@ -53,7 +57,7 @@
 - Added regression tests for credential isolation/redaction, 403 non-JSON diagnostics, bounded retries, circuit-breaker recovery, and no retries for private reads/writes.
 - This patch does not resolve the previously observed HTTP 403 from the user's network. The rejecting layer is still unknown because the original response headers/body were not retained. No live or Demo account was accessed.
 
-**Version:** 0.16.17  
+**Version:** 0.16.18  
 **Status:** Public API diagnostics and bounded read resilience included. Strategy validation failed on the supplied historical sample; not ready for forward testing or autonomous trading.
 
 ## v0.16.5 patch note
@@ -199,7 +203,7 @@ nebula portfolio-backtest --asset BTC-USDT=btc.csv --asset ETH-USDT=eth.csv --st
 
 The ranking score is a deterministic implementation choice, not a proven predictive edge. All symbols must have the same timeframe, timestamps and timezone convention. This version still does not model cross-asset correlation, exchange lot/tick rounding, minimum notional, partial fills, market impact, or order-book depth.
 
-## Test status for v0.16.17
+## Test status for v0.16.18
 
 - 673 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
 - Tests cover fee/slippage impact, next-open execution, same-bar stop priority, risk sizing, daily-loss/drawdown halts, chronological single-asset and portfolio walk-forward splits, multi-asset deterministic selection, global one-position enforcement, synchronized timestamps, portfolio cost-stress scenarios, CSV validation and public history-candle request construction.
