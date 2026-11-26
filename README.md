@@ -1,5 +1,13 @@
 # NEBULA Trading Bot V1 — Demo-only foundation
 
+## v0.16.16 patch note
+
+- Added the Fase 0A research event foundation (`nebula.research_events`): canonical JSON, allowlist event schemas, Ed25519 scheduler heartbeat signing, atomic anti-replay sequence store, best-effort bounded exporter (flag off by default), and sealed-config loading/merging. Research-only; no trading path changes.
+
+## Test status for v0.16.16
+
+- Full local suite passes including repo hygiene version checks.
+
 ## v0.16.15 patch note
 
 - Added the Fase 0B research registry (`nebula.research_registry`): single-writer importer, append-only evidence tables, hash chain with checkpoints, experiment/trial registry, locked-holdout access gate, and frozen CSCV/PBO + DSR statistics. Research-only; no trading state access, no network, no order path.
@@ -43,7 +51,7 @@
 - Added regression tests for credential isolation/redaction, 403 non-JSON diagnostics, bounded retries, circuit-breaker recovery, and no retries for private reads/writes.
 - This patch does not resolve the previously observed HTTP 403 from the user's network. The rejecting layer is still unknown because the original response headers/body were not retained. No live or Demo account was accessed.
 
-**Version:** 0.16.15  
+**Version:** 0.16.16  
 **Status:** Public API diagnostics and bounded read resilience included. Strategy validation failed on the supplied historical sample; not ready for forward testing or autonomous trading.
 
 ## v0.16.5 patch note
