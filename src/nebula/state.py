@@ -631,6 +631,20 @@ class StateStore:
     def has_lock_release_evidence(self, entry_client_order_id: str) -> bool:
         """True only when a sanctioned release path recorded valid evidence."""
         with self._connect() as db:
+            intent = db.execute(
+                "SELECT status,exchange_order_id FROM intents WHERE client_order_id=?",
+                (entry_client_order_id,),
+            ).fetchone()
+            snapshot = db.execute(
+                "SELECT exchange_state,cumulative_fill_size FROM order_snapshots WHERE client_order_id=?",
+                (entry_client_order_id,),
+            ).fetchone()
+            try:
+                snapshot_cumulative = (
+                    Decimal(str(snapshot["cumulative_fill_size"])) if snapshot else None
+                )
+            except InvalidOperation:
+                snapshot_cumulative = None
             rows = db.execute(
                 """SELECT event_type,details_json FROM audit_events
                    WHERE client_order_id=?
@@ -652,16 +666,32 @@ class StateStore:
                         dust = Decimal(str(details["dust_limit"]))
                     except (KeyError, InvalidOperation):
                         continue
-                    if details.get("open_orders_checked") is True and 0 <= base <= dust:
+                    if (details.get("open_orders_checked") is True
+                            and base.is_finite() and dust.is_finite()
+                            and 0 <= base <= dust):
                         return True
                 elif row["event_type"] == "zero_fill_entry_lock_released":
-                    if (details.get("exchange_state") in {"canceled", "mmp_canceled"}
+                    if (snapshot is not None
+                            and snapshot["exchange_state"] in {"canceled", "mmp_canceled"}
+                            and snapshot_cumulative == 0
+                            and details.get("exchange_state") == snapshot["exchange_state"]
                             and details.get("cumulative_fill_size") == "0"):
                         return True
                 elif row["event_type"] == "rejected_entry_lock_released":
-                    if (details.get("intent_status") == "rejected"
-                            and details.get("cumulative_fill_size") == "0"
-                            and details.get("exchange_state") in {None, "canceled", "mmp_canceled"}):
+                    if intent is None or intent["status"] != "rejected":
+                        continue
+                    if details.get("intent_status") != "rejected":
+                        continue
+                    if details.get("cumulative_fill_size") != "0":
+                        continue
+                    if details.get("exchange_order_id_present") is not bool(intent["exchange_order_id"]):
+                        continue
+                    if snapshot is None:
+                        if not intent["exchange_order_id"] and details.get("exchange_state") is None:
+                            return True
+                    elif (snapshot["exchange_state"] in {"canceled", "mmp_canceled"}
+                            and snapshot_cumulative == 0
+                            and details.get("exchange_state") == snapshot["exchange_state"]):
                         return True
             return False
 

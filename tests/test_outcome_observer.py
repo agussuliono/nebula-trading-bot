@@ -336,6 +336,72 @@ def test_rejected_with_live_snapshot_is_not_final(tmp_path):
     assert "accounting_finalized" not in types
 
 
+def test_rejected_live_snapshot_without_order_id_is_not_final(tmp_path):
+    state = StateStore(str(tmp_path / "state.sqlite3"))
+    episode = _open_episode(state)
+    state.save_order_snapshot("NBentry", {
+        "ordId": "", "state": "live", "sz": "2", "accFillSz": "0",
+        "avgPx": "0", "fee": "0", "feeCcy": "USDT",
+    })
+    state.update_intent("NBentry", "submitting")
+    state.update_intent("NBentry", "rejected")
+    assert state.release_rejected_entry_lock("NBentry") is False
+    types = [event["event_type"] for event in observe_episode(state, episode)]
+    assert "position_closed" not in types
+    assert "accounting_finalized" not in types
+
+
+def test_rejected_terminal_snapshot_finalizes(tmp_path):
+    state = StateStore(str(tmp_path / "state.sqlite3"))
+    episode = _open_episode(state)
+    state.save_order_snapshot("NBentry", {
+        "ordId": "111", "state": "canceled", "sz": "2", "accFillSz": "0",
+        "avgPx": "0", "fee": "0", "feeCcy": "USDT",
+    })
+    state.update_intent("NBentry", "submitting", "111")
+    state.update_intent("NBentry", "rejected", "111")
+    assert state.release_rejected_entry_lock("NBentry")
+    recorded = observe_episode(state, episode)
+    assert recorded[-1]["event_type"] == "accounting_finalized"
+    assert recorded[-1]["net_pnl_quote"] == "0"
+
+
+def test_inconsistent_forged_release_evidence_is_rejected(tmp_path):
+    path = str(tmp_path / "state.sqlite3")
+    state = StateStore(path)
+    episode = _open_episode(state)
+    state.update_intent("NBentry", "submitting", "111")
+    state.update_intent("NBentry", "rejected", "111")
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM position_lock WHERE singleton=1")
+        db.execute(
+            "INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
+            ("rejected_entry_lock_released", "NBentry",
+             '{"intent_status":"rejected","exchange_state":null,'
+             '"cumulative_fill_size":"0","exchange_order_id_present":true}'),
+        )
+    types = [event["event_type"] for event in observe_episode(state, episode)]
+    assert "position_closed" not in types
+    assert "accounting_finalized" not in types
+
+
+@pytest.mark.parametrize("value", ["Infinity", "NaN"])
+def test_nonfinite_flat_release_evidence_is_rejected(tmp_path, value):
+    path = str(tmp_path / "state.sqlite3")
+    state = StateStore(path)
+    episode = _zero_fill_canceled(state)
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM position_lock WHERE singleton=1")
+        db.execute(
+            "INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
+            ("position_lock_released", "NBentry",
+             f'{{"base_balance":"{value}","dust_limit":"{value}","open_orders_checked":true}}'),
+        )
+    types = [event["event_type"] for event in observe_episode(state, episode)]
+    assert "position_closed" not in types
+    assert "accounting_finalized" not in types
+
+
 def test_rejected_with_order_id_without_snapshot_is_not_final(tmp_path):
     state = StateStore(str(tmp_path / "state.sqlite3"))
     episode = _open_episode(state)
