@@ -97,7 +97,10 @@ def _cycle_gap_report(state, *, now_ms=None, start_ms=None):
         candle_ts = details.get("latest_candle_ts")
         if isinstance(candle_ts, int) and candle_ts > 0:
             processed.append(candle_ts)
-        if details.get("bar") in _BAR_STEP_MS:
+            if details.get("bar") not in _BAR_STEP_MS:
+                return {"status": "cycle_coverage_unknown",
+                        "processed_cycles": len(set(processed)),
+                        "bar": None, "gap_count": None, "gaps": []}
             bars.add(details["bar"])
     if len(bars) > 1:
         return {"status": "mixed_timeframes_not_supported",

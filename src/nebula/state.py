@@ -424,6 +424,64 @@ class StateStore:
             )
             return True
 
+    @staticmethod
+    def _net_inventory(db, position_client_order_id: str, instrument: str):
+        """Reconciled net base inventory from fills linked to one position."""
+        entry = db.execute(
+            "SELECT exchange_order_id FROM intents WHERE client_order_id=? AND side='buy'",
+            (position_client_order_id,),
+        ).fetchone()
+        order_ids = {str(entry["exchange_order_id"])} if entry and entry["exchange_order_id"] else set()
+        for row in db.execute(
+            "SELECT exchange_order_id FROM intents WHERE position_client_order_id=? AND side='sell'",
+            (position_client_order_id,),
+        ).fetchall():
+            if row[0]:
+                order_ids.add(str(row[0]))
+        for row in db.execute(
+            "SELECT exchange_order_id FROM exit_child_orders WHERE entry_client_order_id=?",
+            (position_client_order_id,),
+        ).fetchall():
+            if row[0]:
+                order_ids.add(str(row[0]))
+        net = Decimal("0")
+        base_ccy = instrument.split("-")[0]
+        if not order_ids:
+            return net
+        has_fills = db.execute(
+            f"SELECT 1 FROM fills WHERE instrument=? AND exchange_order_id IN ({','.join('?' for _ in order_ids)}) LIMIT 1",
+            [instrument, *sorted(order_ids)],
+        ).fetchone()
+        if not has_fills:
+            # Fall back to the entry order snapshot's cumulative fill as
+            # reconciled evidence when the fill ledger has not synced yet.
+            snapshot = db.execute(
+                "SELECT cumulative_fill_size,fee,fee_currency FROM order_snapshots"
+                " WHERE client_order_id=?",
+                (position_client_order_id,),
+            ).fetchone()
+            if snapshot is not None:
+                # Snapshot cumulative fill is the reconciled quantity the
+                # protection path sizes from when no fill ledger exists.
+                net = Decimal(str(snapshot["cumulative_fill_size"]))
+            return net
+        if order_ids:
+            placeholders = ",".join("?" for _ in order_ids)
+            for fill in db.execute(
+                f"SELECT side,fill_size,fee,fee_currency FROM fills WHERE instrument=? AND exchange_order_id IN ({placeholders})",
+                [instrument, *sorted(order_ids)],
+            ).fetchall():
+                fill_size = Decimal(str(fill["fill_size"]))
+                if fill["side"] == "buy":
+                    net += fill_size
+                    if fill["fee_currency"] == base_ccy:
+                        net -= abs(Decimal(str(fill["fee"])))
+                elif fill["side"] == "sell":
+                    net -= fill_size
+                    if fill["fee_currency"] == base_ccy:
+                        net -= abs(Decimal(str(fill["fee"])))
+        return net
+
     def reserve_exit_intent(self, client_order_id: str, instrument: str, candle_ts: int,
                             side: str, position_client_order_id: str,
                             size: str) -> bool:
@@ -457,53 +515,19 @@ class StateStore:
                 raise RuntimeError(
                     "Independent sell order is blocked while a durable OCO protection intent exists"
                 )
-            if True:
-                # A sell may never exceed the position's reconciled net
-                # inventory from linked fills, regardless of other balances.
-                try:
-                    requested = Decimal(str(size))
-                except (InvalidOperation, TypeError, ValueError) as exc:
-                    raise RuntimeError("Exit size is not a valid decimal") from exc
-                if not requested.is_finite() or requested <= 0:
-                    raise RuntimeError("Exit size must be a finite positive decimal")
-                entry = db.execute(
-                    "SELECT exchange_order_id FROM intents WHERE client_order_id=? AND side='buy'",
-                    (position_client_order_id,),
-                ).fetchone()
-                order_ids = {str(entry["exchange_order_id"])} if entry and entry["exchange_order_id"] else set()
-                for row in db.execute(
-                    "SELECT exchange_order_id FROM intents WHERE position_client_order_id=? AND side='sell'",
-                    (position_client_order_id,),
-                ).fetchall():
-                    if row[0]:
-                        order_ids.add(str(row[0]))
-                for row in db.execute(
-                    "SELECT exchange_order_id FROM exit_child_orders WHERE entry_client_order_id=?",
-                    (position_client_order_id,),
-                ).fetchall():
-                    if row[0]:
-                        order_ids.add(str(row[0]))
-                net = Decimal("0")
-                base_ccy = instrument.split("-")[0]
-                if order_ids:
-                    placeholders = ",".join("?" for _ in order_ids)
-                    for fill in db.execute(
-                        f"SELECT side,fill_size,fee,fee_currency FROM fills WHERE instrument=? AND exchange_order_id IN ({placeholders})",
-                        [instrument, *sorted(order_ids)],
-                    ).fetchall():
-                        fill_size = Decimal(str(fill["fill_size"]))
-                        if fill["side"] == "buy":
-                            net += fill_size
-                            if fill["fee_currency"] == base_ccy:
-                                net -= abs(Decimal(str(fill["fee"])))
-                        elif fill["side"] == "sell":
-                            net -= fill_size
-                            if fill["fee_currency"] == base_ccy:
-                                net -= abs(Decimal(str(fill["fee"])))
-                if requested > net:
-                    raise RuntimeError(
-                        "Exit size exceeds the position's reconciled net inventory"
-                    )
+            # A sell may never exceed the position's reconciled net
+            # inventory from linked fills, regardless of other balances.
+            try:
+                requested = Decimal(str(size))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise RuntimeError("Exit size is not a valid decimal") from exc
+            if not requested.is_finite() or requested <= 0:
+                raise RuntimeError("Exit size must be a finite positive decimal")
+            net = self._net_inventory(db, position_client_order_id, instrument)
+            if requested > net:
+                raise RuntimeError(
+                    "Exit size exceeds the position's reconciled net inventory"
+                )
             db.execute("INSERT INTO intents(client_order_id,instrument,candle_ts,side,status,position_client_order_id) VALUES(?,?,?,?,'reserved',?)",
                        (client_order_id, instrument, candle_ts, side, position_client_order_id))
             return True
@@ -1089,6 +1113,11 @@ class StateStore:
                                (entry_client_order_id,)).fetchone()
             if not entry or entry["side"] != "buy" or entry["instrument"] != instrument:
                 raise ValueError("Protection must belong to the matching Spot buy entry")
+            net_inventory = self._net_inventory(db, entry_client_order_id, instrument)
+            if qty > net_inventory:
+                raise ValueError(
+                    "Protection size exceeds the position's reconciled net inventory"
+                )
             existing = db.execute("SELECT * FROM protection_intents WHERE entry_client_order_id=?",
                                   (entry_client_order_id,)).fetchone()
             if existing:

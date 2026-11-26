@@ -606,6 +606,7 @@ def test_independent_sell_exit_is_blocked_when_oco_protection_exists(tmp_path):
     client = FakeClient()
     manager = setup(tmp_path, client)
     submit(manager, "NBOCOLOCK")
+    _record_entry_fill(manager, "NBOCOLOCK")
     manager.state.reserve_protection_intent(
         entry_client_order_id="NBOCOLOCK",
         instrument="BTC-USDT",
