@@ -264,11 +264,24 @@ class ReadOnlyRuntime:
             "signals": reports,
             "order_submission_attempts": 0,
         }
+        candle_timestamps = [
+            report["candle_ts"] for report in reports
+            if isinstance(report.get("candle_ts"), int) and report["candle_ts"] > 0
+        ]
+        # Record the cycle's expected closed-candle slot even when every
+        # asset was filtered out, so a completed cycle is never invisible
+        # to gap monitoring.
+        bar_ms = self.BAR_MS[self.policy.bar]
+        expected_slot = (now_ms // bar_ms) * bar_ms - bar_ms
+        if expected_slot > 0:
+            candle_timestamps.append(expected_slot)
         self.state.record_event("runtime_cycle_completed", None, {
             "bar": self.policy.bar, "universe_count": result["universe_count"],
             "eligible_count": result["eligible_count"],
             "signal_count": len(reports), "errors": len(errors),
             "mode": result["mode"],
+            "timestamp_utc": result["timestamp_utc"],
+            "latest_candle_ts": max(candle_timestamps) if candle_timestamps else None,
         })
         return result
 
