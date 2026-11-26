@@ -12,14 +12,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: nebula-okx-demo-preflight
+  group: nebula-okx-demo-vm
   cancel-in-progress: false
 
 jobs:
   preflight:
     name: Run read-only VM preflight and shadow cycle
     runs-on: [self-hosted, nebula-vm]
-    timeout-minutes: 10
+    timeout-minutes: 20
     environment: okx-demo-execution
     if: >-
       github.ref == 'refs/heads/main' &&
@@ -33,6 +33,7 @@ jobs:
       NEBULA_MAX_DAILY_LOSS_QUOTE: '350'
       NEBULA_MAX_POSITION_QUOTE: '9000'
       NEBULA_MAX_DRAWDOWN_PCT: '0.05'
+      NEBULA_AUTO_COPY_RESULT: 'false'
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - name: Check out source
@@ -46,7 +47,9 @@ jobs:
           python-version: '3.11'
 
       - name: Install NEBULA
-        run: python -m pip install --disable-pip-version-check -e .
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r requirements.lock
+          python -m pip install --disable-pip-version-check --no-deps -e .
 
       - name: Prepare preflight state directory
         run: |
