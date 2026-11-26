@@ -1,12 +1,17 @@
 # NEBULA Trading Bot V1 — Demo-only foundation
 
+## v0.16.16 patch note
+
+- Fixed the forward-test workflow install block indentation so both hash-locked `pip install` commands sit inside the YAML `run: |` block, and added a repo-hygiene regression test for VM workflow install indentation. Preflight public output now drops the whole risk `candidate` object and any `size` field, with regression tests proving the position-size value is absent from serialized output.
+
 ## v0.16.15 patch note
 
 - Added the Fase 0B research registry (`nebula.research_registry`): single-writer importer, append-only evidence tables, hash chain with checkpoints, experiment/trial registry, locked-holdout access gate, and frozen CSCV/PBO + DSR statistics. Research-only; no trading state access, no network, no order path.
+- VM workflow installs now use hash-locked runtime and build dependencies: `requirements.lock` pins runtime packages, `requirements-build.lock` pins `setuptools`/`wheel`, and editable installs run with `--no-build-isolation` after those locks are installed. Preflight output redaction now drops nested financial and credential-adjacent fields by sensitive key patterns, with regression tests for nested balances, PnL, entry-plan details, and account identifiers.
 
-## Test status for v0.16.15
+## v0.16.14 patch note
 
-- Full local suite passes including repo hygiene version checks.
+- `preflight-once` now always verifies private API authentication first: the execution key must carry exactly `read_only,trade` permissions on a Spot-mode account with borrowing automation off, even when no buy candidate exists. A rejected or incomplete preflight exits non-zero, and preflight output is redacted of account-financial fields so it is safe for public CI logs.
 
 ## v0.16.13 patch note
 
@@ -43,7 +48,7 @@
 - Added regression tests for credential isolation/redaction, 403 non-JSON diagnostics, bounded retries, circuit-breaker recovery, and no retries for private reads/writes.
 - This patch does not resolve the previously observed HTTP 403 from the user's network. The rejecting layer is still unknown because the original response headers/body were not retained. No live or Demo account was accessed.
 
-**Version:** 0.16.15  
+**Version:** 0.16.16  
 **Status:** Public API diagnostics and bounded read resilience included. Strategy validation failed on the supplied historical sample; not ready for forward testing or autonomous trading.
 
 ## v0.16.5 patch note
@@ -189,9 +194,9 @@ nebula portfolio-backtest --asset BTC-USDT=btc.csv --asset ETH-USDT=eth.csv --st
 
 The ranking score is a deterministic implementation choice, not a proven predictive edge. All symbols must have the same timeframe, timestamps and timezone convention. This version still does not model cross-asset correlation, exchange lot/tick rounding, minimum notional, partial fills, market impact, or order-book depth.
 
-## Test status for v0.16.13
+## Test status for v0.16.16
 
-- 613 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
+- 636 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
 - Tests cover fee/slippage impact, next-open execution, same-bar stop priority, risk sizing, daily-loss/drawdown halts, chronological single-asset and portfolio walk-forward splits, multi-asset deterministic selection, global one-position enforcement, synchronized timestamps, portfolio cost-stress scenarios, CSV validation and public history-candle request construction.
 - Tests use local synthetic data and mocked HTTP; they do not establish OKX connectivity or exchange execution behavior.
 - No API credentials were used and no Demo or live orders were sent.
