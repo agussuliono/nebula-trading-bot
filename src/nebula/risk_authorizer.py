@@ -17,6 +17,25 @@ class RiskAuthorizationError(RuntimeError):
 
 
 _EVIDENCE_TOKEN = object()
+_ISSUED_EVIDENCE: set[int] = set()
+
+
+def _issue_evidence(*, account_uid, instrument, size, price):
+    """Mint evidence through the authorizer's official internal path."""
+    evidence = _RiskAuthorizationEvidence(
+        _EVIDENCE_TOKEN, account_uid=account_uid,
+        instrument=instrument, size=size, price=price,
+    )
+    _ISSUED_EVIDENCE.add(id(evidence))
+    return evidence
+
+
+def _consume_evidence(evidence) -> bool:
+    """True once, only for evidence minted by _issue_evidence."""
+    if id(evidence) in _ISSUED_EVIDENCE:
+        _ISSUED_EVIDENCE.discard(id(evidence))
+        return True
+    return False
 
 
 class _RiskAuthorizationEvidence:
@@ -108,9 +127,23 @@ class PortfolioRiskAuthorizer:
             )
         equity = preliminary.get("account_equity_usdt")
         if baseline is None and ledger.has_complete_history(fingerprint):
-            # UTC rollover with intact history: open today's baseline from the
-            # reconciled snapshot even with an active, OCO-protected position.
-            # Prior-day PnL history is expected here, not ledger loss.
+            # UTC rollover with intact history: validate the whole new day
+            # from 00:00 UTC before opening the baseline, so an external flow
+            # before the first observation cannot be absorbed silently.
+            day_start_ms = now_ms - (now_ms % 86_400_000)
+            day_bills = self.client.get_account_bills(
+                begin=str(day_start_ms), end=str(now_ms))
+            ledger.save_bills(day_bills)
+            try:
+                day_reconciliation = reconcile_spot_bills(
+                    day_bills, account_fingerprint=fingerprint,
+                    begin_ms=day_start_ms, end_ms=now_ms)
+            except BillReconciliationError as exc:
+                raise RiskAuthorizationError(
+                    "Account bills are not fully reconciled: " + str(exc)) from exc
+            if Decimal(str(day_reconciliation.external_flows_quote)) != 0:
+                raise RiskAuthorizationError(
+                    "External account flows detected; drawdown evidence requires manual review")
             ledger.establish_daily_baseline(
                 equity_quote=equity, timestamp_ms=now_ms,
                 account_fingerprint=fingerprint,
@@ -377,8 +410,8 @@ class PortfolioRiskAuthorizer:
             if require_order_gate:
                 from .entry_gate import issue_risk_entry_permit
                 uid = str(account_config[0].get("uid") or "")
-                evidence = _RiskAuthorizationEvidence(
-                    _EVIDENCE_TOKEN, account_uid=uid,
+                evidence = _issue_evidence(
+                    account_uid=uid,
                     instrument=approved["instrument"], size=approved["size"],
                     price=approved["entry_price"],
                 )

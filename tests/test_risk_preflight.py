@@ -436,3 +436,50 @@ def test_daily_baseline_rolls_over_after_prior_day_trade(tmp_path):
     result = authorizer.observe_equity()
     assert result["observed"] is True
     assert ledger.get_daily_baseline(NOW_MS) is not None
+
+
+def test_rollover_rejects_external_flow_before_first_observation(tmp_path):
+    from nebula.account_ledger import AccountLedger
+    import hashlib
+    client = SnapshotClient()
+    state = StateStore(str(tmp_path / "rollover-flow.sqlite3"))
+    fingerprint = hashlib.sha256(b"test-demo-account-uid").hexdigest()
+    ledger = AccountLedger(state)
+    ledger.establish_daily_baseline(equity_quote="1000", timestamp_ms=NOW_MS - 86_400_000,
+                                    account_fingerprint=fingerprint)
+    day_start = NOW_MS - (NOW_MS % 86_400_000)
+    client.bills = [{
+        "billId": "12345", "ccy": "USDT", "balChg": "100", "bal": "1100",
+        "type": "1", "subType": "11", "instId": "", "ordId": "", "tradeId": "",
+        "ts": str(day_start + 3_600_000),
+    }]
+    from dataclasses import replace
+    settings = replace(read_only_settings(), max_drawdown_pct=0.05)
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, settings,
+        plan_provider=lambda **kwargs: pytest.fail("observe must not need a plan"),
+        clock_ms=lambda: NOW_MS,
+    )
+    with pytest.raises(RiskAuthorizationError, match="not fully reconciled"):
+        authorizer.observe_equity()
+    assert ledger.get_daily_baseline(NOW_MS) is None
+
+
+def test_deleted_peak_mark_breaks_chain_verification(tmp_path):
+    from nebula.account_ledger import AccountLedger, AccountLedgerError
+    import hashlib
+    state = StateStore(str(tmp_path / "chain.sqlite3"))
+    fingerprint = hashlib.sha256(b"test-demo-account-uid").hexdigest()
+    ledger = AccountLedger(state)
+    ledger.establish_daily_baseline(equity_quote="1000", timestamp_ms=NOW_MS,
+                                    account_fingerprint=fingerprint)
+    ledger.record_equity_mark(equity_quote="1200", timestamp_ms=NOW_MS + 1000,
+                              account_fingerprint=fingerprint)
+    assert ledger.verify_mark_chain() is True
+    with state._connect() as db:
+        db.execute("DELETE FROM daily_equity_marks WHERE equity_quote='1200'")
+    assert ledger.verify_mark_chain() is False
+    with pytest.raises(AccountLedgerError, match="integrity"):
+        ledger.cumulative_drawdown(timestamp_ms=NOW_MS + 2000,
+                                   account_fingerprint=fingerprint,
+                                   max_drawdown_pct=0.05)

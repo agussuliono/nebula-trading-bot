@@ -79,6 +79,8 @@ class StateStore:
     def _init_db(self):
         with self._connect() as db:
             pre_existing = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nebula_schema_meta'"
+            ).fetchone() is not None or db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='intents'"
             ).fetchone() is not None
             db.execute("""CREATE TABLE IF NOT EXISTS intents (
@@ -191,6 +193,11 @@ class StateStore:
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )""")
                 db.execute("INSERT OR IGNORE INTO emergency_stop(singleton,engaged,reason) VALUES(1,0,'')")
+                db.execute("""CREATE TABLE IF NOT EXISTS nebula_schema_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )""")
+                db.execute("INSERT OR IGNORE INTO nebula_schema_meta(key,value) VALUES('initialized','1')")
 
     @staticmethod
     def make_client_order_id(strategy: str, instrument: str, candle_ts: int, side: str) -> str:

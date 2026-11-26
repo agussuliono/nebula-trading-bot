@@ -60,9 +60,9 @@ def test_order_request_is_guarded_and_marked_demo(tmp_path):
     permit.consume(client, state, instrument="BTC-USDT", size="0.001",
                     price="50000", client_order_id="NB123")
     from nebula.entry_gate import issue_risk_entry_permit
-    from nebula.risk_authorizer import _RiskAuthorizationEvidence, _EVIDENCE_TOKEN
-    evidence = _RiskAuthorizationEvidence(_EVIDENCE_TOKEN, account_uid="demo-test-uid",
-                                          instrument="BTC-USDT", size="0.001", price="50000")
+    from nebula.risk_authorizer import _issue_evidence
+    evidence = _issue_evidence(account_uid="demo-test-uid",
+                               instrument="BTC-USDT", size="0.001", price="50000")
     risk_permit = issue_risk_entry_permit(client, state, "demo-test-uid",
                                           instrument="BTC-USDT", size="0.001", price="50000",
                                           evidence=evidence)
@@ -541,7 +541,7 @@ def test_emergency_stop_blocks_buy_at_http_boundary_despite_permits(tmp_path):
                  max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100)
     client = OkxDemoClient(s, session=Session())
     from nebula.entry_gate import issue_startup_entry_permit, issue_risk_entry_permit
-    from nebula.risk_authorizer import _RiskAuthorizationEvidence, _EVIDENCE_TOKEN
+    from nebula.risk_authorizer import _issue_evidence
     from nebula.risk_controls import CircuitBreaker
     from nebula.state import StateStore
     state = StateStore(str(tmp_path / "stop.db"))
@@ -549,8 +549,8 @@ def test_emergency_stop_blocks_buy_at_http_boundary_despite_permits(tmp_path):
     client.install_startup_entry_permit(permit, state)
     permit.consume(client, state, instrument="BTC-USDT", size="0.001",
                     price="50000", client_order_id="NB125")
-    evidence = _RiskAuthorizationEvidence(_EVIDENCE_TOKEN, account_uid="demo-test-uid",
-                                          instrument="BTC-USDT", size="0.001", price="50000")
+    evidence = _issue_evidence(account_uid="demo-test-uid",
+                               instrument="BTC-USDT", size="0.001", price="50000")
     risk_permit = issue_risk_entry_permit(client, state, "demo-test-uid",
                                           instrument="BTC-USDT", size="0.001", price="50000",
                                           evidence=evidence)

@@ -473,3 +473,15 @@ def test_missing_emergency_stop_table_blocks_startup(tmp_path):
         db.execute("DROP TABLE emergency_stop")
     with pytest.raises(ValueError, match="safety state is missing"):
         StartupRecovery(CleanAccount(), state)
+
+
+def test_schema_marker_prevents_safety_reinitialization(tmp_path):
+    path = str(tmp_path / "marker.db")
+    state = StateStore(path)
+    with state._connect() as db:
+        db.execute("DROP TABLE intents")
+        db.execute("DROP TABLE emergency_stop")
+    reopened = StateStore(path)
+    from nebula.risk_controls import CircuitBreaker
+    with pytest.raises(ValueError, match="safety state is missing"):
+        CircuitBreaker(reopened, 20)

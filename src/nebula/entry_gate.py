@@ -148,8 +148,9 @@ def issue_risk_entry_permit(client, state, account_uid, *, instrument, size, pri
     snapshot, daily-loss, external-flow, and drawdown check passes. A caller
     without that evidence cannot mint a permit through this factory.
     """
-    from .risk_authorizer import _RiskAuthorizationEvidence
+    from .risk_authorizer import _RiskAuthorizationEvidence, _consume_evidence
     if (not isinstance(evidence, _RiskAuthorizationEvidence)
+            or not _consume_evidence(evidence)
             or evidence.binding != {
                 "instId": str(instrument), "sz": str(size), "px": str(price)}
             or evidence.account_uid != str(account_uid or "")):
