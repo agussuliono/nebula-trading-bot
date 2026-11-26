@@ -181,14 +181,16 @@ class Protocol:
     prospective_min_observations: int
     prospective_min_duration_days: int
     prospective_min_completeness: float
-    preregistered_exclusions: frozenset = frozenset()
+    preregistered_exclusions: Mapping = MappingProxyType({})
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "dataset_hashes", MappingProxyType(dict(self.dataset_hashes))
         )
         object.__setattr__(
-            self, "preregistered_exclusions", frozenset(self.preregistered_exclusions)
+            self,
+            "preregistered_exclusions",
+            MappingProxyType(dict(self.preregistered_exclusions)),
         )
 
     def canonical(self) -> str:
@@ -205,7 +207,7 @@ class Protocol:
                 "prospective_min_observations": self.prospective_min_observations,
                 "prospective_min_duration_days": self.prospective_min_duration_days,
                 "prospective_min_completeness": self.prospective_min_completeness,
-                "preregistered_exclusions": sorted(self.preregistered_exclusions),
+                "preregistered_exclusions": {str(k): v for k, v in sorted(self.preregistered_exclusions.items())},
             }
         )
 
@@ -311,7 +313,14 @@ def _sharpe(values: Sequence[float]) -> float:
 
 def _derive_combinations(trials: Sequence[Sequence[float]]):
     """CSCV combinations derived deterministically from registry returns."""
-    if not trials or len(trials[0]) < 4:
+    if not trials:
+        return []
+    length = len(trials[0])
+    if length < 4 or length % 4 != 0:
+        return []
+    if any(len(trial) != length for trial in trials):
+        return []
+    if any(not math.isfinite(v) for trial in trials for v in trial):
         return []
     blocks = 4
     size = len(trials[0]) // blocks
@@ -342,13 +351,12 @@ def evaluate_pbo_gate(
         return StatResult.inconclusive(
             "candidate excluded after performance was seen"
         )
-    unregistered = registry.all_exclusions(experiment_id) - set(
-        frozen.protocol.preregistered_exclusions
-    )
-    if unregistered:
-        return StatResult.inconclusive(
-            "candidate excluded without preregistration"
-        )
+    reasons = registry.exclusion_reasons(experiment_id)
+    for index, reason in reasons.items():
+        if frozen.protocol.preregistered_exclusions.get(index) != reason:
+            return StatResult.inconclusive(
+                "candidate excluded without preregistration"
+            )
     try:
         trials = [returns for _, returns in registry.trial_returns(experiment_id)]
     except Exception:
@@ -551,26 +559,40 @@ def evaluate_promotion(
         reasons.append("cumulative trial set does not match registry")
     return PromotionDecision(eligible=not reasons, reasons=tuple(reasons))
 
-_STAT_ARTIFACT_TEMPLATE = {
-    "return_series_artifact_sha256": "a" * 64,
-    "split_manifest_sha256": "b" * 64,
-    "benchmark_id": "fixture-benchmark",
-    "sample_count": 4,
-    "return_skewness": 0.0,
-    "return_kurtosis": 3.0,
-    "observed_sharpe": 0.1,
-    "effective_trial_count": 2.0,
-    "trial_correlation_artifact_sha256": "c" * 64,
-    "selection_rule": "max",
-    "researcher_decision_log_sha256": "d" * 64,
-}
-
-
 def _stat_artifacts(registry, experiment_id: str, frozen: "FrozenProtocol") -> dict:
-    artifacts = dict(_STAT_ARTIFACT_TEMPLATE)
-    artifacts["protocol_sha256"] = frozen.sha256
-    artifacts["trial_ids"] = sorted(registry.trial_ids(experiment_id))
-    return artifacts
+    """Computed statistical artifacts bound to the registry returns."""
+    stored = registry.trial_returns(experiment_id)
+    trials = [list(returns) for _, returns in stored]
+    best = max(trials, key=_sharpe)
+    mean = sum(best) / len(best)
+    var = sum((v - mean) ** 2 for v in best) / len(best)
+    std = math.sqrt(var) if var > 0 else 0.0
+    skewness = (
+        sum(((v - mean) / std) ** 3 for v in best) / len(best) if std else 0.0
+    )
+    kurtosis = (
+        sum(((v - mean) / std) ** 4 for v in best) / len(best) if std else 3.0
+    )
+    combinations = _derive_combinations([tuple(t) for t in trials])
+    return {
+        "return_series_artifact_sha256": _trials_digest(trials),
+        "split_manifest_sha256": sha256_hex(
+            canonical_json({"combinations": [[list(a), list(b)] for a, b in combinations]})
+        ),
+        "benchmark_id": "registry-returns",
+        "sample_count": len(best),
+        "return_skewness": skewness,
+        "return_kurtosis": kurtosis,
+        "observed_sharpe": _sharpe(best),
+        "effective_trial_count": float(len(trials)),
+        "trial_correlation_artifact_sha256": _correlation_digest(trials),
+        "selection_rule": "max-sharpe",
+        "researcher_decision_log_sha256": sha256_hex(
+            canonical_json({"protocol_sha256": frozen.sha256})
+        ),
+        "protocol_sha256": frozen.sha256,
+        "trial_ids": sorted(registry.trial_ids(experiment_id)),
+    }
 
 
 def run_pbo_and_record(registry, experiment_id: str, frozen) -> StatResult:
@@ -612,7 +634,7 @@ def _best_trial_id(registry, experiment_id: str) -> str:
 def _artifact_passed(
     registry, experiment_id: str, method: str, artifact_bytes: bytes, frozen
 ) -> bool:
-    """Compute artifact validity from its content, never from a caller flag."""
+    """Compute artifact validity from its data, never from summary claims."""
     try:
         payload = json.loads(artifact_bytes.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
@@ -620,27 +642,41 @@ def _artifact_passed(
     if not isinstance(payload, dict):
         return False
     if method == "snapshot":
-        return payload.get("schema") == "snapshot-v1" and payload.get(
-            "trial_ids"
-        ) == sorted(registry.trial_ids(experiment_id))
+        trials = [list(r) for _, r in registry.trial_returns(experiment_id)]
+        expected = hashlib.sha256(
+            json.dumps(trials, separators=(",", ":")).encode()
+        ).hexdigest()
+        return (
+            payload.get("schema") == "snapshot-v1"
+            and payload.get("trial_ids") == sorted(registry.trial_ids(experiment_id))
+            and payload.get("protocol_sha256") == frozen.sha256
+            and payload.get("returns_sha256") == expected
+        )
     if method == "walk_forward":
-        score = payload.get("plateau_score")
-        return (
-            payload.get("schema") == "walk-forward-v1"
-            and isinstance(score, (int, float))
-            and math.isfinite(score)
-            and score >= 0.5
-        )
+        folds = payload.get("fold_returns")
+        if payload.get("schema") != "walk-forward-v1" or not isinstance(folds, list) or len(folds) < 2:
+            return False
+        sharpes = []
+        for fold in folds:
+            if not isinstance(fold, list) or len(fold) < 2:
+                return False
+            if any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in fold):
+                return False
+            sharpes.append(_sharpe([float(v) for v in fold]))
+        return min(sharpes) >= 0 and sum(sharpes) / len(sharpes) > 0
     if method == "stress":
-        net = payload.get("net_sharpe")
-        return (
-            payload.get("schema") == "stress-v1"
-            and payload.get("fee_bps") == frozen.protocol.fee_bps
-            and payload.get("slippage_bps") == frozen.protocol.slippage_bps
-            and isinstance(net, (int, float))
-            and math.isfinite(net)
-            and net > 0
-        )
+        gross = payload.get("gross_returns")
+        if payload.get("schema") != "stress-v1" or not isinstance(gross, list) or len(gross) < 2:
+            return False
+        if payload.get("fee_bps") != frozen.protocol.fee_bps:
+            return False
+        if payload.get("slippage_bps") != frozen.protocol.slippage_bps:
+            return False
+        if any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in gross):
+            return False
+        cost = (frozen.protocol.fee_bps + frozen.protocol.slippage_bps) / 10000.0
+        net = [float(v) - cost for v in gross]
+        return _sharpe(net) > 0
     return False
 
 

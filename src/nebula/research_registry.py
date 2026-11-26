@@ -764,13 +764,30 @@ class ResearchRegistry:
                 excluded.add(index)
         return frozenset(excluded)
 
+    def exclusion_reasons(self, experiment_id: str) -> dict:
+        """Candidate index -> recorded exclusion reason."""
+        rows = self._conn.execute(
+            "SELECT reason FROM experiment_status_events WHERE experiment_id = ? "
+            "AND new_status = 'candidate_excluded' ORDER BY rowid",
+            (experiment_id,),
+        ).fetchall()
+        reasons = {}
+        for (reason,) in rows:
+            payload = json.loads(reason)
+            index = payload.get("candidate_index")
+            if isinstance(index, int) and not isinstance(index, bool):
+                reasons[index] = payload.get("reason")
+        return reasons
+
     def trial_returns(self, experiment_id: str) -> tuple[tuple[str, tuple[float, ...]], ...]:
-        """Stored per-trial returns keyed by trial_id, in trial_id order."""
+        """Stored per-trial returns; reading them records performance exposure."""
         rows = self._conn.execute(
             "SELECT trial_id, metrics_json FROM experiment_trials "
             "WHERE experiment_id = ? ORDER BY trial_id",
             (experiment_id,),
         ).fetchall()
+        for index, _ in enumerate(rows):
+            self.record_performance_seen(experiment_id, index, "registry-read")
         result = []
         for trial_id, metrics_json in rows:
             returns = json.loads(metrics_json).get("returns")

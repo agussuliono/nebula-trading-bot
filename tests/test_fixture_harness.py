@@ -33,12 +33,32 @@ TRIALS = [
     [0.01, -0.02, 0.03, 0.0, -0.01, 0.02, 0.0, 0.01],
     [-0.02, 0.01, -0.01, 0.02, 0.0, -0.02, 0.01, -0.01],
 ]
-SNAPSHOT_BYTES = json.dumps(
-    {"schema": "snapshot-v1", "trial_ids": ["t0", "t1", "t2"]}
+def _snapshot_bytes(frozen):
+    return json.dumps(
+        {
+            "schema": "snapshot-v1",
+            "trial_ids": ["t0", "t1", "t2"],
+            "protocol_sha256": frozen.sha256,
+            "returns_sha256": hashlib.sha256(
+                json.dumps(TRIALS, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+    ).encode()
+
+
+WF_BYTES = json.dumps(
+    {
+        "schema": "walk-forward-v1",
+        "fold_returns": [[0.02, 0.03, 0.01], [0.01, 0.02, 0.03], [0.03, 0.01, 0.02]],
+    }
 ).encode()
-WF_BYTES = json.dumps({"schema": "walk-forward-v1", "plateau_score": 0.8}).encode()
 STRESS_BYTES = json.dumps(
-    {"schema": "stress-v1", "fee_bps": 10.0, "slippage_bps": 5.0, "net_sharpe": 0.4}
+    {
+        "schema": "stress-v1",
+        "fee_bps": 10.0,
+        "slippage_bps": 5.0,
+        "gross_returns": [0.03, 0.02, 0.01, 0.02, 0.03, 0.01, 0.02, 0.03],
+    }
 ).encode()
 
 
@@ -55,7 +75,7 @@ def protocol(**overrides):
         prospective_min_observations=30,
         prospective_min_duration_days=14,
         prospective_min_completeness=0.95,
-        preregistered_exclusions=frozenset(),
+        preregistered_exclusions={},
     )
     base.update(overrides)
     return Protocol(**base)
@@ -102,13 +122,26 @@ def test_pbo_exclusion_after_performance_seen_event(registry, frozen):
     assert evaluate_pbo_gate(frozen, registry, "exp1").status == "inconclusive"
 
 
+def test_pbo_reading_returns_marks_exposure(tmp_path):
+    frozen = freeze_protocol(protocol(preregistered_exclusions={1: "weak"}))
+    reg = ResearchRegistry(str(tmp_path / "r.db"))
+    reg.register_experiment("exp1", "hyp", frozen.sha256, "d" * 64, "abc123", "c" * 64)
+    reg.freeze_protocol("exp1", "test")
+    for idx, returns in enumerate(TRIALS):
+        reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", {}, {"returns": returns})
+    reg.trial_returns("exp1")
+    reg.record_candidate_exclusion("exp1", 1, "weak", "test")
+    assert evaluate_pbo_gate(frozen, reg, "exp1").status == "inconclusive"
+    reg.close()
+
+
 def test_pbo_unregistered_pre_performance_exclusion(registry, frozen):
     registry.record_candidate_exclusion("exp1", 1, "weak", "test")
     assert evaluate_pbo_gate(frozen, registry, "exp1").status == "inconclusive"
 
 
 def test_pbo_preregistered_exclusion_is_ok(tmp_path):
-    frozen = freeze_protocol(protocol(preregistered_exclusions=frozenset({1})))
+    frozen = freeze_protocol(protocol(preregistered_exclusions={1: "weak"}))
     reg = ResearchRegistry(str(tmp_path / "r.db"))
     reg.register_experiment("exp1", "hyp", frozen.sha256, "d" * 64, "abc123", "c" * 64)
     reg.freeze_protocol("exp1", "test")
@@ -131,11 +164,11 @@ def test_prospective_gate_rejects_non_finite(frozen):
 def _record_evidence(registry, frozen):
     run_pbo_and_record(registry, "exp1", frozen)
     run_dsr_and_record(registry, "exp1", frozen)
-    record_artifact_validation(registry, "exp1", "snapshot", SNAPSHOT_BYTES, frozen)
+    record_artifact_validation(registry, "exp1", "snapshot", _snapshot_bytes(frozen), frozen)
     record_artifact_validation(registry, "exp1", "walk_forward", WF_BYTES, frozen)
     record_artifact_validation(registry, "exp1", "stress", STRESS_BYTES, frozen)
     return PromotionEvidence(
-        snapshot_bytes=SNAPSHOT_BYTES,
+        snapshot_bytes=_snapshot_bytes(frozen),
         walk_forward_bytes=WF_BYTES,
         stress_bytes=STRESS_BYTES,
         trial_ids=("t0", "t1", "t2"),
@@ -188,12 +221,18 @@ def test_promotion_rejects_fabricated_stat_with_correct_metadata(registry, froze
 def test_promotion_rejects_forged_artifact_content(registry, frozen):
     evidence = _record_evidence(registry, frozen)
     forged = PromotionEvidence(
-        snapshot_bytes=json.dumps({"schema": "snapshot-v1", "trial_ids": ["t0"]}).encode(),
+        snapshot_bytes=json.dumps({"schema": "walk-forward-v1", "plateau_score": 0.99}).encode(),
         walk_forward_bytes=evidence.walk_forward_bytes,
         stress_bytes=evidence.stress_bytes,
         trial_ids=evidence.trial_ids,
     )
-    record_artifact_validation(registry, "exp1", "snapshot", forged.snapshot_bytes, frozen)
+    record_artifact_validation(registry, "exp1", "walk_forward", forged.snapshot_bytes, frozen)
+    forged = PromotionEvidence(
+        snapshot_bytes=evidence.snapshot_bytes,
+        walk_forward_bytes=forged.snapshot_bytes,
+        stress_bytes=evidence.stress_bytes,
+        trial_ids=evidence.trial_ids,
+    )
     assert _promotion(registry, frozen, evidence=forged).eligible is False
 
 
