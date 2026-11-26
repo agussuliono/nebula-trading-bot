@@ -35,6 +35,44 @@ def test_execution_report_redaction_removes_order_and_account_detail():
     assert redacted["candidate"] == {"present": True}
     assert redacted["entry"] == {"present": True, "status": "filled"}
     assert redacted["order_submission_attempts"] == 2
+    assert "nested" not in redacted
+
+
+def test_execution_redaction_allowlist_covers_orchestrator_branches():
+    branches = [
+        {  # entry + protection active
+            "mode": "demo_execution", "status": "entry_and_protection_active",
+            "candidate": {"candidate_entry_plan": {"size": "0.5", "entry_price": "61000"}},
+            "entry": {"exchange_order_id": "9001", "cumulative_fill_size": "0.5",
+                      "average_fill_price": "61001"},
+            "entry_reconciliation": {"status": "filled", "requested_size": "0.5"},
+            "protection": {"status": "active", "stop_loss": "59000", "take_profit": "65000"},
+            "position_lock_retained": True, "order_submission_attempts": 2,
+        },
+        {  # interrupted execution
+            "mode": "demo_execution", "status": "execution_interrupted",
+            "stage": "entry_submission", "error_type": "TimeoutError",
+            "entry_submission_attempted": True, "oco_submission_attempted": False,
+            "recovery": {"available_usdt": "70000", "account_equity_usdt": "73273"},
+            "equity_observation": {"equity": "73273"},
+            "exit_reconciliation": {"status": "pending", "exchange_order_id": "9002"},
+            "order_submission_attempts": 1,
+        },
+        {  # shadow candidate ready
+            "mode": "shadow_only", "status": "candidate_ready_but_execution_disabled",
+            "candidate": {"size": "0.5"}, "execution": "not_submitted",
+            "order_submission_attempts": 0,
+        },
+    ]
+    for report in branches:
+        serialized = json.dumps(_redact_execution_report(report), sort_keys=True)
+        for forbidden in ("0.5", "61000", "9001", "59000", "65000", "70000",
+                          "73273", "9002", "exchange_order_id", "stop_loss",
+                          "available_usdt", "entry_price"):
+            assert forbidden not in serialized, (report["status"], forbidden)
+        redacted = json.loads(serialized)
+        assert redacted["status"] == report["status"]
+        assert redacted["order_submission_attempts"] == report["order_submission_attempts"]
 
 
 def test_operator_emergency_stop_blocks_entry_until_confirmed_clear(tmp_path):
@@ -83,6 +121,28 @@ def test_state_backup_restore_preserves_safety_state(tmp_path):
     assert "after_backup_event" not in event_types
 
 
+def test_restore_never_clears_engaged_emergency_stop(tmp_path):
+    db = str(tmp_path / "state.db")
+    backup = str(tmp_path / "backup.db")
+    state = StateStore(db)
+    state.backup_to(backup)  # backup taken with stop disengaged
+    _operator_breaker(state).engage_emergency_stop("engaged after backup")
+    restored = state.restore_from(backup)
+    assert restored["emergency_stop_engaged"] is True
+    assert _emergency_status(state)["engaged"] is True
+    with pytest.raises(SafetyError):
+        _operator_breaker(state).check_entry_allowed()
+
+
+def test_emergency_stop_blocks_entries_but_allows_risk_reducing_sells(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    breaker = _operator_breaker(state)
+    breaker.engage_emergency_stop("operator test stop")
+    with pytest.raises(SafetyError):
+        breaker.check_order_allowed("buy")
+    assert breaker.check_order_allowed("sell")["manual_stop"] is True
+
+
 def test_restore_rejects_corrupt_source(tmp_path):
     state = StateStore(str(tmp_path / "state.db"))
     corrupt = tmp_path / "corrupt.db"
@@ -97,10 +157,62 @@ def test_cycle_gap_report_lists_missing_hourly_slots(tmp_path):
         state.record_event("runtime_cycle_completed", None, {
             "latest_candle_ts": BASE_TS + slot * HOUR_MS,
         })
-    report = _cycle_gap_report(state)
+    report = _cycle_gap_report(state, now_ms=BASE_TS + 4 * HOUR_MS + 5 * 60_000)
     assert report["status"] == "cycle_gaps_detected"
     assert report["processed_cycles"] == 3
     assert report["gaps"] == [BASE_TS + 2 * HOUR_MS]
+
+
+def test_cycle_gap_report_detects_trailing_gap_and_survives_event_volume(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    for slot in (0, 1):
+        state.record_event("runtime_cycle_completed", None, {
+            "latest_candle_ts": BASE_TS + slot * HOUR_MS,
+        })
+    for index in range(1005):
+        state.record_event("noise_event", None, {"n": index})
+    report = _cycle_gap_report(state, now_ms=BASE_TS + 4 * HOUR_MS + 5 * 60_000)
+    assert report["processed_cycles"] == 2
+    assert report["gaps"] == [BASE_TS + 2 * HOUR_MS, BASE_TS + 3 * HOUR_MS]
+
+
+def test_outcome_observation_full_lifecycle_is_finalized_and_idempotent(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    risk_plan = {
+        "instrument": "BTC-USDT", "size": "2", "entry_price": "100",
+        "stop_loss": "90", "take_profit": "130", "risk_to_stop_quote": "20",
+    }
+    assert state.reserve_entry_intent("NBentry", "BTC-USDT", 1, "buy", risk_plan,
+                                      signal_key="sig-1")
+    state.save_order_snapshot("NBentry", {"ordId": "111", "state": "filled", "sz": "2",
+                                          "accFillSz": "2", "avgPx": "100",
+                                          "fee": "-0.1", "feeCcy": "USDT"})
+    for step in ("submitting", "acknowledged", "live", "filled"):
+        state.update_intent("NBentry", step, "111")
+    fill = {"instId": "BTC-USDT", "ordId": "111", "tradeId": "1", "clOrdId": "NBentry",
+            "side": "buy", "fillSz": "2", "fillPx": "100", "fee": "-0.1",
+            "feeCcy": "USDT", "fillTime": "2026-11-26T00:00:00Z"}
+    assert state.save_fill(fill)
+    state.reserve_protection_intent(entry_client_order_id="NBentry", instrument="BTC-USDT",
+                                    algo_client_order_id="NBalgo", filled_size="2",
+                                    take_profit="130", stop_loss="90")
+    state.update_protection_intent("NBentry", "active", "999")
+    state.save_exit_child_orders("NBentry", "BTC-USDT", ["222"])
+    exit_fill = dict(fill, ordId="222", tradeId="2", clOrdId="", side="sell",
+                     fillSz="2", fillPx="115")
+    assert state.save_fill(exit_fill)
+    state.update_exit_child_order("NBentry", "222",
+                                  {"state": "filled", "sz": "2", "accFillSz": "2",
+                                   "avgPx": "115"})
+    assert state.release_position_lock_after_flat_check(
+        position_client_order_id="NBentry", base_balance="0", dust_limit="0",
+        open_orders_checked=True)
+    first = _outcome_observation_summary(state)
+    assert first["accounting_finalized"] == 1
+    assert first["recorded_events"] >= 1
+    second = _outcome_observation_summary(state)
+    assert second["recorded_events"] == 0
+    assert second["accounting_finalized"] == 0
 
 
 def test_outcome_observation_summary_on_empty_state(tmp_path):

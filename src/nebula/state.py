@@ -781,7 +781,10 @@ class StateStore:
             integrity = probe.execute("PRAGMA integrity_check").fetchone()[0]
             tables = {row[0] for row in probe.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
-            required = {"emergency_stop", "daily_pnl_events", "audit_events"}
+            required = {
+                "emergency_stop", "daily_pnl_events", "audit_events",
+                "intents", "position_lock", "nebula_schema_meta",
+            }
             stop_row = None
             if required.issubset(tables):
                 stop_row = probe.execute(
@@ -791,6 +794,21 @@ class StateStore:
             probe.close()
         if integrity != "ok" or stop_row is None:
             raise ValueError("Restore source failed integrity or safety-state validation")
+        # Refuse to restore over a database another process is writing, and
+        # checkpoint the WAL first so the file swap cannot lose committed data.
+        guard = sqlite3.connect(self.path, timeout=0)
+        try:
+            guard.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            guard.execute("BEGIN IMMEDIATE")
+            current_stop = guard.execute(
+                "SELECT engaged FROM emergency_stop WHERE singleton=1"
+            ).fetchone()
+            guard.execute("ROLLBACK")
+        except sqlite3.OperationalError as exc:
+            raise ValueError("State database is in use; restore refused") from exc
+        finally:
+            guard.close()
+        currently_engaged = bool(current_stop and current_stop[0])
         staging = f"{self.path}.restore-staging"
         shutil.copyfile(source, staging)
         os.chmod(staging, 0o600)
@@ -800,8 +818,39 @@ class StateStore:
             except FileNotFoundError:
                 pass
         os.replace(staging, self.path)
+        engaged = bool(stop_row[0])
+        if currently_engaged and not engaged:
+            # Emergency stop is monotonic across restore: an older backup must
+            # never silently clear a stop engaged after it was taken.
+            with self._connect() as db:
+                db.execute(
+                    "UPDATE emergency_stop SET engaged=1,reason=?,"
+                    "updated_at=CURRENT_TIMESTAMP WHERE singleton=1",
+                    ("emergency stop preserved across state restore",),
+                )
+                db.execute(
+                    "INSERT INTO audit_events(event_type,client_order_id,details_json)"
+                    " VALUES(?,?,?)",
+                    ("emergency_stop_preserved_on_restore", None, "{}"),
+                )
+            engaged = True
         return {"status": "state_restored", "integrity": integrity,
-                "emergency_stop_engaged": bool(stop_row[0])}
+                "emergency_stop_engaged": engaged}
+
+    def list_cycle_events(self) -> list[dict[str, Any]]:
+        """All completed-cycle events, without the general event-list cap."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM audit_events WHERE event_type=?"
+                " ORDER BY id ASC",
+                ("runtime_cycle_completed",),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["details"] = json.loads(item.pop("details_json"))
+                result.append(item)
+            return result
 
     def list_events(self, limit: int = 100) -> list[dict[str, Any]]:
         if not 1 <= limit <= 1000:

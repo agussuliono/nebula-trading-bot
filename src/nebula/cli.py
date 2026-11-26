@@ -10,35 +10,43 @@ from .output import emit_result
 from .portfolio import PortfolioPolicy, PortfolioRiskEngine
 
 
-_EXECUTION_PAYLOAD_KEYS = {
-    "candidate", "entry", "scan", "reconciliation",
-    "entry_reconciliation", "protection",
+_SAFE_SCALAR_KEYS = {
+    "mode", "status", "execution", "reason", "stage", "error_type",
+    "order_submission_attempts", "do_not_retry", "position_lock_retained",
+    "entry_submission_attempted", "oco_submission_attempted",
 }
-_SENSITIVE_OUTPUT_KEYS = {
-    "size", "sz", "price", "px", "notional", "order_id", "ord_id",
-    "client_order_id", "cl_ord_id", "balance", "equity", "pnl",
-    "realized_pnl", "fee", "amount", "qty", "quantity",
+_PAYLOAD_SUMMARY_KEYS = {
+    "candidate", "entry", "scan", "reconciliation", "entry_reconciliation",
+    "exit_reconciliation", "protection", "recovery", "equity_observation",
 }
 
 
-def _redact_execution_report(value):
-    """Strip order-plan and account detail before a report reaches logs."""
-    if isinstance(value, dict):
-        redacted = {}
-        for key, item in value.items():
-            if key in _EXECUTION_PAYLOAD_KEYS:
-                summary = {"present": item is not None}
-                if isinstance(item, dict) and isinstance(item.get("status"), str):
-                    summary["status"] = item["status"]
-                redacted[key] = summary
-            elif key in _SENSITIVE_OUTPUT_KEYS:
-                continue
-            else:
-                redacted[key] = _redact_execution_report(item)
-        return redacted
-    if isinstance(value, list):
-        return [_redact_execution_report(item) for item in value]
-    return value
+def _redact_execution_report(report):
+    """Allowlist-only execution output: statuses and counts, never payloads."""
+    if not isinstance(report, dict):
+        return {"status": "unrecognized_report"}
+    redacted = {}
+    for key in _SAFE_SCALAR_KEYS:
+        value = report.get(key)
+        if isinstance(value, (str, int, bool)) or value is None:
+            if key in report:
+                redacted[key] = value
+    for key in _PAYLOAD_SUMMARY_KEYS:
+        if key in report:
+            item = report[key]
+            summary = {"present": item is not None}
+            if isinstance(item, dict) and isinstance(item.get("status"), str):
+                summary["status"] = item["status"]
+            redacted[key] = summary
+    observation = report.get("outcome_observation")
+    if isinstance(observation, dict):
+        redacted["outcome_observation"] = {
+            key: observation[key]
+            for key in ("recorded_events", "accounting_finalized",
+                        "legacy_episode_unavailable", "status", "error_type")
+            if isinstance(observation.get(key), (str, int))
+        }
+    return redacted
 
 
 def _outcome_observation_summary(state):
@@ -70,12 +78,16 @@ def _operator_breaker(state):
     return CircuitBreaker(state, limit if limit > 0 else "1")
 
 
-def _cycle_gap_report(state):
-    """List hourly candle slots with no completed runtime cycle."""
+def _cycle_gap_report(state, *, now_ms=None):
+    """List hourly candle slots with no completed runtime cycle.
+
+    The expected range runs from the first processed slot through the last
+    closed hourly slot before ``now_ms``, so trailing gaps are reported too.
+    """
+    import time as _time
+
     processed = []
-    for event in state.list_events(limit=1000):
-        if event.get("event_type") != "runtime_cycle_completed":
-            continue
+    for event in state.list_cycle_events():
         candle_ts = (event.get("details") or {}).get("latest_candle_ts")
         if isinstance(candle_ts, int) and candle_ts > 0:
             processed.append(candle_ts)
@@ -83,9 +95,13 @@ def _cycle_gap_report(state):
     if not processed:
         return {"status": "no_processed_cycles", "processed_cycles": 0, "gaps": []}
     step_ms = 3_600_000
+    if now_ms is None:
+        now_ms = int(_time.time() * 1000)
+    last_expected = (now_ms // step_ms) * step_ms - step_ms
+    range_end = max(processed[-1], last_expected)
     present = set(processed)
     gaps = [
-        slot for slot in range(processed[0], processed[-1] + step_ms, step_ms)
+        slot for slot in range(processed[0], range_end + step_ms, step_ms)
         if slot not in present
     ]
     return {
@@ -93,6 +109,7 @@ def _cycle_gap_report(state):
         "processed_cycles": len(processed),
         "first_candle_ts": processed[0],
         "last_candle_ts": processed[-1],
+        "last_expected_candle_ts": last_expected,
         "gap_count": len(gaps),
         "gaps": gaps,
     }
