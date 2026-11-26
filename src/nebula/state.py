@@ -1618,13 +1618,13 @@ class StateStore:
                 raise ValueError("Legacy sell predates the candidate owning position")
             other_position_rows = db.execute(
                 "SELECT i.client_order_id AS intent_client_order_id,"
-                " f.client_order_id AS fill_client_order_id,f.fill_time FROM intents i"
+                " f.client_order_id AS fill_client_order_id,f.fill_size,f.fill_time FROM intents i"
                 " JOIN fills f ON f.instrument=i.instrument"
                 " AND f.exchange_order_id=i.exchange_order_id AND f.side='buy'"
                 " WHERE i.instrument=? AND i.side='buy' AND i.client_order_id<>?",
                 (sell["instrument"], position_client_order_id),
             ).fetchall()
-            other_first_fills: dict[str, int] = {}
+            other_positions: dict[str, dict[str, Any]] = {}
             for row in other_position_rows:
                 other_id = str(row["intent_client_order_id"])
                 fill_client = str(row["fill_client_order_id"] or "")
@@ -1632,13 +1632,78 @@ class StateStore:
                     raise ValueError(
                         "Legacy sell ownership is ambiguous because another buy fill identity conflicts"
                     )
+                try:
+                    fill_size = Decimal(str(row["fill_size"]))
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "Legacy sell ownership cannot be proven from an invalid fill size"
+                    ) from exc
+                if not fill_size.is_finite() or fill_size <= 0:
+                    raise ValueError(
+                        "Legacy sell ownership cannot be proven from an invalid fill size"
+                    )
                 fill_ms = parse_fill_time_ms(row["fill_time"])
-                other_first_fills[other_id] = min(fill_ms, other_first_fills.get(other_id, fill_ms))
-            if any(first_position_fill_ms <= other_ms <= first_sell_fill_ms
-                   for other_ms in other_first_fills.values()):
-                raise ValueError(
-                    "Legacy sell ownership is ambiguous because another buy position intervenes"
+                other = other_positions.setdefault(
+                    other_id, {"first_ms": fill_ms, "buy_total": Decimal("0")})
+                other["first_ms"] = min(fill_ms, other["first_ms"])
+                other["buy_total"] += fill_size
+
+            def proven_closed_before(other_id: str, buy_total: Decimal) -> bool:
+                sell_total = Decimal("0")
+                last_sell_ms: int | None = None
+                sell_orders: list[tuple[str, str]] = []
+                for row in db.execute(
+                    "SELECT client_order_id,exchange_order_id FROM intents"
+                    " WHERE instrument=? AND side='sell' AND position_client_order_id=?"
+                    " AND exchange_order_id IS NOT NULL",
+                    (sell["instrument"], other_id),
+                ).fetchall():
+                    sell_orders.append(
+                        (str(row["client_order_id"]), str(row["exchange_order_id"])))
+                for row in db.execute(
+                    "SELECT exchange_order_id FROM exit_child_orders"
+                    " WHERE entry_client_order_id=?",
+                    (other_id,),
+                ).fetchall():
+                    sell_orders.append(("", str(row["exchange_order_id"])))
+                for sell_client, sell_exchange in sell_orders:
+                    for row in db.execute(
+                        "SELECT client_order_id,fill_size,fill_time FROM fills"
+                        " WHERE instrument=? AND side='sell' AND exchange_order_id=?",
+                        (sell["instrument"], sell_exchange),
+                    ).fetchall():
+                        fill_client = str(row["client_order_id"] or "")
+                        if fill_client not in {"", sell_client}:
+                            return False
+                        try:
+                            fill_size = Decimal(str(row["fill_size"]))
+                        except (InvalidOperation, TypeError, ValueError):
+                            return False
+                        if not fill_size.is_finite() or fill_size <= 0:
+                            return False
+                        sell_total += fill_size
+                        fill_ms = parse_fill_time_ms(row["fill_time"])
+                        last_sell_ms = fill_ms if last_sell_ms is None else max(
+                            fill_ms, last_sell_ms)
+                return (
+                    sell_total >= buy_total
+                    and last_sell_ms is not None
+                    and last_sell_ms < first_position_fill_ms
                 )
+
+            for other_id, other in other_positions.items():
+                other_ms = other["first_ms"]
+                if other_ms > first_sell_fill_ms:
+                    continue
+                if other_ms >= first_position_fill_ms:
+                    raise ValueError(
+                        "Legacy sell ownership is ambiguous because another buy position intervenes"
+                    )
+                if not proven_closed_before(other_id, other["buy_total"]):
+                    raise ValueError(
+                        "Legacy sell ownership is ambiguous because an earlier buy position "
+                        "is not proven closed"
+                    )
             known_buy_exchange_ids = {
                 str(row["exchange_order_id"])
                 for row in db.execute(
@@ -1655,7 +1720,7 @@ class StateStore:
                 if str(row["exchange_order_id"]) in known_buy_exchange_ids:
                     continue
                 fill_ms = parse_fill_time_ms(row["fill_time"])
-                if first_position_fill_ms <= fill_ms <= first_sell_fill_ms:
+                if fill_ms <= first_sell_fill_ms:
                     raise ValueError(
                         "Legacy sell ownership is ambiguous because an unknown buy fill intervenes"
                     )
