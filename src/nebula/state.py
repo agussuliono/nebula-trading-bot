@@ -527,6 +527,13 @@ class StateStore:
             ).fetchone()
             if snapshot is not None and Decimal(str(snapshot["cumulative_fill_size"])) > 0:
                 ambiguous_legacy.append(legacy)
+                continue
+            ledger_fill = db.execute(
+                "SELECT 1 FROM fills WHERE client_order_id=? LIMIT 1",
+                (legacy["client_order_id"],),
+            ).fetchone()
+            if ledger_fill is not None:
+                ambiguous_legacy.append(legacy)
         if ambiguous_legacy:
             raise ValueError(
                 "Position inventory reconciliation is incomplete: a legacy sell"
@@ -1507,6 +1514,42 @@ class StateStore:
                  str(fee),str(fill["feeCcy"]),str(rebate),str(fill.get("rebateCcy") or ""),
                  str(fill.get("fillTime") or fill.get("ts") or ""),raw))
             return True
+
+    def reconcile_legacy_sell(self, sell_client_order_id: str,
+                              position_client_order_id: str, evidence: str) -> dict[str, Any]:
+        """Manually attribute one legacy sell to its owning buy position, audited."""
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ValueError("Manual legacy reconciliation requires supporting evidence")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            sell = db.execute(
+                "SELECT instrument,side,position_client_order_id FROM intents WHERE client_order_id=?",
+                (sell_client_order_id,),
+            ).fetchone()
+            if sell is None or sell["side"] != "sell" or sell["position_client_order_id"] is not None:
+                raise ValueError("Only an unlinked legacy sell intent can be reconciled")
+            position = db.execute(
+                "SELECT instrument,side FROM intents WHERE client_order_id=?",
+                (position_client_order_id,),
+            ).fetchone()
+            if position is None or position["side"] != "buy":
+                raise ValueError("Legacy sell owner must be an existing Spot buy position")
+            if position["instrument"] != sell["instrument"]:
+                raise ValueError("Legacy sell instrument does not match the owning position")
+            db.execute(
+                "UPDATE intents SET position_client_order_id=? WHERE client_order_id=?",
+                (position_client_order_id, sell_client_order_id),
+            )
+            db.execute(
+                "INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
+                ("legacy_sell_reconciled", sell_client_order_id,
+                 json.dumps({"position_client_order_id": position_client_order_id,
+                             "instrument": sell["instrument"],
+                             "evidence": evidence.strip()}, sort_keys=True)),
+            )
+            row = db.execute("SELECT * FROM intents WHERE client_order_id=?",
+                             (sell_client_order_id,)).fetchone()
+            return dict(row)
 
     def get_position_context(self, position_client_order_id: str) -> dict[str, Any]:
         """Return restart-reconciliation facts for the active position only."""

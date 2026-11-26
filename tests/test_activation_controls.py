@@ -845,8 +845,7 @@ def test_manual_reconciliation_attributes_legacy_sell_to_owner(tmp_path):
     with state._connect() as db:
         with pytest.raises(ValueError, match="legacy sell"):
             state._net_inventory(db, "NBentryA", "BTC-USDT")
-        db.execute("UPDATE intents SET position_client_order_id='NBentryA'"
-                   " WHERE client_order_id='NBlegacy'")
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "exchange fill 333 matches position A entry window")
         assert state._net_inventory(db, "NBentryA", "BTC-USDT") == Decimal("0.6")
         db.execute("DELETE FROM position_lock")
     _filled_entry_named(state, "NBentryB", "222", "0.6")
@@ -860,6 +859,7 @@ def test_rebate_rebuild_preserves_proven_values_and_integrity(tmp_path):
     seed = StateStore(str(path))
     assert seed.reserve_intent("NBkeep", "BTC-USDT", 1, "buy")
     assert seed.reserve_intent("NBunknown", "BTC-USDT", 2, "buy")
+    assert seed.reserve_intent("NBzero", "BTC-USDT", 3, "buy")
     conn = sqlite3.connect(path)
     conn.execute("DROP TABLE order_snapshots")
     conn.execute("""CREATE TABLE order_snapshots (
@@ -871,6 +871,7 @@ def test_rebate_rebuild_preserves_proven_values_and_integrity(tmp_path):
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
     conn.execute("INSERT INTO order_snapshots VALUES('NBkeep','111','filled','2','2','100','-0.2','USDT','0.05','BTC',CURRENT_TIMESTAMP)")
     conn.execute("INSERT INTO order_snapshots VALUES('NBunknown','222','filled','2','2','100','-0.2','USDT','0','',CURRENT_TIMESTAMP)")
+    conn.execute("INSERT INTO order_snapshots VALUES('NBzero','333','filled','2','2','100','-0.2','USDT','0','BTC',CURRENT_TIMESTAMP)")
     conn.commit()
     conn.close()
     state = StateStore(str(path))
@@ -878,9 +879,23 @@ def test_rebate_rebuild_preserves_proven_values_and_integrity(tmp_path):
     with state._connect() as db:
         rows = {row["client_order_id"]: row["rebate"] for row in db.execute(
             "SELECT client_order_id,rebate FROM order_snapshots")}
-        assert rows == {"NBkeep": "0.05", "NBunknown": None}
+        assert rows == {"NBkeep": "0.05", "NBunknown": None, "NBzero": "0"}
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_rejected_legacy_sell_with_ledger_fill_only_fails_closed(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="1")
+    assert state.reserve_intent("NBlegacy", "BTC-USDT", 5, "sell")
+    state.update_intent("NBlegacy", "submitting")
+    state.update_intent("NBlegacy", "rejected")
+    state.save_fill({"instId": "BTC-USDT", "ordId": "444", "tradeId": "9444",
+                     "side": "sell", "fillSz": "0.4", "fillPx": "110",
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBlegacy"})
+    with state._connect() as db:
+        with pytest.raises(ValueError, match="legacy sell"):
+            state._net_inventory(db, "NBentry", "BTC-USDT")
 
 
 def test_outcome_observation_summary_on_empty_state(tmp_path):
