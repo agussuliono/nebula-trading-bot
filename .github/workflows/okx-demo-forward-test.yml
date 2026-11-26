@@ -73,11 +73,11 @@ jobs:
           nebula orchestrate-once --execute-demo
 
       - name: Back up forward-test state
-              if: always()
+        if: always()
         run: |
           mkdir -p /home/nebularunner/nebula-forward-test/backups
           nebula backup-state --db /home/nebularunner/nebula-forward-test/state.db --output /home/nebularunner/nebula-forward-test/backups/state-backup.db
 
       - name: Report cycle gaps
-              if: always()
+        if: always()
         run: nebula cycle-gaps --db /home/nebularunner/nebula-forward-test/state.db
