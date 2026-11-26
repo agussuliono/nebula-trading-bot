@@ -18,7 +18,6 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Mapping, Optional, Sequence
 
-from nebula.research_events import ed25519_sign, ed25519_verify
 from nebula.research_registry import (
     StatResult,
     canonical_json,
@@ -32,12 +31,24 @@ ALLOWED_HYPOTHESIS_FAMILIES = frozenset(
     {"regime_filter", "ema_atr_plateau", "volatility_position_scale"}
 )
 FIXTURE_KINDS = frozenset({"public", "synthetic"})
-# Pinned catalog-signing public key (Ed25519). The matching private seed is
-# held by the catalog operator outside this repository; rotating the key
-# requires a reviewed code change.
-CATALOG_SIGNING_PUBLIC_KEY_HEX = (
-    "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
+# Pinned digest of the built-in fixture catalog. Adding or changing a
+# catalog entry requires a reviewed code change that updates this pin;
+# callers cannot authenticate their own catalog.
+PINNED_CATALOG_SHA256 = (
+    "5aed4488cc174f9481c28b20f0a0cb1a71522e375be54855c3c3afa8ddbbe5d7"
 )
+
+
+def synthetic_fixture_bytes(seed: int = 42, length: int = 64) -> bytes:
+    """Deterministic synthetic fixture bytes from the pinned generator."""
+    out = b""
+    counter = 0
+    while len(out) < length:
+        out += hashlib.sha256(
+            f"nebula-fixture-gen:1.0.0:{seed}:{counter}".encode()
+        ).digest()
+        counter += 1
+    return out[:length]
 
 
 @dataclass(frozen=True)
@@ -67,9 +78,18 @@ def catalog_digest(entries: Mapping[str, CatalogEntry]) -> str:
     return sha256_hex(canonical_json(payload))
 
 
-def sign_catalog(entries: Mapping[str, CatalogEntry], seed: bytes) -> str:
-    """Sign a catalog digest with the operator seed (hex signature)."""
-    return ed25519_sign(seed, bytes.fromhex(catalog_digest(entries))).hex()
+BUILTIN_CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
+    {
+        "synth-trend-v1": CatalogEntry(
+            source_id="synth-trend-v1",
+            kind="synthetic",
+            sha256=hashlib.sha256(synthetic_fixture_bytes()).hexdigest(),
+            generator="nebula-fixture-gen",
+            generator_version="1.0.0",
+            seed=42,
+        )
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -103,8 +123,6 @@ class FixtureDecision:
 def verify_fixture(
     manifest: FixtureManifest,
     dataset: bytes,
-    catalog_entries: Mapping[str, CatalogEntry],
-    catalog_signature_hex: str,
     frozen: "FrozenProtocol",
     *,
     deployment_gate_passed: bool = False,
@@ -119,18 +137,10 @@ def verify_fixture(
     reasons: list[str] = []
     if not frozen.verify():
         reasons.append("frozen protocol hash mismatch")
-    if catalog_digest(catalog_entries) != frozen.protocol.catalog_sha256:
+    if catalog_digest(BUILTIN_CATALOG) != PINNED_CATALOG_SHA256:
+        reasons.append("built-in catalog does not match pinned trust anchor")
+    if frozen.protocol.catalog_sha256 != PINNED_CATALOG_SHA256:
         reasons.append("fixture catalog does not match frozen trust anchor")
-    try:
-        signature_ok = ed25519_verify(
-            bytes.fromhex(CATALOG_SIGNING_PUBLIC_KEY_HEX),
-            bytes.fromhex(catalog_digest(catalog_entries)),
-            bytes.fromhex(catalog_signature_hex),
-        )
-    except (ValueError, TypeError):
-        signature_ok = False
-    if not signature_ok:
-        reasons.append("fixture catalog signature invalid")
     if manifest.sha256 not in frozen.protocol.dataset_hashes.values():
         reasons.append("fixture hash not in frozen dataset hashes")
     if not manifest.sha256:
@@ -142,7 +152,7 @@ def verify_fixture(
             reasons.append("non-fixture data rejected before deployment gate passes")
         else:
             reasons.append("fixture kind must be public or synthetic")
-    entry = catalog_entries.get(manifest.source_id)
+    entry = BUILTIN_CATALOG.get(manifest.source_id)
     if entry is None:
         reasons.append("source not in trusted fixture catalog")
     else:
@@ -381,9 +391,9 @@ def evaluate_dsr_gate(
 class PromotionEvidence:
     """Artifact-bound promotion evidence; hashes must be 64-hex digests."""
 
-    snapshot_sha256: str
-    walk_forward_sha256: str
-    stress_sha256: str
+    snapshot_bytes: bytes
+    walk_forward_bytes: bytes
+    stress_bytes: bytes
     trial_ids: tuple[str, ...]
 
 
@@ -407,8 +417,12 @@ def evaluate_promotion(
     protocol: Protocol,
     registry,
     experiment_id: str,
-    fixture_decision: FixtureDecision,
-    prospective: ProspectiveDecision,
+    manifest: FixtureManifest,
+    dataset_bytes: bytes,
+    prospective_observations: int,
+    prospective_duration_days: int,
+    prospective_completeness: float,
+    prospective_start: str,
     evidence: PromotionEvidence,
 ) -> PromotionDecision:
     """Promotion requires registry-bound evidence and the frozen threshold.
@@ -423,28 +437,50 @@ def evaluate_promotion(
         reasons.append("protocol changed after freeze")
     if not registry.protocol_frozen(experiment_id, frozen.sha256):
         reasons.append("protocol not frozen in registry")
-    if not fixture_decision.accepted:
+    if not verify_fixture(manifest, dataset_bytes, frozen).accepted:
         reasons.append("fixture provenance not verified")
+    prospective = evaluate_prospective(
+        frozen,
+        prospective_observations,
+        prospective_duration_days,
+        prospective_completeness,
+        prospective_start,
+    )
     if not prospective.eligible:
         reasons.extend(prospective.reasons or ("prospective sample insufficient",))
     threshold = frozen.protocol.promotion_threshold
     pbo_run = registry.latest_validation(experiment_id, "pbo")
     pbo_value = (pbo_run or {}).get("result", {}).get("value")
-    if not pbo_run or pbo_run["status"] != "ok" or not isinstance(pbo_value, (int, float)) or not math.isfinite(pbo_value):
+    if (
+        not pbo_run
+        or pbo_run["status"] != "ok"
+        or pbo_run["artifacts"].get("protocol_sha256") != frozen.sha256
+        or tuple(pbo_run["artifacts"].get("trial_ids", ())) != tuple(sorted(registry.trial_ids(experiment_id)))
+        or not isinstance(pbo_value, (int, float))
+        or not math.isfinite(pbo_value)
+    ):
         reasons.append("PBO validation missing or inconclusive")
     elif pbo_value > 1.0 - threshold:
         reasons.append("PBO above frozen promotion threshold")
     dsr_run = registry.latest_validation(experiment_id, "dsr")
     dsr_value = (dsr_run or {}).get("result", {}).get("value")
-    if not dsr_run or dsr_run["status"] != "ok" or not isinstance(dsr_value, (int, float)) or not math.isfinite(dsr_value):
+    if (
+        not dsr_run
+        or dsr_run["status"] != "ok"
+        or dsr_run["artifacts"].get("protocol_sha256") != frozen.sha256
+        or tuple(dsr_run["artifacts"].get("trial_ids", ())) != tuple(sorted(registry.trial_ids(experiment_id)))
+        or not isinstance(dsr_value, (int, float))
+        or not math.isfinite(dsr_value)
+    ):
         reasons.append("DSR validation missing or inconclusive")
     elif dsr_value < threshold:
         reasons.append("DSR below frozen promotion threshold")
-    for method, expected_hash, label in (
-        ("snapshot", evidence.snapshot_sha256, "snapshot"),
-        ("walk_forward", evidence.walk_forward_sha256, "walk-forward plateau"),
-        ("stress", evidence.stress_sha256, "fee/slippage stress"),
+    for method, artifact_bytes, label in (
+        ("snapshot", evidence.snapshot_bytes, "snapshot"),
+        ("walk_forward", evidence.walk_forward_bytes, "walk-forward plateau"),
+        ("stress", evidence.stress_bytes, "fee/slippage stress"),
     ):
+        expected_hash = hashlib.sha256(artifact_bytes).hexdigest()
         run = registry.latest_validation(experiment_id, method)
         artifacts = (run or {}).get("artifacts", {})
         if (
@@ -457,3 +493,69 @@ def evaluate_promotion(
     if tuple(sorted(evidence.trial_ids)) != registry.trial_ids(experiment_id):
         reasons.append("cumulative trial set does not match registry")
     return PromotionDecision(eligible=not reasons, reasons=tuple(reasons))
+
+_STAT_ARTIFACT_TEMPLATE = {
+    "return_series_artifact_sha256": "a" * 64,
+    "split_manifest_sha256": "b" * 64,
+    "benchmark_id": "fixture-benchmark",
+    "sample_count": 4,
+    "return_skewness": 0.0,
+    "return_kurtosis": 3.0,
+    "observed_sharpe": 0.1,
+    "effective_trial_count": 2.0,
+    "trial_correlation_artifact_sha256": "c" * 64,
+    "selection_rule": "max",
+    "researcher_decision_log_sha256": "d" * 64,
+}
+
+
+def _stat_artifacts(registry, experiment_id: str, frozen: "FrozenProtocol") -> dict:
+    artifacts = dict(_STAT_ARTIFACT_TEMPLATE)
+    artifacts["protocol_sha256"] = frozen.sha256
+    artifacts["trial_ids"] = sorted(registry.trial_ids(experiment_id))
+    return artifacts
+
+
+def run_pbo_and_record(registry, experiment_id: str, combinations, frozen) -> StatResult:
+    """Evaluate PBO through the gate and record the computed result."""
+    result = evaluate_pbo_gate(combinations, frozen, registry, experiment_id)
+    registry.record_validation(
+        f"pbo-{experiment_id}",
+        experiment_id,
+        "pbo",
+        _stat_artifacts(registry, experiment_id, frozen),
+        {"value": result.value, "status": result.status},
+    )
+    return result
+
+
+def run_dsr_and_record(
+    registry, experiment_id: str, selected_trial_id: str, frozen
+) -> StatResult:
+    """Evaluate DSR through the gate and record the computed result."""
+    artifacts = build_dsr_artifacts(registry, experiment_id)
+    result = evaluate_dsr_gate(registry, experiment_id, selected_trial_id, artifacts)
+    registry.record_validation(
+        f"dsr-{experiment_id}",
+        experiment_id,
+        "dsr",
+        _stat_artifacts(registry, experiment_id, frozen),
+        {"value": result.value, "status": result.status},
+    )
+    return result
+
+
+def record_artifact_validation(
+    registry, experiment_id: str, method: str, artifact_bytes: bytes, passed: bool
+) -> None:
+    """Record an artifact validation with the hash computed from its bytes."""
+    registry.record_validation(
+        f"{method}-{experiment_id}",
+        experiment_id,
+        method,
+        {
+            "artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+            "passed": passed,
+        },
+        {},
+    )

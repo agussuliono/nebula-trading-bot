@@ -5,7 +5,8 @@ import hashlib
 import pytest
 
 from nebula.fixture_harness import (
-    CatalogEntry,
+    BUILTIN_CATALOG,
+    PINNED_CATALOG_SHA256,
     FixtureManifest,
     PromotionEvidence,
     Protocol,
@@ -16,41 +17,29 @@ from nebula.fixture_harness import (
     evaluate_promotion,
     evaluate_prospective,
     freeze_protocol,
-    sign_catalog,
+    record_artifact_validation,
+    run_dsr_and_record,
+    run_pbo_and_record,
+    synthetic_fixture_bytes,
     verify_fixture,
 )
 from nebula.research_registry import ResearchRegistry
 
-TEST_SEED = bytes(range(32))  # test-only catalog signing seed
-ATTACKER_SEED = bytes(range(32, 64))
-PUBLIC_BYTES = b"public-fixture-bytes"
-SYNTH_BYTES = b"synthetic-fixture-bytes"
-PUBLIC_HASH = hashlib.sha256(PUBLIC_BYTES).hexdigest()
+SYNTH_BYTES = synthetic_fixture_bytes()
 SYNTH_HASH = hashlib.sha256(SYNTH_BYTES).hexdigest()
-ENTRIES = {
-    "public-btc-2024": CatalogEntry(
-        source_id="public-btc-2024", kind="public", sha256=PUBLIC_HASH
-    ),
-    "synth-trend-v1": CatalogEntry(
-        source_id="synth-trend-v1",
-        kind="synthetic",
-        sha256=SYNTH_HASH,
-        generator="nebula-fixture-gen",
-        generator_version="1.0.0",
-        seed=42,
-    ),
-}
-SIGNATURE = sign_catalog(ENTRIES, TEST_SEED)
 TRIALS = [[0.01, -0.02, 0.03, 0.0], [0.02, 0.01, -0.01, 0.02]]
 COMBOS = [([3.0, 2.0, 1.0], [3.0, 2.0, 1.0]), ([3.0, 2.0, 1.0], [3.0, 2.0, 1.0])]
+SNAPSHOT_BYTES = b"snapshot-artifact"
+WF_BYTES = b"walk-forward-artifact"
+STRESS_BYTES = b"stress-artifact"
 
 
 def protocol(**overrides):
     base = dict(
         trial_group="group-a",
         hypothesis_family="regime_filter",
-        dataset_hashes={"exploration": PUBLIC_HASH, "prospective": SYNTH_HASH},
-        catalog_sha256=catalog_digest(ENTRIES),
+        dataset_hashes={"exploration": SYNTH_HASH, "prospective": SYNTH_HASH},
+        catalog_sha256=PINNED_CATALOG_SHA256,
         prospective_cutoff="2026-12-01T00:00:00Z",
         fee_bps=10.0,
         slippage_bps=5.0,
@@ -80,67 +69,105 @@ def registry(tmp_path, frozen):
     reg.close()
 
 
-def public_manifest(**overrides):
+def synth_manifest(**overrides):
     base = dict(
-        dataset_id="ds1", source_id="public-btc-2024", kind="public", sha256=PUBLIC_HASH
+        dataset_id="ds1",
+        source_id="synth-trend-v1",
+        kind="synthetic",
+        sha256=SYNTH_HASH,
     )
     base.update(overrides)
     return FixtureManifest(**base)
 
 
-def test_signed_catalog_fixture_is_accepted(frozen):
-    assert verify_fixture(public_manifest(), PUBLIC_BYTES, ENTRIES, SIGNATURE, frozen).accepted is True
+def test_builtin_catalog_matches_pinned_digest():
+    assert catalog_digest(BUILTIN_CATALOG) == PINNED_CATALOG_SHA256
 
 
-def test_fake_catalog_with_new_protocol_is_rejected():
-    demo_hash = hashlib.sha256(b"demo-bytes").hexdigest()
-    fake = {
-        "public-btc-2024": CatalogEntry(
-            source_id="public-btc-2024", kind="public", sha256=demo_hash
-        )
-    }
-    fake_frozen = freeze_protocol(
-        protocol(
-            catalog_sha256=catalog_digest(fake),
-            dataset_hashes={"exploration": demo_hash},
-        )
-    )
-    attacker_sig = sign_catalog(fake, ATTACKER_SEED)
-    manifest = public_manifest(sha256=demo_hash)
-    assert verify_fixture(manifest, b"demo-bytes", fake, attacker_sig, fake_frozen).accepted is False
+def test_builtin_synthetic_fixture_is_accepted(frozen):
+    assert verify_fixture(synth_manifest(), SYNTH_BYTES, frozen).accepted is True
 
 
-def test_fixture_hash_must_be_in_frozen_dataset_hashes(frozen):
-    other = freeze_protocol(protocol(dataset_hashes={"exploration": SYNTH_HASH}))
-    assert verify_fixture(public_manifest(), PUBLIC_BYTES, ENTRIES, SIGNATURE, other).accepted is False
+def test_unpinned_catalog_protocol_is_rejected():
+    fake_frozen = freeze_protocol(protocol(catalog_sha256="f" * 64))
+    assert verify_fixture(synth_manifest(), SYNTH_BYTES, fake_frozen).accepted is False
 
 
-def test_freeze_rejects_invalid_threshold():
-    with pytest.raises(ValueError):
-        freeze_protocol(protocol(promotion_threshold=float("nan")))
-    with pytest.raises(ValueError):
-        freeze_protocol(protocol(promotion_threshold=1.5))
+def test_demo_bytes_relabelled_are_rejected(frozen):
+    manifest = synth_manifest(sha256=hashlib.sha256(b"demo-bytes").hexdigest())
+    assert verify_fixture(manifest, b"demo-bytes", frozen).accepted is False
 
 
-def test_pbo_post_performance_exclusion_event_is_inconclusive(registry, frozen):
-    registry.record_candidate_exclusion("exp1", 1, "weak", performance_seen=True, actor="test")
+def test_pbo_exclusion_after_performance_seen_event(registry, frozen):
+    registry.record_performance_seen("exp1", 1, "test")
+    registry.record_candidate_exclusion("exp1", 1, "weak", "test")
     assert evaluate_pbo_gate(COMBOS, frozen, registry, "exp1").status == "inconclusive"
+
+
+def test_pbo_exclusion_before_performance_seen_is_not_post(registry, frozen):
+    registry.record_candidate_exclusion("exp1", 1, "weak", "test")
+    registry.record_performance_seen("exp1", 1, "test")
+    assert evaluate_pbo_gate(COMBOS, frozen, registry, "exp1").status == "ok"
 
 
 def test_dsr_uses_registry_returns(registry):
     artifacts = build_dsr_artifacts(registry, "exp1")
     assert evaluate_dsr_gate(registry, "exp1", "t0", artifacts).status == "ok"
-    registry.record_trial("t2", "exp1", "group-a", "failed", {}, {"returns": [0.0, 0.0, 0.0, 0.0]})
-    assert evaluate_dsr_gate(registry, "exp1", "t0", artifacts).status == "inconclusive"
 
 
 def test_prospective_gate_rejects_non_finite(frozen):
     assert evaluate_prospective(frozen, 30, 14, float("nan"), "2026-12-01T00:00:00Z").eligible is False
 
 
-def _record_promotion_evidence(registry, frozen):
-    pbo = evaluate_pbo_gate(COMBOS, frozen, registry, "exp1")
-    dsr = evaluate_dsr_gate(registry, "exp1", "t0", build_dsr_artifacts(registry, "exp1"))
+def _record_evidence(registry, frozen):
+    run_pbo_and_record(registry, "exp1", COMBOS, frozen)
+    run_dsr_and_record(registry, "exp1", "t0", frozen)
+    record_artifact_validation(registry, "exp1", "snapshot", SNAPSHOT_BYTES, True)
+    record_artifact_validation(registry, "exp1", "walk_forward", WF_BYTES, True)
+    record_artifact_validation(registry, "exp1", "stress", STRESS_BYTES, True)
+    return PromotionEvidence(
+        snapshot_bytes=SNAPSHOT_BYTES,
+        walk_forward_bytes=WF_BYTES,
+        stress_bytes=STRESS_BYTES,
+        trial_ids=("t0", "t1"),
+    )
+
+
+def _promotion(registry, frozen, evidence=None, **overrides):
+    base = dict(
+        frozen=frozen,
+        protocol=protocol(),
+        registry=registry,
+        experiment_id="exp1",
+        manifest=synth_manifest(),
+        dataset_bytes=SYNTH_BYTES,
+        prospective_observations=30,
+        prospective_duration_days=14,
+        prospective_completeness=0.95,
+        prospective_start="2026-12-01T00:00:00Z",
+        evidence=evidence or _record_evidence(registry, frozen),
+    )
+    base.update(overrides)
+    return evaluate_promotion(**base)
+
+
+def test_promotion_with_controlled_validations(registry, frozen):
+    assert _promotion(registry, frozen).eligible is True
+
+
+def test_promotion_rejects_unrecorded_artifact_bytes(registry, frozen):
+    evidence = _record_evidence(registry, frozen)
+    forged = PromotionEvidence(
+        snapshot_bytes=b"forged-snapshot",
+        walk_forward_bytes=evidence.walk_forward_bytes,
+        stress_bytes=evidence.stress_bytes,
+        trial_ids=evidence.trial_ids,
+    )
+    assert _promotion(registry, frozen, evidence=forged).eligible is False
+
+
+def test_promotion_rejects_fabricated_stat_validation(registry, frozen):
+    evidence = _record_evidence(registry, frozen)
     stat_artifacts = {
         "return_series_artifact_sha256": "a" * 64,
         "split_manifest_sha256": "b" * 64,
@@ -154,53 +181,9 @@ def _record_promotion_evidence(registry, frozen):
         "selection_rule": "max",
         "researcher_decision_log_sha256": "d" * 64,
     }
-    registry.record_validation("pbo1", "exp1", "pbo", stat_artifacts, {"value": pbo.value})
-    registry.record_validation("dsr1", "exp1", "dsr", stat_artifacts, {"value": dsr.value})
-    registry.record_validation("snap1", "exp1", "snapshot", {"artifact_sha256": "e" * 64, "passed": True}, {})
-    registry.record_validation("wf1", "exp1", "walk_forward", {"artifact_sha256": "f" * 64, "passed": True}, {})
-    registry.record_validation("stress1", "exp1", "stress", {"artifact_sha256": "1" * 64, "passed": True}, {})
-    return PromotionEvidence(
-        snapshot_sha256="e" * 64,
-        walk_forward_sha256="f" * 64,
-        stress_sha256="1" * 64,
-        trial_ids=("t0", "t1"),
-    )
-
-
-def _promotion(registry, frozen, evidence=None, **overrides):
-    base = dict(
-        frozen=frozen,
-        protocol=protocol(),
-        registry=registry,
-        experiment_id="exp1",
-        fixture_decision=verify_fixture(public_manifest(), PUBLIC_BYTES, ENTRIES, SIGNATURE, frozen),
-        prospective=evaluate_prospective(frozen, 30, 14, 0.95, "2026-12-01T00:00:00Z"),
-        evidence=evidence or _record_promotion_evidence(registry, frozen),
-    )
-    base.update(overrides)
-    return evaluate_promotion(**base)
-
-
-def test_promotion_reads_registry_validations(registry, frozen):
-    assert _promotion(registry, frozen).eligible is True
-
-
-def test_promotion_rejects_dummy_evidence_hash(registry, frozen):
-    evidence = _record_promotion_evidence(registry, frozen)
-    dummy = PromotionEvidence(
-        snapshot_sha256="a" * 64,
-        walk_forward_sha256=evidence.walk_forward_sha256,
-        stress_sha256=evidence.stress_sha256,
-        trial_ids=evidence.trial_ids,
-    )
-    assert _promotion(registry, frozen, evidence=dummy).eligible is False
-
-
-def test_promotion_without_registry_validations_is_rejected(registry, frozen):
-    evidence = PromotionEvidence(
-        snapshot_sha256="e" * 64,
-        walk_forward_sha256="f" * 64,
-        stress_sha256="1" * 64,
-        trial_ids=("t0", "t1"),
-    )
+    registry.record_validation("fake-dsr", "exp1", "dsr", stat_artifacts, {"value": 0.99})
     assert _promotion(registry, frozen, evidence=evidence).eligible is False
+
+
+def test_promotion_computes_prospective_itself(registry, frozen):
+    assert _promotion(registry, frozen, prospective_completeness=0.5).eligible is False

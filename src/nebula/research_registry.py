@@ -705,41 +705,49 @@ class ResearchRegistry:
         ).fetchall()
         return tuple(row[0] for row in rows)
 
+    def record_performance_seen(
+        self, experiment_id: str, candidate_index: int, actor: str
+    ) -> None:
+        """Append a timestamped event marking candidate performance as seen."""
+        payload = canonical_json({"candidate_index": candidate_index})
+        self._append_experiment_status(
+            experiment_id, "performance_seen", payload, actor
+        )
+
     def record_candidate_exclusion(
         self,
         experiment_id: str,
         candidate_index: int,
         reason: str,
-        *,
-        performance_seen: bool,
         actor: str,
     ) -> None:
-        """Append a timestamped exclusion event with its performance chronology."""
+        """Append a timestamped exclusion event (chronology from event order)."""
         payload = canonical_json(
-            {
-                "candidate_index": candidate_index,
-                "reason": reason,
-                "performance_seen": performance_seen,
-            }
+            {"candidate_index": candidate_index, "reason": reason}
         )
         self._append_experiment_status(
             experiment_id, "candidate_excluded", payload, actor
         )
 
     def post_performance_exclusions(self, experiment_id: str) -> frozenset:
-        """Candidate indexes excluded after performance was seen (event log)."""
+        """Candidates excluded after their performance_seen event (row order)."""
         rows = self._conn.execute(
-            "SELECT reason FROM experiment_status_events WHERE experiment_id = ? "
-            "AND new_status = 'candidate_excluded'",
+            "SELECT rowid, new_status, reason FROM experiment_status_events "
+            "WHERE experiment_id = ? AND new_status IN "
+            "('performance_seen', 'candidate_excluded') ORDER BY rowid",
             (experiment_id,),
         ).fetchall()
-        excluded = set()
-        for (reason,) in rows:
+        seen_at: dict[int, int] = {}
+        excluded: set[int] = set()
+        for rowid, status, reason in rows:
             payload = json.loads(reason)
-            if payload.get("performance_seen") is True:
-                index = payload.get("candidate_index")
-                if isinstance(index, int) and not isinstance(index, bool):
-                    excluded.add(index)
+            index = payload.get("candidate_index")
+            if not isinstance(index, int) or isinstance(index, bool):
+                continue
+            if status == "performance_seen":
+                seen_at.setdefault(index, rowid)
+            elif index in seen_at and seen_at[index] < rowid:
+                excluded.add(index)
         return frozenset(excluded)
 
     def trial_returns(self, experiment_id: str) -> tuple[tuple[str, tuple[float, ...]], ...]:
