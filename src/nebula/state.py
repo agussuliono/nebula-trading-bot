@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import uuid
 import sqlite3
 import stat
 from pathlib import Path
@@ -83,6 +84,7 @@ class StateStore:
             known_nebula_tables = {
                 "intents", "order_snapshots", "kv", "exit_child_orders", "fills",
                 "protection_intents", "position_lock", "audit_events",
+                "trade_episodes", "outcome_events",
                 "daily_pnl_events", "emergency_stop", "nebula_schema_meta",
                 "account_bills", "daily_equity_baselines", "daily_equity_marks",
                 "daily_equity_mark_chain",
@@ -173,6 +175,27 @@ class StateStore:
                 owner_client_order_id TEXT NOT NULL,
                 instrument TEXT NOT NULL,
                 acquired_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )""")
+            # Fase 0C: one opaque episode identity per reserved entry. The
+            # mapping to raw order IDs stays in trading state, never exported.
+            db.execute("""CREATE TABLE IF NOT EXISTS trade_episodes (
+                trade_episode_id TEXT PRIMARY KEY,
+                entry_client_order_id TEXT NOT NULL UNIQUE REFERENCES intents(client_order_id),
+                instrument TEXT NOT NULL,
+                signal_key TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                net_pnl_quote TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                closed_at TEXT,
+                accounting_finalized_at TEXT
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS outcome_events (
+                outcome_event_id TEXT PRIMARY KEY,
+                trade_episode_id TEXT NOT NULL REFERENCES trade_episodes(trade_episode_id),
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                exported_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )""")
             db.execute("""CREATE TABLE IF NOT EXISTS audit_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -319,7 +342,8 @@ class StateStore:
             return value
 
     def reserve_entry_intent(self, client_order_id: str, instrument: str, candle_ts: int,
-                             side: str, risk_plan: dict[str, Any] | None = None) -> bool:
+                             side: str, risk_plan: dict[str, Any] | None = None,
+                             signal_key: str | None = None) -> bool:
         """Atomically reserve the sole position slot and the entry intent."""
         if side != "buy":
             raise ValueError("entry intents must be Spot buy orders")
@@ -355,6 +379,10 @@ class StateStore:
                        (client_order_id, instrument))
             db.execute("INSERT INTO intents(client_order_id,instrument,candle_ts,side,status,risk_plan_json) VALUES(?,?,?,?,'reserved',?)",
                        (client_order_id, instrument, candle_ts, side, encoded_plan))
+            db.execute(
+                "INSERT INTO trade_episodes(trade_episode_id,entry_client_order_id,instrument,signal_key) VALUES(?,?,?,?)",
+                (str(uuid.uuid4()), client_order_id, instrument, signal_key),
+            )
             return True
 
     def reserve_exit_intent(self, client_order_id: str, instrument: str, candle_ts: int,
@@ -397,6 +425,81 @@ class StateStore:
         with self._connect() as db:
             row = db.execute("SELECT * FROM position_lock WHERE singleton=1").fetchone()
             return dict(row) if row else None
+
+    def get_trade_episode(self, entry_client_order_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM trade_episodes WHERE entry_client_order_id=?",
+                (entry_client_order_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_trade_episodes(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM trade_episodes ORDER BY created_at,trade_episode_id").fetchall()
+            return [dict(row) for row in rows]
+
+    def update_trade_episode(self, trade_episode_id: str, *, status: str,
+                             net_pnl_quote: str | None = None) -> None:
+        with self._connect() as db:
+            if status == "closed":
+                db.execute(
+                    "UPDATE trade_episodes SET status=?,closed_at=CURRENT_TIMESTAMP WHERE trade_episode_id=?",
+                    (status, trade_episode_id),
+                )
+            elif status == "accounting_finalized":
+                db.execute(
+                    """UPDATE trade_episodes SET status=?,net_pnl_quote=?,
+                       closed_at=COALESCE(closed_at,CURRENT_TIMESTAMP),
+                       accounting_finalized_at=CURRENT_TIMESTAMP WHERE trade_episode_id=?""",
+                    (status, net_pnl_quote, trade_episode_id),
+                )
+            else:
+                db.execute(
+                    "UPDATE trade_episodes SET status=? WHERE trade_episode_id=?",
+                    (status, trade_episode_id),
+                )
+
+    def record_outcome_event(self, outcome_event_id: str, trade_episode_id: str,
+                             event_type: str, payload: dict[str, Any]) -> bool:
+        """Idempotently persist one outcome event; True when newly recorded."""
+        with self._connect() as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO outcome_events(outcome_event_id,trade_episode_id,event_type,payload_json) VALUES(?,?,?,?)",
+                (outcome_event_id, trade_episode_id, event_type,
+                 json.dumps(payload, sort_keys=True, separators=(",", ":"))),
+            )
+            return cursor.rowcount == 1
+
+    def list_outcome_events(self, trade_episode_id: str | None = None,
+                            unexported_only: bool = False) -> list[dict[str, Any]]:
+        query = "SELECT * FROM outcome_events"
+        clauses, params = [], []
+        if trade_episode_id is not None:
+            clauses.append("trade_episode_id=?")
+            params.append(trade_episode_id)
+        if unexported_only:
+            clauses.append("exported_at IS NULL")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at,outcome_event_id"
+        with self._connect() as db:
+            rows = db.execute(query, params).fetchall()
+            events = []
+            for row in rows:
+                event = dict(row)
+                event["payload"] = json.loads(event.pop("payload_json"))
+                events.append(event)
+            return events
+
+    def mark_outcome_exported(self, outcome_event_ids: list[str]) -> None:
+        if not outcome_event_ids:
+            return
+        with self._connect() as db:
+            db.executemany(
+                "UPDATE outcome_events SET exported_at=CURRENT_TIMESTAMP WHERE outcome_event_id=?",
+                [(event_id,) for event_id in outcome_event_ids],
+            )
 
     def release_terminal_zero_fill_entry_lock(self, client_order_id: str) -> bool:
         """Release an entry slot only after a persisted terminal zero-fill result."""
