@@ -505,3 +505,21 @@ def test_legacy_database_marker_migration(tmp_path):
     from nebula.risk_controls import CircuitBreaker
     with pytest.raises(ValueError, match="safety state is missing"):
         CircuitBreaker(reopened, 20)
+
+
+def test_damaged_legacy_database_without_intents_fails_closed(tmp_path):
+    path = str(tmp_path / "damaged-legacy.db")
+    state = StateStore(path)
+    with state._connect() as db:
+        db.execute("DROP TABLE nebula_schema_meta")
+        db.execute("DROP TABLE intents")
+        db.execute("DROP TABLE emergency_stop")
+    reopened = StateStore(path)
+    from nebula.risk_controls import CircuitBreaker
+    with pytest.raises(ValueError, match="safety state is missing"):
+        CircuitBreaker(reopened, 20)
+    with reopened._connect() as db:
+        recreated = db.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='emergency_stop'"
+        ).fetchone()[0]
+    assert recreated == 0

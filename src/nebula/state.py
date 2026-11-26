@@ -78,11 +78,18 @@ class StateStore:
 
     def _init_db(self):
         with self._connect() as db:
-            pre_existing = db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nebula_schema_meta'"
-            ).fetchone() is not None or db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='intents'"
-            ).fetchone() is not None
+            existing_tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            known_nebula_tables = {
+                "intents", "order_snapshots", "kv", "exit_child_orders", "fills",
+                "protection_intents", "position_lock", "audit_events",
+                "daily_pnl_events", "emergency_stop", "nebula_schema_meta",
+                "account_bills", "daily_equity_baselines", "daily_equity_marks",
+                "daily_equity_mark_chain",
+            }
+            # Any trace of the NEBULA schema marks this as a pre-existing
+            # database; a damaged one must never be re-initialized as fresh.
+            pre_existing = bool(existing_tables & known_nebula_tables)
             db.execute("""CREATE TABLE IF NOT EXISTS intents (
                 client_order_id TEXT PRIMARY KEY,
                 instrument TEXT NOT NULL,

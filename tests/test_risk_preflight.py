@@ -483,3 +483,20 @@ def test_deleted_peak_mark_breaks_chain_verification(tmp_path):
         ledger.cumulative_drawdown(timestamp_ms=NOW_MS + 2000,
                                    account_fingerprint=fingerprint,
                                    max_drawdown_pct=0.05)
+
+
+def test_mark_chain_rejects_update_and_delete(tmp_path):
+    from nebula.account_ledger import AccountLedger
+    import hashlib
+    import sqlite3
+    state = StateStore(str(tmp_path / "chain-triggers.sqlite3"))
+    fingerprint = hashlib.sha256(b"test-demo-account-uid").hexdigest()
+    ledger = AccountLedger(state)
+    ledger.establish_daily_baseline(equity_quote="1000", timestamp_ms=NOW_MS,
+                                    account_fingerprint=fingerprint)
+    with state._connect() as db:
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            db.execute("UPDATE daily_equity_mark_chain SET equity_quote='1'")
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            db.execute("DELETE FROM daily_equity_mark_chain")
+    assert ledger.verify_mark_chain() is True
