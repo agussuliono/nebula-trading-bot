@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 
 from nebula.config import Settings
@@ -191,12 +192,12 @@ def test_preflight_orchestrator_approves_candidate_without_exchange_writes(
         "account_bills",
     ]
     assert "candidate" not in report["risk_preflight"]
-    serialized = str(report)
+    serialized = json.dumps(report, indent=2, sort_keys=True)
     for financial_field in (
         "account_equity_usdt", "available_usdt",
         "projected_daily_pnl_after_planned_stop_quote",
-        "'candidate':", "candidate_entry_plan", "entry_price", "stop_loss",
-        "take_profit", "notional_quote", "'size':", "'0.1'",
+        '"candidate":', "candidate_entry_plan", "entry_price", "stop_loss",
+        "take_profit", "notional_quote", '"size":', '"0.1"',
     ):
         assert financial_field not in serialized
     assert not hasattr(client, "place_spot_limit")
@@ -235,17 +236,17 @@ def test_redaction_removes_nested_sensitive_fields_but_keeps_status():
     }
 
     redacted = _redact_financials(report)
-    serialized = str(redacted)
+    serialized = json.dumps(redacted, indent=2, sort_keys=True)
 
     assert redacted["status"] == "approved"
     assert redacted["selected_instrument"] == "AAA-USDT"
     assert redacted["risk_preflight"]["execution"] == "not_submitted_preflight_only"
     for sensitive in (
         "account_equity_usdt", "available_usdt", "projected_daily_pnl",
-        "'candidate':", "planned_entry", "candidate_entry_plan", "entry_price",
+        '"candidate":', "planned_entry", "candidate_entry_plan", "entry_price",
         "stop_loss", "balance_details", "availBal", "liab", "position_size",
         "notional_quote", "account_id", "uid", "api_key", "must-not-leak",
-        "'size':", "'0.1'", "1000", "900",
+        '"size":', '"0.1"', "1000", "900",
     ):
         assert sensitive not in serialized
 
