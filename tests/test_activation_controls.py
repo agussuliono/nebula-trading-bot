@@ -387,6 +387,78 @@ def test_restore_refused_while_writer_connection_open(tmp_path):
     assert state.restore_from(backup)["status"] == "state_restored"
 
 
+def test_snapshot_base_fee_reduces_protection_inventory(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    risk_plan = {"instrument": "BTC-USDT", "size": "2", "entry_price": "100",
+                 "stop_loss": "90", "take_profit": "130", "risk_to_stop_quote": "20"}
+    assert state.reserve_entry_intent("NBentry", "BTC-USDT", 1, "buy", risk_plan)
+    state.update_intent("NBentry", "submitting", "111")
+    state.update_intent("NBentry", "acknowledged", "111")
+    state.update_intent("NBentry", "filled", "111")
+    state.save_order_snapshot("NBentry", {"ordId": "111", "state": "filled", "sz": "2",
+                                          "accFillSz": "2", "avgPx": "100",
+                                          "fee": "-0.1", "feeCcy": "BTC"})
+    with pytest.raises(ValueError, match="net inventory"):
+        state.reserve_protection_intent(
+            entry_client_order_id="NBentry", instrument="BTC-USDT",
+            algo_client_order_id="NBalgo", filled_size="2",
+            take_profit="130", stop_loss="90",
+        )
+    intent = state.reserve_protection_intent(
+        entry_client_order_id="NBentry", instrument="BTC-USDT",
+        algo_client_order_id="NBalgo", filled_size="1.9",
+        take_profit="130", stop_loss="90",
+    )
+    assert intent["filled_size"] == "1.9"
+
+
+def test_snapshot_sell_without_ledger_reduces_inventory(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="2")
+    assert state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="1")
+    state.update_intent("NBexit", "submitting", "222")
+    state.update_intent("NBexit", "acknowledged", "222")
+    state.update_intent("NBexit", "filled", "222")
+    state.save_order_snapshot("NBexit", {"ordId": "222", "state": "filled", "sz": "1",
+                                         "accFillSz": "1", "avgPx": "110",
+                                         "fee": "-0.1", "feeCcy": "USDT"})
+    with pytest.raises(RuntimeError, match="net inventory"):
+        state.reserve_exit_intent("NBexit2", "BTC-USDT", 3, "sell", "NBentry", size="1.5")
+    assert state.reserve_exit_intent("NBexit2", "BTC-USDT", 3, "sell", "NBentry", size="1")
+
+
+def test_positive_base_rebate_increases_inventory(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="2", fee="0.1", fee_ccy="BTC")
+    with pytest.raises(RuntimeError, match="net inventory"):
+        state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="2.2")
+    assert state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="2.1")
+
+
+def test_submitted_order_without_evidence_fails_closed(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    risk_plan = {"instrument": "BTC-USDT", "size": "2", "entry_price": "100",
+                 "stop_loss": "90", "take_profit": "130", "risk_to_stop_quote": "20"}
+    assert state.reserve_entry_intent("NBentry", "BTC-USDT", 1, "buy", risk_plan)
+    state.update_intent("NBentry", "submitting", "111")
+    state.update_intent("NBentry", "acknowledged", "111")
+    with pytest.raises(ValueError, match="incomplete"):
+        state.reserve_protection_intent(
+            entry_client_order_id="NBentry", instrument="BTC-USDT",
+            algo_client_order_id="NBalgo", filled_size="1",
+            take_profit="130", stop_loss="90",
+        )
+
+
+def test_cycle_gap_report_unknown_for_invalid_candle_timestamp(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    state.record_event("runtime_cycle_completed", None, {
+        "latest_candle_ts": None, "bar": "1H",
+    })
+    report = _cycle_gap_report(state, now_ms=BASE_TS + HOUR_MS)
+    assert report["status"] == "cycle_coverage_unknown"
+
+
 def test_outcome_observation_summary_on_empty_state(tmp_path):
     state = StateStore(str(tmp_path / "state.db"))
     summary = _outcome_observation_summary(state)

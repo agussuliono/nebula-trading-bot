@@ -426,60 +426,85 @@ class StateStore:
 
     @staticmethod
     def _net_inventory(db, position_client_order_id: str, instrument: str):
-        """Reconciled net base inventory from fills linked to one position."""
+        """Reconciled net base inventory for one position, fail-closed.
+
+        Every related order (entry, exit intents, OCO child orders) is
+        reconciled from its fill ledger and/or its order snapshot without
+        double counting: when the snapshot cumulative fill exceeds the
+        ledger, the ledger is incomplete and the snapshot is the evidence.
+        Base-currency fees keep their sign (negative fee, positive rebate).
+        A submitted order with neither fills nor snapshot evidence makes
+        the reconciliation incomplete and raises.
+        """
+        base_ccy = instrument.split("-")[0]
+
+        def signed_base_fee(fee, fee_currency):
+            return Decimal(str(fee)) if fee_currency == base_ccy else Decimal("0")
+
+        orders = []  # (side, client_order_id or None, exchange_order_id or None, child_cumulative or None)
         entry = db.execute(
             "SELECT exchange_order_id FROM intents WHERE client_order_id=? AND side='buy'",
             (position_client_order_id,),
         ).fetchone()
-        order_ids = {str(entry["exchange_order_id"])} if entry and entry["exchange_order_id"] else set()
+        if entry is None:
+            return Decimal("0")
+        orders.append(("buy", position_client_order_id, entry["exchange_order_id"], None))
         for row in db.execute(
-            "SELECT exchange_order_id FROM intents WHERE position_client_order_id=? AND side='sell'",
+            "SELECT client_order_id,exchange_order_id FROM intents"
+            " WHERE position_client_order_id=? AND side='sell'",
             (position_client_order_id,),
         ).fetchall():
-            if row[0]:
-                order_ids.add(str(row[0]))
+            orders.append(("sell", row["client_order_id"], row["exchange_order_id"], None))
         for row in db.execute(
-            "SELECT exchange_order_id FROM exit_child_orders WHERE entry_client_order_id=?",
+            "SELECT exchange_order_id,cumulative_fill_size FROM exit_child_orders"
+            " WHERE entry_client_order_id=?",
             (position_client_order_id,),
         ).fetchall():
-            if row[0]:
-                order_ids.add(str(row[0]))
+            orders.append(("sell", None, row["exchange_order_id"], row["cumulative_fill_size"]))
+
         net = Decimal("0")
-        base_ccy = instrument.split("-")[0]
-        if not order_ids:
-            return net
-        has_fills = db.execute(
-            f"SELECT 1 FROM fills WHERE instrument=? AND exchange_order_id IN ({','.join('?' for _ in order_ids)}) LIMIT 1",
-            [instrument, *sorted(order_ids)],
-        ).fetchone()
-        if not has_fills:
-            # Fall back to the entry order snapshot's cumulative fill as
-            # reconciled evidence when the fill ledger has not synced yet.
-            snapshot = db.execute(
-                "SELECT cumulative_fill_size,fee,fee_currency FROM order_snapshots"
-                " WHERE client_order_id=?",
-                (position_client_order_id,),
-            ).fetchone()
-            if snapshot is not None:
-                # Snapshot cumulative fill is the reconciled quantity the
-                # protection path sizes from when no fill ledger exists.
-                net = Decimal(str(snapshot["cumulative_fill_size"]))
-            return net
-        if order_ids:
-            placeholders = ",".join("?" for _ in order_ids)
-            for fill in db.execute(
-                f"SELECT side,fill_size,fee,fee_currency FROM fills WHERE instrument=? AND exchange_order_id IN ({placeholders})",
-                [instrument, *sorted(order_ids)],
-            ).fetchall():
-                fill_size = Decimal(str(fill["fill_size"]))
-                if fill["side"] == "buy":
-                    net += fill_size
-                    if fill["fee_currency"] == base_ccy:
-                        net -= abs(Decimal(str(fill["fee"])))
-                elif fill["side"] == "sell":
-                    net -= fill_size
-                    if fill["fee_currency"] == base_ccy:
-                        net -= abs(Decimal(str(fill["fee"])))
+        for side, client_order_id, exchange_order_id, child_cumulative in orders:
+            fills = []
+            if exchange_order_id:
+                fills = db.execute(
+                    "SELECT fill_size,fee,fee_currency FROM fills"
+                    " WHERE instrument=? AND exchange_order_id=?",
+                    (instrument, str(exchange_order_id)),
+                ).fetchall()
+            fills_gross = sum((Decimal(str(f["fill_size"])) for f in fills), Decimal("0"))
+            fills_fee = sum(
+                (signed_base_fee(f["fee"], f["fee_currency"]) for f in fills), Decimal("0")
+            )
+            snapshot_cumulative = None
+            snapshot_fee = Decimal("0")
+            if client_order_id is not None:
+                snapshot = db.execute(
+                    "SELECT cumulative_fill_size,fee,fee_currency FROM order_snapshots"
+                    " WHERE client_order_id=?",
+                    (client_order_id,),
+                ).fetchone()
+                if snapshot is not None:
+                    snapshot_cumulative = Decimal(str(snapshot["cumulative_fill_size"]))
+                    snapshot_fee = signed_base_fee(snapshot["fee"], snapshot["fee_currency"])
+            elif child_cumulative is not None:
+                snapshot_cumulative = Decimal(str(child_cumulative))
+
+            if fills and (snapshot_cumulative is None or fills_gross >= snapshot_cumulative):
+                gross, fee = fills_gross, fills_fee
+            elif snapshot_cumulative is not None:
+                gross, fee = snapshot_cumulative, snapshot_fee
+            elif exchange_order_id:
+                raise ValueError(
+                    "Position inventory reconciliation is incomplete: a submitted"
+                    " order has neither fill ledger nor snapshot evidence"
+                )
+            else:
+                gross, fee = Decimal("0"), Decimal("0")
+            if side == "buy":
+                net += gross + fee
+            else:
+                net -= gross
+                net += fee
         return net
 
     def reserve_exit_intent(self, client_order_id: str, instrument: str, candle_ts: int,
@@ -523,7 +548,10 @@ class StateStore:
                 raise RuntimeError("Exit size is not a valid decimal") from exc
             if not requested.is_finite() or requested <= 0:
                 raise RuntimeError("Exit size must be a finite positive decimal")
-            net = self._net_inventory(db, position_client_order_id, instrument)
+            try:
+                net = self._net_inventory(db, position_client_order_id, instrument)
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
             if requested > net:
                 raise RuntimeError(
                     "Exit size exceeds the position's reconciled net inventory"

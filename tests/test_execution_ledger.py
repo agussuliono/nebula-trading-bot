@@ -14,7 +14,7 @@ def seed(tmp_path):
     store.save_order_snapshot("NBENTRY1", {"ordId":"100", "state":"filled", "sz":"0.01",
         "accFillSz":"0.01", "avgPx":"100", "fee":"-0.001", "feeCcy":"BTC"})
     store.reserve_protection_intent(entry_client_order_id="NBENTRY1", instrument="BTC-USDT",
-        algo_client_order_id="NBPENTRY1", filled_size="0.01", take_profit="110", stop_loss="90")
+        algo_client_order_id="NBPENTRY1", filled_size="0.009", take_profit="110", stop_loss="90")
     store.update_protection_intent("NBENTRY1", "triggered", exchange_algo_id="900")
     return store
 
