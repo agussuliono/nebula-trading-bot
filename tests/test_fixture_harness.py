@@ -293,5 +293,24 @@ def test_walk_forward_rejects_unregistered_trial(registry, frozen):
     assert registry.latest_validation("exp1", "walk_forward")["artifacts"]["passed"] is False
 
 
+def test_walk_forward_rejects_duplicate_neighbor_coordinate(tmp_path, frozen):
+    reg = ResearchRegistry(str(tmp_path / "duplicate.db"))
+    reg.register_experiment("exp1", "hyp", frozen.sha256, "d" * 64, "abc123", "c" * 64)
+    reg.freeze_protocol("exp1", "test")
+    duplicate = [{"ema": 20, "atr": 14}, {"ema": 21, "atr": 14}, {"ema": 21, "atr": 14}]
+    for idx, returns in enumerate(TRIALS):
+        reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", duplicate[idx], {"returns": returns})
+    record_artifact_validation(reg, "exp1", "walk_forward", _wf_bytes(frozen), frozen)
+    assert reg.latest_validation("exp1", "walk_forward")["artifacts"]["passed"] is False
+    reg.close()
+
+
+def test_walk_forward_rejects_wrong_protocol_hash(registry, frozen):
+    payload = json.loads(_wf_bytes(frozen))
+    payload["protocol_sha256"] = "0" * 64
+    record_artifact_validation(registry, "exp1", "walk_forward", json.dumps(payload).encode(), frozen)
+    assert registry.latest_validation("exp1", "walk_forward")["artifacts"]["passed"] is False
+
+
 def test_promotion_computes_prospective_itself(registry, frozen):
     assert _promotion(registry, frozen, prospective_completeness=0.5).eligible is False

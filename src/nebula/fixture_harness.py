@@ -649,26 +649,31 @@ def _plateau_stable(registry, experiment_id: str, candidate_id, frozen) -> bool:
         return False
     if frozen.protocol.ema_step <= 0 or frozen.protocol.atr_step <= 0:
         return False
-    neighbors = []
+    neighbors: dict[tuple, list[str]] = {}
     for trial_id, p in params.items():
-        if trial_id == candidate_id or not isinstance(p, dict):
+        if trial_id == candidate_id or not isinstance(p, dict) or set(p) != {"ema", "atr"}:
             continue
         ema_step = (
-            abs(p.get("ema", 0) - candidate["ema"]) == frozen.protocol.ema_step
-            and p.get("atr") == candidate["atr"]
+            abs(p["ema"] - candidate["ema"]) == frozen.protocol.ema_step
+            and p["atr"] == candidate["atr"]
         )
         atr_step = (
-            abs(p.get("atr", 0) - candidate["atr"]) == frozen.protocol.atr_step
-            and p.get("ema") == candidate["ema"]
+            abs(p["atr"] - candidate["atr"]) == frozen.protocol.atr_step
+            and p["ema"] == candidate["ema"]
         )
         if ema_step or atr_step:
-            neighbors.append(trial_id)
+            if trial_id not in stored:
+                return False
+            neighbors.setdefault((p["ema"], p["atr"]), []).append(trial_id)
     if len(neighbors) < 2:
         return False
     candidate_sharpe = _sharpe(list(stored[candidate_id]))
     if candidate_sharpe <= 0:
         return False
-    neighbor_sharpes = [_sharpe(list(stored[tid])) for tid in neighbors]
+    neighbor_sharpes = [
+        min(_sharpe(list(stored[tid])) for tid in trial_ids)
+        for trial_ids in neighbors.values()
+    ]
     if any(s <= 0 for s in neighbor_sharpes):
         return False
     return sum(neighbor_sharpes) / len(neighbor_sharpes) >= 0.5 * candidate_sharpe
