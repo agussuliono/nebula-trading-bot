@@ -634,6 +634,39 @@ def _best_trial_id(registry, experiment_id: str) -> str:
     return max(stored, key=lambda item: _sharpe(list(item[1])))[0]
 
 
+def _plateau_stable(registry, experiment_id: str, candidate_id) -> bool:
+    """Plateau across neighboring registered parameter trials."""
+    params = registry.trial_params(experiment_id)
+    stored = dict(registry.trial_returns(experiment_id))
+    if candidate_id not in params or candidate_id not in stored:
+        return False
+    candidate = params[candidate_id]
+    if not isinstance(candidate, dict) or set(candidate) != {"ema", "atr"}:
+        return False
+    ema_values = sorted({p["ema"] for p in params.values() if isinstance(p, dict) and "ema" in p})
+    atr_values = sorted({p["atr"] for p in params.values() if isinstance(p, dict) and "atr" in p})
+    def adjacent(values, value):
+        idx = values.index(value)
+        return {values[idx - 1] if idx > 0 else None, values[idx + 1] if idx + 1 < len(values) else None} - {None}
+    neighbors = []
+    for trial_id, p in params.items():
+        if trial_id == candidate_id or not isinstance(p, dict):
+            continue
+        ema_step = p.get("ema") in adjacent(ema_values, candidate["ema"]) and p.get("atr") == candidate["atr"]
+        atr_step = p.get("atr") in adjacent(atr_values, candidate["atr"]) and p.get("ema") == candidate["ema"]
+        if ema_step or atr_step:
+            neighbors.append(trial_id)
+    if len(neighbors) < 2:
+        return False
+    candidate_sharpe = _sharpe(list(stored[candidate_id]))
+    if candidate_sharpe <= 0:
+        return False
+    neighbor_sharpes = [_sharpe(list(stored[tid])) for tid in neighbors]
+    if any(s <= 0 for s in neighbor_sharpes):
+        return False
+    return sum(neighbor_sharpes) / len(neighbor_sharpes) >= 0.5 * candidate_sharpe
+
+
 def _artifact_passed(
     registry, experiment_id: str, method: str, artifact_bytes: bytes, frozen
 ) -> bool:
@@ -677,7 +710,9 @@ def _artifact_passed(
             if any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in fold):
                 return False
             sharpes.append(_sharpe([float(v) for v in fold]))
-        return min(sharpes) >= 0 and sum(sharpes) / len(sharpes) > 0
+        if min(sharpes) < 0 or sum(sharpes) / len(sharpes) <= 0:
+            return False
+        return _plateau_stable(registry, experiment_id, payload.get("trial_id"))
     if method == "stress":
         gross = payload.get("gross_returns")
         if payload.get("schema") != "stress-v1" or not isinstance(gross, list) or len(gross) < 2:

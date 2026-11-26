@@ -30,9 +30,10 @@ SYNTH_BYTES = synthetic_fixture_bytes()
 SYNTH_HASH = hashlib.sha256(SYNTH_BYTES).hexdigest()
 TRIALS = [
     [0.03, 0.02, 0.01, 0.02, 0.03, 0.01, 0.02, 0.03],
-    [0.01, -0.02, 0.03, 0.0, -0.01, 0.02, 0.0, 0.01],
-    [-0.02, 0.01, -0.01, 0.02, 0.0, -0.02, 0.01, -0.01],
+    [0.02, 0.01, 0.02, 0.01, 0.02, 0.01, 0.02, 0.01],
+    [0.01, 0.02, 0.01, 0.02, 0.01, 0.02, 0.01, 0.02],
 ]
+PARAMS = [{"ema": 20, "atr": 14}, {"ema": 21, "atr": 14}, {"ema": 20, "atr": 15}]
 def _snapshot_bytes(frozen):
     return json.dumps(
         {
@@ -104,7 +105,7 @@ def registry(tmp_path, frozen):
     reg.register_experiment("exp1", "hyp", frozen.sha256, "d" * 64, "abc123", "c" * 64)
     reg.freeze_protocol("exp1", "test")
     for idx, returns in enumerate(TRIALS):
-        reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", {}, {"returns": returns})
+        reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", PARAMS[idx], {"returns": returns})
     yield reg
     reg.close()
 
@@ -140,7 +141,7 @@ def test_pbo_reading_returns_marks_exposure(tmp_path):
     reg.register_experiment("exp1", "hyp", frozen.sha256, "d" * 64, "abc123", "c" * 64)
     reg.freeze_protocol("exp1", "test")
     for idx, returns in enumerate(TRIALS):
-        reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", {}, {"returns": returns})
+        reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", PARAMS[idx], {"returns": returns})
     reg.trial_returns("exp1")
     reg.record_candidate_exclusion("exp1", "t1", "weak", "test")
     assert evaluate_pbo_gate(frozen, reg, "exp1").status == "inconclusive"
@@ -166,7 +167,7 @@ def test_pbo_preregistered_exclusion_is_ok(tmp_path):
     reg.register_experiment("exp1", "hyp", frozen.sha256, "d" * 64, "abc123", "c" * 64)
     reg.freeze_protocol("exp1", "test")
     for idx, returns in enumerate(TRIALS):
-        reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", {}, {"returns": returns})
+        reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", PARAMS[idx], {"returns": returns})
     reg.record_candidate_exclusion("exp1", "t1", "weak", "test")
     assert evaluate_pbo_gate(frozen, reg, "exp1").status == "ok"
     reg.close()
@@ -256,6 +257,19 @@ def test_promotion_rejects_forged_artifact_content(registry, frozen):
         trial_ids=evidence.trial_ids,
     )
     assert _promotion(registry, frozen, evidence=forged).eligible is False
+
+
+def test_walk_forward_rejects_single_peak(tmp_path, frozen):
+    reg = ResearchRegistry(str(tmp_path / "peak.db"))
+    reg.register_experiment("exp1", "hyp", frozen.sha256, "d" * 64, "abc123", "c" * 64)
+    reg.freeze_protocol("exp1", "test")
+    peak_trials = [TRIALS[0], [-0.02, -0.01, -0.02, -0.01, -0.02, -0.01, -0.02, -0.01], [-0.01, -0.02, -0.01, -0.02, -0.01, -0.02, -0.01, -0.02]]
+    for idx, returns in enumerate(peak_trials):
+        reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", PARAMS[idx], {"returns": returns})
+    record_artifact_validation(reg, "exp1", "walk_forward", _wf_bytes(frozen), frozen)
+    run = reg.latest_validation("exp1", "walk_forward")
+    assert run["artifacts"]["passed"] is False
+    reg.close()
 
 
 def test_promotion_computes_prospective_itself(registry, frozen):
