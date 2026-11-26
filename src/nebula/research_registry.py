@@ -566,8 +566,10 @@ class ResearchRegistry:
         return digest.hexdigest()
 
     def create_checkpoint(
-        self, signature_reference: str, signature: str = ""
+        self, signature_reference: str, signature: str
     ) -> dict[str, Any]:
+        if not signature:
+            raise RegistryError("checkpoint signature is required")
         head, count = self._chain_head()
         evidence_digest = self._evidence_digest()
         checkpoint_id = sha256_hex(f"{head}:{count}:{evidence_digest}:{_utc_now()}")
@@ -623,11 +625,10 @@ class ResearchRegistry:
             return False
         if self._evidence_digest() != expected["evidence_digest"]:
             return False
-        if expected["signature"]:
-            if signature_verifier is None:
-                return False
-            if not signature_verifier(checkpoint, expected["signature"]):
-                return False
+        if not expected["signature"] or signature_verifier is None:
+            return False
+        if not signature_verifier(checkpoint, expected["signature"]):
+            return False
         return self.verify_chain()
 
     # -- experiments and trials ------------------------------------------
@@ -736,7 +737,11 @@ class ResearchRegistry:
                 )
             ]
             sample_count = artifacts.get("sample_count")
-            bad_count = not (isinstance(sample_count, int) and sample_count > 0)
+            bad_count = not (
+                isinstance(sample_count, int)
+                and not isinstance(sample_count, bool)
+                and sample_count > 0
+            )
             if missing or bad_hash or bad_count:
                 status = "inconclusive"
         self._conn.execute(
@@ -757,27 +762,66 @@ class ResearchRegistry:
 
     # -- holdout -----------------------------------------------------------
 
+    def freeze_protocol(self, experiment_id: str, actor: str) -> None:
+        """Record the experiment protocol as frozen in the registry itself."""
+        row = self._conn.execute(
+            "SELECT protocol_sha256 FROM experiments WHERE experiment_id = ?",
+            (experiment_id,),
+        ).fetchone()
+        if row is None:
+            raise RegistryError(f"unknown experiment: {experiment_id}")
+        self.record_experiment_status(
+            experiment_id, "protocol_frozen", f"protocol {row[0]} frozen", actor
+        )
+
+    def _protocol_is_frozen(self, experiment_id: str, protocol_sha256: str) -> bool:
+        row = self._conn.execute(
+            "SELECT protocol_sha256 FROM experiments WHERE experiment_id = ?",
+            (experiment_id,),
+        ).fetchone()
+        if row is None or row[0] != protocol_sha256:
+            return False
+        frozen = self._conn.execute(
+            "SELECT COUNT(*) FROM experiment_status_events WHERE experiment_id = ? "
+            "AND new_status = 'protocol_frozen'",
+            (experiment_id,),
+        ).fetchone()
+        return bool(frozen[0])
+
     def request_holdout_access(
         self,
         dataset_id: str,
         experiment_id: str,
         protocol_sha256: str,
-        protocol_frozen: bool,
     ) -> bool:
-        """Access gate: holdout reads require a frozen protocol."""
-        granted = bool(protocol_frozen)
-        self.record_holdout_access(dataset_id, experiment_id, granted, protocol_sha256)
+        """Access gate: granted only for a protocol frozen in this registry."""
+        granted = self._protocol_is_frozen(experiment_id, protocol_sha256)
+        self._conn.execute(
+            "INSERT INTO holdout_access_events "
+            "(dataset_id, experiment_id, access, protocol_sha256, result, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                dataset_id,
+                experiment_id,
+                "gate_granted" if granted else "gate_denied",
+                protocol_sha256,
+                "granted" if granted else "denied",
+                _utc_now(),
+            ),
+        )
         return granted
 
     def holdout_read_allowed(
         self, dataset_id: str, experiment_id: str, protocol_sha256: str
     ) -> bool:
+        """Only gate-issued grants open reads; direct records never do."""
         row = self._conn.execute(
-            "SELECT result FROM holdout_access_events WHERE dataset_id = ? "
-            "AND experiment_id = ? AND protocol_sha256 = ? ORDER BY id DESC LIMIT 1",
+            "SELECT access FROM holdout_access_events WHERE dataset_id = ? "
+            "AND experiment_id = ? AND protocol_sha256 = ? "
+            "AND access IN ('gate_granted', 'gate_denied') ORDER BY id DESC LIMIT 1",
             (dataset_id, experiment_id, protocol_sha256),
         ).fetchone()
-        return row is not None and row[0] in ("granted", "contaminated")
+        return row is not None and row[0] == "gate_granted"
 
     def record_holdout_access(
         self,
@@ -795,7 +839,7 @@ class ResearchRegistry:
             (
                 dataset_id,
                 experiment_id,
-                "granted" if granted else "denied",
+                "recorded",
                 protocol_sha256,
                 result,
                 _utc_now(),

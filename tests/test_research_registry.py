@@ -106,10 +106,13 @@ def test_evidence_tables_are_append_only(registry):
 
 def test_checkpoint_verifies_against_chain(registry):
     registry.import_events([{"event_id": "e1"}, {"event_id": "e2"}])
-    checkpoint = registry.create_checkpoint("sig-ref-1")
-    assert registry.verify_checkpoint(checkpoint) is True
+    with pytest.raises(Exception):
+        registry.create_checkpoint("sig-ref-1", signature="")
+    checkpoint = registry.create_checkpoint("sig-ref-1", signature="sig-1")
+    assert registry.verify_checkpoint(checkpoint) is False  # verifier is mandatory
+    assert registry.verify_checkpoint(checkpoint, lambda cp, sig: sig == "sig-1") is True
     registry.import_events([{"event_id": "e3"}])
-    assert registry.verify_checkpoint(checkpoint) is False
+    assert registry.verify_checkpoint(checkpoint, lambda cp, sig: True) is False
 
 
 def test_all_trials_counted(registry):
@@ -158,10 +161,32 @@ def test_checkpoint_covers_registry_and_signature(registry):
 
 
 def test_holdout_gate_requires_frozen_protocol(registry):
-    assert registry.request_holdout_access("h1", "exp1", "p" * 64, protocol_frozen=False) is False
+    registry.register_experiment("exp1", "hyp", "p" * 64, "d" * 64, "abc123", "c" * 64)
+    assert registry.request_holdout_access("h1", "exp1", "p" * 64) is False
     assert registry.holdout_read_allowed("h1", "exp1", "p" * 64) is False
-    assert registry.request_holdout_access("h1", "exp1", "p" * 64, protocol_frozen=True) is True
+    registry.record_holdout_access("h1", "exp1", granted=True, protocol_sha256="p" * 64)
+    assert registry.holdout_read_allowed("h1", "exp1", "p" * 64) is False
+    registry.freeze_protocol("exp1", actor="gan")
+    assert registry.request_holdout_access("h1", "exp1", "p" * 64) is True
     assert registry.holdout_read_allowed("h1", "exp1", "p" * 64) is True
+
+
+def test_validation_bool_sample_count_is_inconclusive(registry):
+    registry.register_experiment("exp1", "hyp", "p" * 64, "d" * 64, "abc123", "c" * 64)
+    artifacts = {
+        "return_series_artifact_sha256": "a" * 64,
+        "split_manifest_sha256": "a" * 64,
+        "benchmark_id": "bench",
+        "sample_count": True,
+        "return_skewness": 0.0,
+        "return_kurtosis": 3.0,
+        "observed_sharpe": 0.1,
+        "effective_trial_count": 4.0,
+        "trial_correlation_artifact_sha256": "b" * 64,
+        "selection_rule": "max-sharpe",
+        "researcher_decision_log_sha256": "c" * 64,
+    }
+    assert registry.record_validation("run1", "exp1", "dsr", artifacts, {}) == "inconclusive"
 
 
 def test_validation_bad_artifact_hash_is_inconclusive(registry):
