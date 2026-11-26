@@ -5,6 +5,7 @@ import os
 import uuid
 import sqlite3
 import stat
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -579,7 +580,9 @@ class StateStore:
             cursor = db.execute("DELETE FROM position_lock WHERE singleton=1 AND owner_client_order_id=?", (client_order_id,))
             if cursor.rowcount:
                 db.execute("INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
-                           ("zero_fill_entry_lock_released", client_order_id, json.dumps({"exchange_state": snapshot["exchange_state"]})))
+                           ("zero_fill_entry_lock_released", client_order_id,
+                            json.dumps({"exchange_state": snapshot["exchange_state"],
+                                        "cumulative_fill_size": "0"}, sort_keys=True)))
             return cursor.rowcount == 1
 
     def release_rejected_entry_lock(self, client_order_id: str) -> bool:
@@ -588,12 +591,16 @@ class StateStore:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             intent = db.execute("SELECT status,side,exchange_order_id FROM intents WHERE client_order_id=?", (client_order_id,)).fetchone()
-            snapshot = db.execute("SELECT cumulative_fill_size FROM order_snapshots WHERE client_order_id=?", (client_order_id,)).fetchone()
+            snapshot = db.execute("SELECT exchange_state,cumulative_fill_size FROM order_snapshots WHERE client_order_id=?", (client_order_id,)).fetchone()
             if not intent or intent["side"] != "buy" or intent["status"] != "rejected":
                 return False
             if not snapshot and intent["exchange_order_id"]:
                 # An exchange order ID without a snapshot does not prove
                 # the order was never filled.
+                return False
+            if snapshot and snapshot["exchange_state"] not in {"canceled", "mmp_canceled"}:
+                # A non-terminal snapshot (e.g. live) contradicts rejection
+                # even when its cumulative fill is still zero.
                 return False
             if snapshot:
                 try:
@@ -608,7 +615,11 @@ class StateStore:
             if cursor.rowcount:
                 db.execute("INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
                            ("rejected_entry_lock_released", client_order_id,
-                            json.dumps({"intent_status": intent["status"]}, sort_keys=True)))
+                            json.dumps({"intent_status": intent["status"],
+                                        "exchange_state": snapshot["exchange_state"] if snapshot else None,
+                                        "cumulative_fill_size": "0",
+                                        "exchange_order_id_present": bool(intent["exchange_order_id"])},
+                                       sort_keys=True)))
             return cursor.rowcount == 1
 
     LOCK_RELEASE_EVENT_TYPES = {
@@ -636,14 +647,21 @@ class StateStore:
                 if not isinstance(details, dict):
                     continue
                 if row["event_type"] == "position_lock_released":
-                    if details.get("open_orders_checked") is True and {
-                            "base_balance", "dust_limit"} <= set(details):
+                    try:
+                        base = Decimal(str(details["base_balance"]))
+                        dust = Decimal(str(details["dust_limit"]))
+                    except (KeyError, InvalidOperation):
+                        continue
+                    if details.get("open_orders_checked") is True and 0 <= base <= dust:
                         return True
                 elif row["event_type"] == "zero_fill_entry_lock_released":
-                    if details.get("exchange_state") in {"canceled", "mmp_canceled"}:
+                    if (details.get("exchange_state") in {"canceled", "mmp_canceled"}
+                            and details.get("cumulative_fill_size") == "0"):
                         return True
                 elif row["event_type"] == "rejected_entry_lock_released":
-                    if details.get("intent_status") == "rejected":
+                    if (details.get("intent_status") == "rejected"
+                            and details.get("cumulative_fill_size") == "0"
+                            and details.get("exchange_state") in {None, "canceled", "mmp_canceled"}):
                         return True
             return False
 

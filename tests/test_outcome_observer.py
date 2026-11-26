@@ -320,6 +320,22 @@ def test_release_evidence_for_other_entry_does_not_finalize(tmp_path):
     assert "accounting_finalized" not in types
 
 
+def test_rejected_with_live_snapshot_is_not_final(tmp_path):
+    state = StateStore(str(tmp_path / "state.sqlite3"))
+    episode = _open_episode(state)
+    state.save_order_snapshot("NBentry", {
+        "ordId": "111", "state": "live", "sz": "2", "accFillSz": "0",
+        "avgPx": "0", "fee": "0", "feeCcy": "USDT",
+    })
+    state.update_intent("NBentry", "submitting", "111")
+    state.update_intent("NBentry", "rejected", "111")
+    assert state.release_rejected_entry_lock("NBentry") is False
+    types = [event["event_type"] for event in observe_episode(state, episode)]
+    assert "reconciliation_incomplete" in types
+    assert "position_closed" not in types
+    assert "accounting_finalized" not in types
+
+
 def test_rejected_with_order_id_without_snapshot_is_not_final(tmp_path):
     state = StateStore(str(tmp_path / "state.sqlite3"))
     episode = _open_episode(state)
