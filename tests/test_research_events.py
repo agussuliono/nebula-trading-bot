@@ -125,3 +125,47 @@ def test_merge_config_fail_closed():
         merge_config([{"config_schema_version": 1, "unknown": 1}], schema, 1)
     with pytest.raises(EventError):
         merge_config([{"config_schema_version": 2, "risk": 5}], schema, 1)
+    with pytest.raises(EventError):
+        merge_config([{"config_schema_version": True, "risk": 5}], schema, 1)
+
+
+def test_ed25519_rfc8032_vector_and_identity_rejection():
+    from nebula.research_events import ed25519_verify
+
+    public = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+    signature = bytes.fromhex(
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+        "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+    )
+    assert ed25519_verify(public, b"", signature) is True
+    identity = b"\x01" + b"\x00" * 31
+    forged = identity + (0).to_bytes(32, "little")
+    assert ed25519_verify(identity, b"anything", forged) is False
+
+
+def test_accept_sequence_persists_and_rejects_replay(tmp_path):
+    store = SequenceStore(tmp_path / "seq")
+    assert store.accept_sequence(3) is True
+    assert store.accept_sequence(3) is False
+    assert store.accept_sequence(2) is False
+    store.close()
+    reopened = SequenceStore(tmp_path / "seq")
+    assert reopened.accept_sequence(3) is False
+    assert reopened.accept_sequence(4) is True
+    reopened.close()
+
+
+def test_canonical_string_minus_zero_and_bool_version():
+    assert parse_canonical(b'{"x":"-0"}') == {"x": "-0"}
+    payload = _heartbeat()
+    with pytest.raises(EventError):
+        validate_heartbeat({**payload, "payload_version": True})
+
+
+def test_exporter_byte_bound_persists_across_restart(tmp_path):
+    path = tmp_path / "out.jsonl"
+    first = ResearchExporter(path, enabled=True, max_bytes=30)
+    assert first.export({"event_id": "e1"}) is True
+    assert first.export({"event_id": "e2"}) is False
+    restarted = ResearchExporter(path, enabled=True, max_bytes=30)
+    assert restarted.export({"event_id": "e3"}) is False

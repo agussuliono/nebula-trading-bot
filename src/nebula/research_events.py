@@ -81,11 +81,6 @@ def parse_canonical(raw: bytes) -> dict[str, Any]:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise EventError("payload is not valid UTF-8") from exc
-    if re.search(r"(?<![0-9])-0(?![0-9])", text):
-        raise EventError("-0 is not canonical")
-    if re.search(r"(?<![0-9])0[0-9]", text):
-        raise EventError("leading zero is not canonical")
-
     def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         obj: dict[str, Any] = {}
         for key, value in pairs:
@@ -166,7 +161,11 @@ def _check_exact_fields(payload: Mapping[str, Any], expected: Sequence[str]) -> 
 
 def validate_heartbeat(payload: Mapping[str, Any]) -> dict[str, Any]:
     _check_exact_fields(payload, HEARTBEAT_FIELDS)
-    if payload["payload_version"] != 1:
+    if (
+        isinstance(payload["payload_version"], bool)
+        or not isinstance(payload["payload_version"], int)
+        or payload["payload_version"] != 1
+    ):
         raise EventError("payload_version must be 1")
     if not isinstance(payload["scheduler_id"], str) or not _SCHEDULER_ID_RE.match(
         payload["scheduler_id"]
@@ -225,6 +224,12 @@ def _validate_public_key(value: Any, key_id: str) -> bytes:
         raise EventError("public_key is not canonical base64url")
     if hashlib.sha256(raw).hexdigest() != key_id:
         raise EventError("key_id must be the SHA-256 of the public key")
+    try:
+        point = _decode_point(raw)
+    except Exception as exc:
+        raise EventError("public_key is not a valid curve point") from exc
+    if not _is_valid_subgroup_point(point):
+        raise EventError("public_key is identity or small-order")
     return raw
 
 
@@ -281,11 +286,26 @@ def _encode_point(p: tuple[int, int]) -> bytes:
 
 def _decode_point(raw: bytes) -> tuple[int, int]:
     y = int.from_bytes(raw, "little") & (2**255 - 1)
+    if y >= _Q:
+        raise EventError("non-canonical point encoding")
     sign = (raw[31] >> 7) & 1
     x = _xrecover(y)
     if (x & 1) != sign:
         x = _Q - x
-    return x, y
+    point = (x, y)
+    if _encode_point(point) != raw:
+        raise EventError("point does not re-encode canonically")
+    return point
+
+
+_IDENTITY = (0, 1)
+
+
+def _is_valid_subgroup_point(point: tuple[int, int]) -> bool:
+    """Reject identity and small-order points; require prime-order subgroup."""
+    if point == _IDENTITY:
+        return False
+    return _scalarmult(point, _L) == _IDENTITY
 
 
 def _hint(data: bytes) -> int:
@@ -322,6 +342,8 @@ def ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
         return False
     s = int.from_bytes(signature[32:], "little")
     if s >= _L:
+        return False
+    if not _is_valid_subgroup_point(a_point) or not _is_valid_subgroup_point(r_point):
         return False
     h = _hint(signature[:32] + public_key + message) % _L
     return _scalarmult(_B, s) == _edwards(r_point, _scalarmult(a_point, h))
@@ -385,6 +407,10 @@ class SequenceStore:
 
     def next(self) -> int:
         value = self._value + 1
+        self._persist(value)
+        return value
+
+    def _persist(self, value: int) -> None:
         content = f"{value}:{hashlib.sha256(str(value).encode()).hexdigest()}"
         tmp = self._dir / "sequence.counter.tmp"
         with open(tmp, "w", encoding="utf-8") as handle:
@@ -399,11 +425,19 @@ class SequenceStore:
         finally:
             os.close(dir_fd)
         self._value = value
-        return value
 
     def check_replay(self, sequence: int) -> bool:
         """True when the sequence is strictly newer than the stored value."""
         return sequence > self._value
+
+    def accept_sequence(self, sequence: int) -> bool:
+        """Atomically accept and persist an incoming sequence (anti-replay)."""
+        if isinstance(sequence, bool) or not isinstance(sequence, int):
+            return False
+        if sequence <= self._value:
+            return False
+        self._persist(sequence)
+        return True
 
     def close(self) -> None:
         self._lock_file.close()
@@ -417,24 +451,41 @@ class SequenceStore:
 class ResearchExporter:
     """Writes canonical events to a JSONL outbox; failures never raise."""
 
-    def __init__(self, outbox_path: str | Path, enabled: bool = False, capacity: int = 1000) -> None:
+    def __init__(
+        self,
+        outbox_path: str | Path,
+        enabled: bool = False,
+        capacity: int = 1000,
+        max_bytes: int = 1 << 20,
+    ) -> None:
         self._path = Path(outbox_path)
         self._enabled = enabled
         self._capacity = capacity
+        self._max_bytes = max_bytes
         self._count = 0
+        self._bytes = 0
+        if self._path.exists():
+            data = self._path.read_bytes()
+            self._bytes = len(data)
+            self._count = data.count(b"\n")
         self.dropped = 0
 
     def export(self, payload: Mapping[str, Any]) -> bool:
         if not self._enabled:
             return False
-        if self._count >= self._capacity:
+        try:
+            line = canonical_bytes(payload) + b"\n"
+        except Exception:
+            self.dropped += 1
+            return False
+        if self._count >= self._capacity or self._bytes + len(line) > self._max_bytes:
             self.dropped += 1
             return False
         try:
-            line = canonical_bytes(payload) + b"\n"
             with open(self._path, "ab") as handle:
                 handle.write(line)
             self._count += 1
+            self._bytes += len(line)
             return True
         except Exception:
             self.dropped += 1
@@ -469,7 +520,8 @@ def merge_config(
     """Merge config sources against an allowlist schema, fail-closed."""
     merged: dict[str, Any] = {}
     for source in sources:
-        if source.get("config_schema_version") != schema_version:
+        version = source.get("config_schema_version")
+        if isinstance(version, bool) or not isinstance(version, int) or version != schema_version:
             raise EventError("unknown config_schema_version")
         for key, value in source.items():
             if key == "config_schema_version":
