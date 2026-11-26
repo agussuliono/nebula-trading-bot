@@ -388,7 +388,8 @@ class StateStore:
             return True
 
     def reserve_exit_intent(self, client_order_id: str, instrument: str, candle_ts: int,
-                            side: str, position_client_order_id: str) -> bool:
+                            side: str, position_client_order_id: str,
+                            size: str | None = None) -> bool:
         """Reserve an exit only for the currently locked position."""
         if side != "sell":
             raise ValueError("exit intents must be Spot sell orders")
@@ -419,6 +420,51 @@ class StateStore:
                 raise RuntimeError(
                     "Independent sell order is blocked while a durable OCO protection intent exists"
                 )
+            if size is not None:
+                # A sell may never exceed the position's reconciled net
+                # inventory from linked fills, regardless of other balances.
+                try:
+                    requested = Decimal(str(size))
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    raise RuntimeError("Exit size is not a valid decimal") from exc
+                if not requested.is_finite() or requested <= 0:
+                    raise RuntimeError("Exit size must be a finite positive decimal")
+                entry = db.execute(
+                    "SELECT exchange_order_id FROM intents WHERE client_order_id=? AND side='buy'",
+                    (position_client_order_id,),
+                ).fetchone()
+                order_ids = {str(entry["exchange_order_id"])} if entry and entry["exchange_order_id"] else set()
+                for row in db.execute(
+                    "SELECT exchange_order_id FROM intents WHERE position_client_order_id=? AND side='sell'",
+                    (position_client_order_id,),
+                ).fetchall():
+                    if row[0]:
+                        order_ids.add(str(row[0]))
+                for row in db.execute(
+                    "SELECT exchange_order_id FROM exit_child_orders WHERE entry_client_order_id=?",
+                    (position_client_order_id,),
+                ).fetchall():
+                    if row[0]:
+                        order_ids.add(str(row[0]))
+                net = Decimal("0")
+                base_ccy = instrument.split("-")[0]
+                if order_ids:
+                    placeholders = ",".join("?" for _ in order_ids)
+                    for fill in db.execute(
+                        f"SELECT side,fill_size,fee,fee_currency FROM fills WHERE instrument=? AND exchange_order_id IN ({placeholders})",
+                        [instrument, *sorted(order_ids)],
+                    ).fetchall():
+                        fill_size = Decimal(str(fill["fill_size"]))
+                        if fill["side"] == "buy":
+                            net += fill_size
+                            if fill["fee_currency"] == base_ccy:
+                                net -= abs(Decimal(str(fill["fee"])))
+                        elif fill["side"] == "sell":
+                            net -= fill_size
+                if requested > net:
+                    raise RuntimeError(
+                        "Exit size exceeds the position's reconciled net inventory"
+                    )
             db.execute("INSERT INTO intents(client_order_id,instrument,candle_ts,side,status,position_client_order_id) VALUES(?,?,?,?,'reserved',?)",
                        (client_order_id, instrument, candle_ts, side, position_client_order_id))
             return True
@@ -794,48 +840,79 @@ class StateStore:
             probe.close()
         if integrity != "ok" or stop_row is None:
             raise ValueError("Restore source failed integrity or safety-state validation")
-        # Refuse to restore over a database another process is writing, and
-        # checkpoint the WAL first so the file swap cannot lose committed data.
-        guard = sqlite3.connect(self.path, timeout=0)
+        # Hold an exclusive restore lock for the whole operation so no other
+        # restore or operator action can interleave with the file swap.
+        import fcntl
+
+        lock_handle = open(f"{self.path}.restore-lock", "w")
         try:
-            guard.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            guard.execute("BEGIN IMMEDIATE")
-            current_stop = guard.execute(
-                "SELECT engaged FROM emergency_stop WHERE singleton=1"
-            ).fetchone()
-            guard.execute("ROLLBACK")
-        except sqlite3.OperationalError as exc:
-            raise ValueError("State database is in use; restore refused") from exc
-        finally:
-            guard.close()
-        currently_engaged = bool(current_stop and current_stop[0])
-        staging = f"{self.path}.restore-staging"
-        shutil.copyfile(source, staging)
-        os.chmod(staging, 0o600)
-        for suffix in ("-wal", "-shm"):
             try:
-                os.remove(self.path + suffix)
-            except FileNotFoundError:
-                pass
-        os.replace(staging, self.path)
-        engaged = bool(stop_row[0])
-        if currently_engaged and not engaged:
-            # Emergency stop is monotonic across restore: an older backup must
-            # never silently clear a stop engaged after it was taken.
-            with self._connect() as db:
-                db.execute(
-                    "UPDATE emergency_stop SET engaged=1,reason=?,"
-                    "updated_at=CURRENT_TIMESTAMP WHERE singleton=1",
-                    ("emergency stop preserved across state restore",),
+                fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise ValueError("Another restore is in progress; restore refused") from exc
+            guard = sqlite3.connect(self.path, timeout=0)
+            try:
+                checkpoint = guard.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if checkpoint is None or checkpoint[0] != 0 or checkpoint[1] != checkpoint[2]:
+                    raise ValueError("WAL checkpoint incomplete; restore refused")
+                guard.execute("BEGIN IMMEDIATE")
+                current_stop = guard.execute(
+                    "SELECT engaged FROM emergency_stop WHERE singleton=1"
+                ).fetchone()
+                lock_row = guard.execute(
+                    "SELECT 1 FROM position_lock WHERE singleton=1"
+                ).fetchone()
+                open_intent = guard.execute(
+                    "SELECT client_order_id FROM intents WHERE status NOT IN"
+                    " ('filled','canceled','rejected','mmp_canceled','expired') LIMIT 1"
+                ).fetchone()
+                open_protection = guard.execute(
+                    "SELECT entry_client_order_id FROM protection_intents WHERE status NOT IN"
+                    " ('completed','canceled','expired','rejected') LIMIT 1"
+                ).fetchone()
+                guard.execute("ROLLBACK")
+            except sqlite3.OperationalError as exc:
+                raise ValueError("State database is in use; restore refused") from exc
+            finally:
+                guard.close()
+            if lock_row is not None or open_intent is not None or open_protection is not None:
+                raise ValueError(
+                    "Restore refused while a position, order, or protection is active"
                 )
-                db.execute(
-                    "INSERT INTO audit_events(event_type,client_order_id,details_json)"
-                    " VALUES(?,?,?)",
-                    ("emergency_stop_preserved_on_restore", None, "{}"),
-                )
-            engaged = True
-        return {"status": "state_restored", "integrity": integrity,
-                "emergency_stop_engaged": engaged}
+            currently_engaged = bool(current_stop and current_stop[0])
+            staging = f"{self.path}.restore-staging"
+            shutil.copyfile(source, staging)
+            os.chmod(staging, 0o600)
+            engaged = bool(stop_row[0])
+            if currently_engaged and not engaged:
+                # Make the stop monotonic inside the staging copy before the
+                # atomic replace, so no crash window can clear it.
+                staging_db = sqlite3.connect(staging)
+                try:
+                    staging_db.execute(
+                        "UPDATE emergency_stop SET engaged=1,reason=?,"
+                        "updated_at=CURRENT_TIMESTAMP WHERE singleton=1",
+                        ("emergency stop preserved across state restore",),
+                    )
+                    staging_db.execute(
+                        "INSERT INTO audit_events(event_type,client_order_id,details_json)"
+                        " VALUES(?,?,?)",
+                        ("emergency_stop_preserved_on_restore", None, "{}"),
+                    )
+                    staging_db.commit()
+                finally:
+                    staging_db.close()
+                engaged = True
+            for suffix in ("-wal", "-shm"):
+                try:
+                    os.remove(self.path + suffix)
+                except FileNotFoundError:
+                    pass
+            os.replace(staging, self.path)
+            return {"status": "state_restored", "integrity": integrity,
+                    "emergency_stop_engaged": engaged}
+        finally:
+            lock_handle.close()
 
     def list_cycle_events(self) -> list[dict[str, Any]]:
         """All completed-cycle events, without the general event-list cap."""

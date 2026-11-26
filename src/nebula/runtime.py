@@ -271,7 +271,8 @@ class ReadOnlyRuntime:
         # Record the cycle's expected closed-candle slot even when every
         # asset was filtered out, so a completed cycle is never invisible
         # to gap monitoring.
-        expected_slot = (now_ms // 3_600_000) * 3_600_000 - 3_600_000
+        bar_ms = self.BAR_MS[self.policy.bar]
+        expected_slot = (now_ms // bar_ms) * bar_ms - bar_ms
         if expected_slot > 0:
             candle_timestamps.append(expected_slot)
         self.state.record_event("runtime_cycle_completed", None, {

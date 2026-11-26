@@ -3,6 +3,7 @@
 ## v0.16.18 patch note
 
 - Activation-closure controls: operator `emergency-stop`/`emergency-status`/`emergency-clear` CLI commands (clear requires an exact confirmation token), execution-report redaction before output reaches logs, outcome observation wired into every orchestration cycle plus an `observe-outcomes` command, verified `backup-state`/`restore-state` for the SQLite state database, and a `cycle-gaps` report over completed-cycle candle timestamps. Forward test remains dormant; no orders were sent.
+- Added the Fase 0D research shadow runbook (`docs/RESEARCH_SHADOW_RUNBOOK.md`): shadow procedure, data-completeness checks, reproducibility rules, monitoring, recovery, and the shadow report template. Documentation only; shadow mode uses public fixtures until the Deployment Security Gate passes.
 
 ## v0.16.17 patch note
 
@@ -205,7 +206,7 @@ The ranking score is a deterministic implementation choice, not a proven predict
 
 ## Test status for v0.16.18
 
-- 685 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
+- 689 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
 - Tests cover fee/slippage impact, next-open execution, same-bar stop priority, risk sizing, daily-loss/drawdown halts, chronological single-asset and portfolio walk-forward splits, multi-asset deterministic selection, global one-position enforcement, synchronized timestamps, portfolio cost-stress scenarios, CSV validation and public history-candle request construction.
 - Tests use local synthetic data and mocked HTTP; they do not establish OKX connectivity or exchange execution behavior.
 - No API credentials were used and no Demo or live orders were sent.

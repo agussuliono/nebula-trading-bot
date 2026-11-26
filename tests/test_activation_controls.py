@@ -15,7 +15,7 @@ from nebula.risk_controls import SafetyError
 from nebula.state import StateStore
 
 HOUR_MS = 3_600_000
-BASE_TS = 1_700_000_000_000
+BASE_TS = 1_699_999_200_000  # aligned to an exact hourly slot
 
 
 def test_execution_report_redaction_removes_order_and_account_detail():
@@ -213,6 +213,75 @@ def test_outcome_observation_full_lifecycle_is_finalized_and_idempotent(tmp_path
     second = _outcome_observation_summary(state)
     assert second["recorded_events"] == 0
     assert second["accounting_finalized"] == 0
+
+
+def test_restore_refused_while_position_lock_active(tmp_path):
+    db = str(tmp_path / "state.db")
+    backup = str(tmp_path / "backup.db")
+    state = StateStore(db)
+    state.backup_to(backup)
+    risk_plan = {"instrument": "BTC-USDT", "size": "1", "entry_price": "100",
+                 "stop_loss": "90", "take_profit": "130", "risk_to_stop_quote": "10"}
+    assert state.reserve_entry_intent("NBentry", "BTC-USDT", 1, "buy", risk_plan)
+    with pytest.raises(ValueError, match="active"):
+        state.restore_from(backup)
+    assert state.get_position_lock() is not None
+
+
+def test_exit_size_cannot_exceed_reconciled_net_inventory(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    risk_plan = {"instrument": "BTC-USDT", "size": "2", "entry_price": "100",
+                 "stop_loss": "90", "take_profit": "130", "risk_to_stop_quote": "20"}
+    assert state.reserve_entry_intent("NBentry", "BTC-USDT", 1, "buy", risk_plan)
+    state.update_intent("NBentry", "submitting", "111")
+    state.update_intent("NBentry", "acknowledged", "111")
+    state.update_intent("NBentry", "live", "111")
+    state.update_intent("NBentry", "filled", "111")
+    fill = {"instId": "BTC-USDT", "ordId": "111", "tradeId": "1", "clOrdId": "NBentry",
+            "side": "buy", "fillSz": "2", "fillPx": "100", "fee": "-0.1",
+            "feeCcy": "USDT", "fillTime": "2026-11-26T00:00:00Z"}
+    assert state.save_fill(fill)
+    with pytest.raises(RuntimeError, match="net inventory"):
+        state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="3")
+    assert state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="2")
+
+
+def test_cycle_gap_report_detects_leading_gap_and_empty_coverage(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    state.record_event("runtime_cycle_completed", None, {
+        "latest_candle_ts": BASE_TS + 2 * HOUR_MS, "bar": "1H",
+    })
+    report = _cycle_gap_report(
+        state, now_ms=BASE_TS + 3 * HOUR_MS + 5 * 60_000, start_ms=BASE_TS,
+    )
+    assert report["gaps"] == [BASE_TS, BASE_TS + HOUR_MS]
+    empty = StateStore(str(tmp_path / "empty.db"))
+    report = _cycle_gap_report(
+        empty, now_ms=BASE_TS + 2 * HOUR_MS + 5 * 60_000, start_ms=BASE_TS,
+    )
+    assert report["status"] == "cycle_gaps_detected"
+    assert report["gaps"] == [BASE_TS, BASE_TS + HOUR_MS]
+    unknown = _cycle_gap_report(empty, now_ms=BASE_TS)
+    assert unknown["status"] == "cycle_coverage_unknown"
+
+
+def test_outcome_observation_runs_when_cycle_fails(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "state.db")
+
+    class ExplodingOrchestrator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run_once(self, execute=False):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("nebula.orchestrator.ExecutionOrchestrator", ExplodingOrchestrator)
+    monkeypatch.setattr(sys, "argv", ["nebula", "orchestrate-once", "--db", db])
+    with pytest.raises(SystemExit):
+        main()
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "cycle_failed"
+    assert output["outcome_observation"]["recorded_events"] == 0
 
 
 def test_outcome_observation_summary_on_empty_state(tmp_path):

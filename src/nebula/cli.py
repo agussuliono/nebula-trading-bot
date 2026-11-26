@@ -78,37 +78,49 @@ def _operator_breaker(state):
     return CircuitBreaker(state, limit if limit > 0 else "1")
 
 
-def _cycle_gap_report(state, *, now_ms=None):
-    """List hourly candle slots with no completed runtime cycle.
+_BAR_STEP_MS = {"1H": 3_600_000, "4H": 14_400_000, "1D": 86_400_000}
 
-    The expected range runs from the first processed slot through the last
-    closed hourly slot before ``now_ms``, so trailing gaps are reported too.
+
+def _cycle_gap_report(state, *, now_ms=None, start_ms=None):
+    """List candle slots with no completed runtime cycle.
+
+    The expected range runs from ``start_ms`` (or the first processed slot)
+    through the last closed slot before ``now_ms``, so leading and trailing
+    gaps are reported. The slot step follows the bar recorded by the cycles.
     """
     import time as _time
 
     processed = []
+    bar = "1H"
     for event in state.list_cycle_events():
-        candle_ts = (event.get("details") or {}).get("latest_candle_ts")
+        details = event.get("details") or {}
+        candle_ts = details.get("latest_candle_ts")
         if isinstance(candle_ts, int) and candle_ts > 0:
             processed.append(candle_ts)
+        if details.get("bar") in _BAR_STEP_MS:
+            bar = details["bar"]
     processed = sorted(set(processed))
-    if not processed:
-        return {"status": "no_processed_cycles", "processed_cycles": 0, "gaps": []}
-    step_ms = 3_600_000
+    step_ms = _BAR_STEP_MS[bar]
     if now_ms is None:
         now_ms = int(_time.time() * 1000)
     last_expected = (now_ms // step_ms) * step_ms - step_ms
-    range_end = max(processed[-1], last_expected)
+    if not processed and start_ms is None:
+        return {"status": "cycle_coverage_unknown", "processed_cycles": 0,
+                "bar": bar, "gap_count": None, "gaps": []}
+    range_start = start_ms if start_ms is not None else processed[0]
+    range_start = (range_start // step_ms) * step_ms
+    range_end = max(processed[-1], last_expected) if processed else last_expected
     present = set(processed)
     gaps = [
-        slot for slot in range(processed[0], range_end + step_ms, step_ms)
+        slot for slot in range(range_start, range_end + step_ms, step_ms)
         if slot not in present
     ]
     return {
         "status": "cycle_gaps_detected" if gaps else "no_cycle_gaps",
         "processed_cycles": len(processed),
-        "first_candle_ts": processed[0],
-        "last_candle_ts": processed[-1],
+        "bar": bar,
+        "first_candle_ts": processed[0] if processed else None,
+        "last_candle_ts": processed[-1] if processed else None,
         "last_expected_candle_ts": last_expected,
         "gap_count": len(gaps),
         "gaps": gaps,
@@ -134,6 +146,7 @@ def main():
     parser = argparse.ArgumentParser(prog="nebula")
     parser.add_argument("command", choices=["check-demo-public", "verify-demo-once", "analyze-once", "preflight-once", "portfolio-once", "recover-once", "orchestrate-once", "emergency-stop", "emergency-status", "emergency-clear", "observe-outcomes", "backup-state", "restore-state", "cycle-gaps", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
     parser.add_argument("--reason", default="", help="Operator reason recorded with an emergency stop")
+    parser.add_argument("--start-ms", type=int, default=None, help="Expected coverage start (epoch ms) for cycle-gaps")
     parser.add_argument("--confirm", default="", help="Exact confirmation token for guarded operator commands")
     parser.add_argument("--db", default=os.getenv("NEBULA_DB_PATH", "nebula.sqlite3"))
     parser.add_argument("--bar", default="1H")
@@ -181,7 +194,9 @@ def main():
             emit_result(json.dumps(_outcome_observation_summary(state), indent=2, sort_keys=True))
             return
         if args.command == "cycle-gaps":
-            emit_result(json.dumps(_cycle_gap_report(state), indent=2, sort_keys=True))
+            emit_result(json.dumps(
+                _cycle_gap_report(state, start_ms=args.start_ms), indent=2, sort_keys=True,
+            ))
             return
         if args.command == "backup-state":
             emit_result(json.dumps(state.backup_to(args.output), indent=2, sort_keys=True))
@@ -328,7 +343,27 @@ def main():
         orchestrator = ExecutionOrchestrator(
             client, state, settings, bar=args.bar,
         )
-        report = orchestrator.run_once(execute=args.execute_demo)
+        try:
+            report = orchestrator.run_once(execute=args.execute_demo)
+        except Exception as exc:
+            # Outcome observation still runs for a failed cycle so lifecycle
+            # evidence is not skipped when the cycle itself breaks.
+            failure = {
+                "mode": "demo_execution" if args.execute_demo else "shadow_only",
+                "status": "cycle_failed",
+                "error_type": type(exc).__name__,
+                "order_submission_attempts": 0,
+            }
+            try:
+                failure["outcome_observation"] = _outcome_observation_summary(state)
+            except Exception as obs_exc:
+                failure["outcome_observation"] = {
+                    "status": "observation_failed", "error_type": type(obs_exc).__name__,
+                }
+            emit_result(json.dumps(
+                _redact_execution_report(failure), indent=2, sort_keys=True, default=str,
+            ))
+            raise SystemExit(1) from exc
         try:
             report["outcome_observation"] = _outcome_observation_summary(state)
         except Exception as exc:
