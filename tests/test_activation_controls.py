@@ -703,7 +703,7 @@ def test_legacy_sell_without_position_link_blocks_oco(tmp_path):
     state = StateStore(str(tmp_path / "state.db"))
     _filled_entry(state, size="2")
     assert state.reserve_intent("NBlegacy", "BTC-USDT", 5, "sell")
-    with pytest.raises(ValueError, match="unresolved independent sell"):
+    with pytest.raises(ValueError, match="legacy sell"):
         state.reserve_protection_intent(
             entry_client_order_id="NBentry", instrument="BTC-USDT",
             algo_client_order_id="NBalgo", filled_size="2",
@@ -766,6 +766,45 @@ def test_legacy_snapshot_rebate_unknown_uses_ledger_on_tie(tmp_path):
         db.execute("INSERT INTO order_snapshots(client_order_id,exchange_order_id,exchange_state,"
                    "requested_size,cumulative_fill_size,average_fill_price,fee,fee_currency)"
                    " VALUES('NBentry','111','filled','2','2','100','-0.2','USDT')")
+        assert state._net_inventory(db, "NBentry", "BTC-USDT") == Decimal("2.1")
+
+
+def test_legacy_sell_not_attributed_to_second_position(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="1")
+    assert state.reserve_intent("NBlegacy", "BTC-USDT", 5, "sell")
+    state.update_intent("NBlegacy", "submitting", "333")
+    state.update_intent("NBlegacy", "acknowledged", "333")
+    state.update_intent("NBlegacy", "filled", "333")
+    with state._connect() as db:
+        with pytest.raises(ValueError, match="legacy sell"):
+            state._net_inventory(db, "NBentry", "BTC-USDT")
+        db.execute("UPDATE intents SET position_client_order_id='NBother'"
+                   " WHERE client_order_id='NBlegacy'")
+        assert state._net_inventory(db, "NBentry", "BTC-USDT") == Decimal("1")
+
+
+def test_previously_migrated_snapshot_default_zero_rebate_rebuilt(tmp_path):
+    import sqlite3
+    path = tmp_path / "premigrated.db"
+    conn = sqlite3.connect(path)
+    conn.execute("""CREATE TABLE order_snapshots (
+        client_order_id TEXT PRIMARY KEY, exchange_order_id TEXT,
+        exchange_state TEXT NOT NULL, requested_size TEXT NOT NULL,
+        cumulative_fill_size TEXT NOT NULL, average_fill_price TEXT NOT NULL,
+        fee TEXT NOT NULL, fee_currency TEXT NOT NULL,
+        rebate TEXT NOT NULL DEFAULT '0', rebate_currency TEXT NOT NULL DEFAULT '',
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    conn.commit()
+    conn.close()
+    state = StateStore(str(path))
+    _filled_entry(state, size="2", fee="0.1", fee_ccy="BTC")
+    with state._connect() as db:
+        db.execute("INSERT INTO order_snapshots(client_order_id,exchange_order_id,exchange_state,"
+                   "requested_size,cumulative_fill_size,average_fill_price,fee,fee_currency)"
+                   " VALUES('NBentry','111','filled','2','2','100','-0.2','USDT')")
+        row = db.execute("SELECT rebate FROM order_snapshots WHERE client_order_id='NBentry'").fetchone()
+        assert row["rebate"] is None
         assert state._net_inventory(db, "NBentry", "BTC-USDT") == Decimal("2.1")
 
 

@@ -307,6 +307,31 @@ class StateStore:
                 existing_columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
                 if existing_columns and column not in existing_columns:
                     db.execute(ddl)
+            snapshot_columns = {row["name"]: row for row in db.execute("PRAGMA table_info(order_snapshots)")}
+            rebate_column = snapshot_columns.get("rebate")
+            if rebate_column is not None and rebate_column["notnull"]:
+                db.execute("""CREATE TABLE order_snapshots_rebuilt (
+                    client_order_id TEXT PRIMARY KEY REFERENCES intents(client_order_id),
+                    exchange_order_id TEXT,
+                    exchange_state TEXT NOT NULL,
+                    requested_size TEXT NOT NULL,
+                    cumulative_fill_size TEXT NOT NULL,
+                    average_fill_price TEXT NOT NULL,
+                    fee TEXT NOT NULL,
+                    fee_currency TEXT NOT NULL,
+                    rebate TEXT,
+                    rebate_currency TEXT,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )""")
+                db.execute("""INSERT INTO order_snapshots_rebuilt(
+                    client_order_id,exchange_order_id,exchange_state,requested_size,
+                    cumulative_fill_size,average_fill_price,fee,fee_currency,rebate,
+                    rebate_currency,updated_at)
+                    SELECT client_order_id,exchange_order_id,exchange_state,requested_size,
+                    cumulative_fill_size,average_fill_price,fee,fee_currency,NULL,NULL,
+                    updated_at FROM order_snapshots""")
+                db.execute("DROP TABLE order_snapshots")
+                db.execute("ALTER TABLE order_snapshots_rebuilt RENAME TO order_snapshots")
 
     @staticmethod
     def make_client_order_id(strategy: str, instrument: str, candle_ts: int, side: str) -> str:
@@ -479,11 +504,21 @@ class StateStore:
             (position_client_order_id,),
         ).fetchone()["status"]
         orders.append(("buy", position_client_order_id, entry["exchange_order_id"], None, entry_status))
+        legacy_sells = db.execute(
+            "SELECT client_order_id,status FROM intents"
+            " WHERE side='sell' AND position_client_order_id IS NULL AND instrument=?"
+            " AND status != 'rejected'",
+            (instrument,),
+        ).fetchall()
+        if legacy_sells:
+            raise ValueError(
+                "Position inventory reconciliation is incomplete: a legacy sell"
+                " without a position link cannot be attributed safely"
+            )
         for row in db.execute(
             "SELECT client_order_id,exchange_order_id,status FROM intents"
-            " WHERE side='sell' AND (position_client_order_id=?"
-            " OR (position_client_order_id IS NULL AND instrument=?))",
-            (position_client_order_id, instrument),
+            " WHERE side='sell' AND position_client_order_id=?",
+            (position_client_order_id,),
         ).fetchall():
             orders.append(("sell", row["client_order_id"], row["exchange_order_id"], None, row["status"]))
         for row in db.execute(
