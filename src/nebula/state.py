@@ -328,7 +328,11 @@ class StateStore:
                     cumulative_fill_size,average_fill_price,fee,fee_currency,rebate,
                     rebate_currency,updated_at)
                     SELECT client_order_id,exchange_order_id,exchange_state,requested_size,
-                    cumulative_fill_size,average_fill_price,fee,fee_currency,NULL,NULL,
+                    cumulative_fill_size,average_fill_price,fee,fee_currency,
+                    CASE WHEN CAST(rebate AS REAL) != 0 OR rebate_currency != ''
+                        THEN rebate ELSE NULL END,
+                    CASE WHEN CAST(rebate AS REAL) != 0 OR rebate_currency != ''
+                        THEN rebate_currency ELSE NULL END,
                     updated_at FROM order_snapshots""")
                 db.execute("DROP TABLE order_snapshots")
                 db.execute("ALTER TABLE order_snapshots_rebuilt RENAME TO order_snapshots")
@@ -505,12 +509,25 @@ class StateStore:
         ).fetchone()["status"]
         orders.append(("buy", position_client_order_id, entry["exchange_order_id"], None, entry_status))
         legacy_sells = db.execute(
-            "SELECT client_order_id,status FROM intents"
-            " WHERE side='sell' AND position_client_order_id IS NULL AND instrument=?"
-            " AND status != 'rejected'",
+            "SELECT client_order_id,status,exchange_order_id FROM intents"
+            " WHERE side='sell' AND position_client_order_id IS NULL AND instrument=?",
             (instrument,),
         ).fetchall()
-        if legacy_sells:
+        ambiguous_legacy = []
+        for legacy in legacy_sells:
+            if legacy["status"] != "rejected":
+                ambiguous_legacy.append(legacy)
+                continue
+            if legacy["exchange_order_id"]:
+                ambiguous_legacy.append(legacy)
+                continue
+            snapshot = db.execute(
+                "SELECT cumulative_fill_size FROM order_snapshots WHERE client_order_id=?",
+                (legacy["client_order_id"],),
+            ).fetchone()
+            if snapshot is not None and Decimal(str(snapshot["cumulative_fill_size"])) > 0:
+                ambiguous_legacy.append(legacy)
+        if ambiguous_legacy:
             raise ValueError(
                 "Position inventory reconciliation is incomplete: a legacy sell"
                 " without a position link cannot be attributed safely"

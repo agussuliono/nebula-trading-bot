@@ -808,6 +808,75 @@ def test_previously_migrated_snapshot_default_zero_rebate_rebuilt(tmp_path):
         assert state._net_inventory(db, "NBentry", "BTC-USDT") == Decimal("2.1")
 
 
+def _filled_entry_named(state, client_order_id, exchange_id, size):
+    risk_plan = {"instrument": "BTC-USDT", "size": size, "entry_price": "100",
+                 "stop_loss": "90", "take_profit": "130", "risk_to_stop_quote": "20"}
+    assert state.reserve_entry_intent(client_order_id, "BTC-USDT", 1, "buy", risk_plan)
+    state.update_intent(client_order_id, "submitting", exchange_id)
+    state.update_intent(client_order_id, "acknowledged", exchange_id)
+    state.update_intent(client_order_id, "filled", exchange_id)
+    state.save_fill({"instId": "BTC-USDT", "ordId": exchange_id, "tradeId": f"9{exchange_id}",
+                     "side": "buy", "fillSz": size, "fillPx": "100",
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": client_order_id})
+
+
+def test_rejected_legacy_sell_with_execution_evidence_fails_closed(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="1")
+    assert state.reserve_intent("NBlegacy", "BTC-USDT", 5, "sell")
+    state.update_intent("NBlegacy", "submitting", "333")
+    state.update_intent("NBlegacy", "submission_unknown", "333")
+    state.update_intent("NBlegacy", "rejected", "333")
+    with state._connect() as db:
+        with pytest.raises(ValueError, match="legacy sell"):
+            state._net_inventory(db, "NBentry", "BTC-USDT")
+
+
+def test_manual_reconciliation_attributes_legacy_sell_to_owner(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry_named(state, "NBentryA", "111", "1")
+    _filled_entry_named(state, "NBentryB", "222", "0.6")
+    assert state.reserve_intent("NBlegacy", "BTC-USDT", 5, "sell")
+    state.update_intent("NBlegacy", "submitting", "333")
+    state.update_intent("NBlegacy", "acknowledged", "333")
+    state.update_intent("NBlegacy", "filled", "333")
+    state.save_fill({"instId": "BTC-USDT", "ordId": "333", "tradeId": "9333",
+                     "side": "sell", "fillSz": "0.4", "fillPx": "110",
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBlegacy"})
+    with state._connect() as db:
+        with pytest.raises(ValueError, match="legacy sell"):
+            state._net_inventory(db, "NBentryB", "BTC-USDT")
+        db.execute("UPDATE intents SET position_client_order_id='NBentryA'"
+                   " WHERE client_order_id='NBlegacy'")
+        assert state._net_inventory(db, "NBentryA", "BTC-USDT") == Decimal("0.6")
+        assert state._net_inventory(db, "NBentryB", "BTC-USDT") == Decimal("0.6")
+
+
+def test_rebate_rebuild_preserves_proven_values_and_integrity(tmp_path):
+    import sqlite3
+    path = tmp_path / "premigrated-data.db"
+    conn = sqlite3.connect(path)
+    conn.execute("""CREATE TABLE order_snapshots (
+        client_order_id TEXT PRIMARY KEY, exchange_order_id TEXT,
+        exchange_state TEXT NOT NULL, requested_size TEXT NOT NULL,
+        cumulative_fill_size TEXT NOT NULL, average_fill_price TEXT NOT NULL,
+        fee TEXT NOT NULL, fee_currency TEXT NOT NULL,
+        rebate TEXT NOT NULL DEFAULT '0', rebate_currency TEXT NOT NULL DEFAULT '',
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    conn.execute("INSERT INTO order_snapshots VALUES('NBkeep','111','filled','2','2','100','-0.2','USDT','0.05','BTC',CURRENT_TIMESTAMP)")
+    conn.execute("INSERT INTO order_snapshots VALUES('NBunknown','222','filled','2','2','100','-0.2','USDT','0','',CURRENT_TIMESTAMP)")
+    conn.commit()
+    conn.close()
+    state = StateStore(str(path))
+    state = StateStore(str(path))  # migration must be idempotent
+    with state._connect() as db:
+        rows = {row["client_order_id"]: row["rebate"] for row in db.execute(
+            "SELECT client_order_id,rebate FROM order_snapshots")}
+        assert rows == {"NBkeep": "0.05", "NBunknown": None}
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def test_outcome_observation_summary_on_empty_state(tmp_path):
     state = StateStore(str(tmp_path / "state.db"))
     summary = _outcome_observation_summary(state)
