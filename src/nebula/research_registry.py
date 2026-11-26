@@ -750,6 +750,20 @@ class ResearchRegistry:
                 excluded.add(index)
         return frozenset(excluded)
 
+    def all_exclusions(self, experiment_id: str) -> frozenset:
+        """All candidate indexes with an exclusion event."""
+        rows = self._conn.execute(
+            "SELECT reason FROM experiment_status_events WHERE experiment_id = ? "
+            "AND new_status = 'candidate_excluded'",
+            (experiment_id,),
+        ).fetchall()
+        excluded = set()
+        for (reason,) in rows:
+            index = json.loads(reason).get("candidate_index")
+            if isinstance(index, int) and not isinstance(index, bool):
+                excluded.add(index)
+        return frozenset(excluded)
+
     def trial_returns(self, experiment_id: str) -> tuple[tuple[str, tuple[float, ...]], ...]:
         """Stored per-trial returns keyed by trial_id, in trial_id order."""
         rows = self._conn.execute(

@@ -12,6 +12,7 @@ verification failure fails closed.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -298,13 +299,41 @@ def evaluate_prospective(
     return ProspectiveDecision(eligible=not reasons, reasons=tuple(reasons))
 
 
+def _sharpe(values: Sequence[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    var = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    if var <= 0:
+        return 0.0
+    return mean / math.sqrt(var)
+
+
+def _derive_combinations(trials: Sequence[Sequence[float]]):
+    """CSCV combinations derived deterministically from registry returns."""
+    if not trials or len(trials[0]) < 4:
+        return []
+    blocks = 4
+    size = len(trials[0]) // blocks
+    combos = []
+    for a in range(blocks):
+        for b in range(a + 1, blocks):
+            is_idx = list(range(a * size, (a + 1) * size)) + list(
+                range(b * size, (b + 1) * size)
+            )
+            oos_idx = [i for i in range(blocks * size) if i not in set(is_idx)]
+            is_perf = [_sharpe([t[i] for i in is_idx]) for t in trials]
+            oos_perf = [_sharpe([t[i] for i in oos_idx]) for t in trials]
+            combos.append((is_perf, oos_perf))
+    return combos
+
+
 def evaluate_pbo_gate(
-    combinations: Optional[Sequence[tuple[Sequence[Optional[float]], Sequence[Optional[float]]]]],
     frozen: FrozenProtocol,
     registry,
     experiment_id: str,
 ) -> StatResult:
-    """PBO gate: exclusions come from the frozen protocol and registry."""
+    """PBO gate: combinations and exclusions derive from the registry."""
     if not frozen.verify():
         return StatResult.inconclusive("frozen protocol hash mismatch")
     if not registry.protocol_frozen(experiment_id, frozen.sha256):
@@ -313,6 +342,18 @@ def evaluate_pbo_gate(
         return StatResult.inconclusive(
             "candidate excluded after performance was seen"
         )
+    unregistered = registry.all_exclusions(experiment_id) - set(
+        frozen.protocol.preregistered_exclusions
+    )
+    if unregistered:
+        return StatResult.inconclusive(
+            "candidate excluded without preregistration"
+        )
+    try:
+        trials = [returns for _, returns in registry.trial_returns(experiment_id)]
+    except Exception:
+        return StatResult.inconclusive("registry trial returns unavailable")
+    combinations = _derive_combinations(trials)
     if not combinations:
         return StatResult.inconclusive("CSCV artifact missing")
     return cscv_pbo(
@@ -462,6 +503,10 @@ def evaluate_promotion(
         reasons.append("PBO validation missing or inconclusive")
     elif pbo_value > 1.0 - threshold:
         reasons.append("PBO above frozen promotion threshold")
+    else:
+        recomputed = evaluate_pbo_gate(frozen, registry, experiment_id)
+        if recomputed.status != "ok" or recomputed.value is None or abs(recomputed.value - pbo_value) > 1e-9:
+            reasons.append("PBO validation does not match recomputation")
     dsr_run = registry.latest_validation(experiment_id, "dsr")
     dsr_value = (dsr_run or {}).get("result", {}).get("value")
     if (
@@ -475,6 +520,15 @@ def evaluate_promotion(
         reasons.append("DSR validation missing or inconclusive")
     elif dsr_value < threshold:
         reasons.append("DSR below frozen promotion threshold")
+    else:
+        recomputed = evaluate_dsr_gate(
+            registry,
+            experiment_id,
+            _best_trial_id(registry, experiment_id),
+            build_dsr_artifacts(registry, experiment_id),
+        )
+        if recomputed.status != "ok" or recomputed.value is None or abs(recomputed.value - dsr_value) > 1e-9:
+            reasons.append("DSR validation does not match recomputation")
     for method, artifact_bytes, label in (
         ("snapshot", evidence.snapshot_bytes, "snapshot"),
         ("walk_forward", evidence.walk_forward_bytes, "walk-forward plateau"),
@@ -488,6 +542,9 @@ def evaluate_promotion(
             or run["status"] != "ok"
             or artifacts.get("artifact_sha256") != expected_hash
             or artifacts.get("passed") is not True
+            or not _artifact_passed(
+                registry, experiment_id, method, artifact_bytes, frozen
+            )
         ):
             reasons.append(f"{label} artifact not verified in registry")
     if tuple(sorted(evidence.trial_ids)) != registry.trial_ids(experiment_id):
@@ -516,9 +573,11 @@ def _stat_artifacts(registry, experiment_id: str, frozen: "FrozenProtocol") -> d
     return artifacts
 
 
-def run_pbo_and_record(registry, experiment_id: str, combinations, frozen) -> StatResult:
-    """Evaluate PBO through the gate and record the computed result."""
-    result = evaluate_pbo_gate(combinations, frozen, registry, experiment_id)
+def run_pbo_and_record(registry, experiment_id: str, frozen) -> StatResult:
+    """Record performance_seen, evaluate PBO, and record the result."""
+    for index in range(len(registry.trial_ids(experiment_id))):
+        registry.record_performance_seen(experiment_id, index, "fixture-harness")
+    result = evaluate_pbo_gate(frozen, registry, experiment_id)
     registry.record_validation(
         f"pbo-{experiment_id}",
         experiment_id,
@@ -529,12 +588,12 @@ def run_pbo_and_record(registry, experiment_id: str, combinations, frozen) -> St
     return result
 
 
-def run_dsr_and_record(
-    registry, experiment_id: str, selected_trial_id: str, frozen
-) -> StatResult:
-    """Evaluate DSR through the gate and record the computed result."""
+def run_dsr_and_record(registry, experiment_id: str, frozen) -> StatResult:
+    """Evaluate DSR for the best-Sharpe registry trial and record it."""
     artifacts = build_dsr_artifacts(registry, experiment_id)
-    result = evaluate_dsr_gate(registry, experiment_id, selected_trial_id, artifacts)
+    result = evaluate_dsr_gate(
+        registry, experiment_id, _best_trial_id(registry, experiment_id), artifacts
+    )
     registry.record_validation(
         f"dsr-{experiment_id}",
         experiment_id,
@@ -545,17 +604,59 @@ def run_dsr_and_record(
     return result
 
 
+def _best_trial_id(registry, experiment_id: str) -> str:
+    stored = registry.trial_returns(experiment_id)
+    return max(stored, key=lambda item: _sharpe(list(item[1])))[0]
+
+
+def _artifact_passed(
+    registry, experiment_id: str, method: str, artifact_bytes: bytes, frozen
+) -> bool:
+    """Compute artifact validity from its content, never from a caller flag."""
+    try:
+        payload = json.loads(artifact_bytes.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if method == "snapshot":
+        return payload.get("schema") == "snapshot-v1" and payload.get(
+            "trial_ids"
+        ) == sorted(registry.trial_ids(experiment_id))
+    if method == "walk_forward":
+        score = payload.get("plateau_score")
+        return (
+            payload.get("schema") == "walk-forward-v1"
+            and isinstance(score, (int, float))
+            and math.isfinite(score)
+            and score >= 0.5
+        )
+    if method == "stress":
+        net = payload.get("net_sharpe")
+        return (
+            payload.get("schema") == "stress-v1"
+            and payload.get("fee_bps") == frozen.protocol.fee_bps
+            and payload.get("slippage_bps") == frozen.protocol.slippage_bps
+            and isinstance(net, (int, float))
+            and math.isfinite(net)
+            and net > 0
+        )
+    return False
+
+
 def record_artifact_validation(
-    registry, experiment_id: str, method: str, artifact_bytes: bytes, passed: bool
+    registry, experiment_id: str, method: str, artifact_bytes: bytes, frozen
 ) -> None:
-    """Record an artifact validation with the hash computed from its bytes."""
+    """Record an artifact validation computed from the artifact bytes."""
     registry.record_validation(
-        f"{method}-{experiment_id}",
+        f"{method}-{experiment_id}-{hashlib.sha256(artifact_bytes).hexdigest()[:8]}",
         experiment_id,
         method,
         {
             "artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
-            "passed": passed,
+            "passed": _artifact_passed(
+                registry, experiment_id, method, artifact_bytes, frozen
+            ),
         },
         {},
     )
