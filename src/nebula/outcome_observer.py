@@ -91,7 +91,8 @@ def _ledger_completeness(state: StateStore, entry_id: str,
             known_orders.add(order_id)
         if snapshot is None:
             status = str(intent.get("status") or "")
-            if status in TERMINAL_ENTRY_STATUSES and status != "rejected":
+            if status in TERMINAL_ENTRY_STATUSES and not (
+                    status == "rejected" and not intent.get("exchange_order_id")):
                 complete = False
             continue
         cumulative = _strict_decimal(snapshot.get("cumulative_fill_size"))
@@ -118,7 +119,7 @@ def _proven_zero_fill(intent: dict[str, Any], snapshot: dict[str, Any] | None,
     status = str(intent.get("status") or "")
     if status == "rejected":
         if snapshot is None:
-            return True
+            return not intent.get("exchange_order_id")
         cumulative = _strict_decimal(snapshot.get("cumulative_fill_size"))
         return cumulative == 0
     if status not in {"canceled", "mmp_canceled"} or snapshot is None:

@@ -587,9 +587,13 @@ class StateStore:
         from decimal import Decimal, InvalidOperation
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            intent = db.execute("SELECT status,side FROM intents WHERE client_order_id=?", (client_order_id,)).fetchone()
+            intent = db.execute("SELECT status,side,exchange_order_id FROM intents WHERE client_order_id=?", (client_order_id,)).fetchone()
             snapshot = db.execute("SELECT cumulative_fill_size FROM order_snapshots WHERE client_order_id=?", (client_order_id,)).fetchone()
             if not intent or intent["side"] != "buy" or intent["status"] != "rejected":
+                return False
+            if not snapshot and intent["exchange_order_id"]:
+                # An exchange order ID without a snapshot does not prove
+                # the order was never filled.
                 return False
             if snapshot:
                 try:
@@ -607,17 +611,41 @@ class StateStore:
                             json.dumps({"intent_status": intent["status"]}, sort_keys=True)))
             return cursor.rowcount == 1
 
+    LOCK_RELEASE_EVENT_TYPES = {
+        "position_lock_released",
+        "zero_fill_entry_lock_released",
+        "rejected_entry_lock_released",
+    }
+
     def has_lock_release_evidence(self, entry_client_order_id: str) -> bool:
-        """True only when a sanctioned release path recorded its evidence."""
+        """True only when a sanctioned release path recorded valid evidence."""
         with self._connect() as db:
-            row = db.execute(
-                """SELECT 1 FROM audit_events WHERE client_order_id=?
+            rows = db.execute(
+                """SELECT event_type,details_json FROM audit_events
+                   WHERE client_order_id=?
                    AND event_type IN ('position_lock_released',
                                       'zero_fill_entry_lock_released',
-                                      'rejected_entry_lock_released') LIMIT 1""",
+                                      'rejected_entry_lock_released')""",
                 (entry_client_order_id,),
-            ).fetchone()
-            return row is not None
+            ).fetchall()
+            for row in rows:
+                try:
+                    details = json.loads(row["details_json"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(details, dict):
+                    continue
+                if row["event_type"] == "position_lock_released":
+                    if details.get("open_orders_checked") is True and {
+                            "base_balance", "dust_limit"} <= set(details):
+                        return True
+                elif row["event_type"] == "zero_fill_entry_lock_released":
+                    if details.get("exchange_state") in {"canceled", "mmp_canceled"}:
+                        return True
+                elif row["event_type"] == "rejected_entry_lock_released":
+                    if details.get("intent_status") == "rejected":
+                        return True
+            return False
 
     def release_position_lock_after_flat_check(self, *, position_client_order_id: str,
                                                base_balance: str, dust_limit: str,
@@ -661,6 +689,10 @@ class StateStore:
             return True
 
     def record_event(self, event_type: str, client_order_id: str | None = None, details: dict | None = None) -> None:
+        if event_type in self.LOCK_RELEASE_EVENT_TYPES:
+            raise ValueError(
+                "Lock-release evidence may only be recorded by a sanctioned release path"
+            )
         # Callers must never put credentials, signatures, or full request headers here.
         payload = json.dumps(details or {}, sort_keys=True, separators=(",", ":"))
         with self._connect() as db:
