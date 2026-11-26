@@ -10,9 +10,156 @@ from .output import emit_result
 from .portfolio import PortfolioPolicy, PortfolioRiskEngine
 
 
+_SAFE_SCALAR_KEYS = {
+    "mode", "status", "execution", "reason", "stage", "error_type",
+    "order_submission_attempts", "do_not_retry", "position_lock_retained",
+    "entry_submission_attempted", "oco_submission_attempted",
+}
+_PAYLOAD_SUMMARY_KEYS = {
+    "candidate", "entry", "scan", "reconciliation", "entry_reconciliation",
+    "exit_reconciliation", "protection", "recovery", "equity_observation",
+}
+
+
+def _redact_execution_report(report):
+    """Allowlist-only execution output: statuses and counts, never payloads."""
+    if not isinstance(report, dict):
+        return {"status": "unrecognized_report"}
+    redacted = {}
+    for key in _SAFE_SCALAR_KEYS:
+        value = report.get(key)
+        if isinstance(value, (str, int, bool)) or value is None:
+            if key in report:
+                redacted[key] = value
+    for key in _PAYLOAD_SUMMARY_KEYS:
+        if key in report:
+            item = report[key]
+            summary = {"present": item is not None}
+            if isinstance(item, dict) and isinstance(item.get("status"), str):
+                summary["status"] = item["status"]
+            redacted[key] = summary
+    observation = report.get("outcome_observation")
+    if isinstance(observation, dict):
+        redacted["outcome_observation"] = {
+            key: observation[key]
+            for key in ("recorded_events", "accounting_finalized",
+                        "legacy_episode_unavailable", "status", "error_type")
+            if isinstance(observation.get(key), (str, int))
+        }
+    return redacted
+
+
+def _outcome_observation_summary(state):
+    from .outcome_observer import observe_all
+
+    result = observe_all(state)
+    recorded = result.get("recorded_events") or []
+    finalized = sum(
+        1 for event in recorded
+        if isinstance(event, dict) and event.get("event_type") == "accounting_finalized"
+    )
+    return {
+        "recorded_events": len(recorded),
+        "accounting_finalized": finalized,
+        "legacy_episode_unavailable": len(result.get("legacy_episode_unavailable") or []),
+    }
+
+
+def _operator_breaker(state):
+    from .risk_controls import CircuitBreaker
+
+    raw_limit = os.getenv("NEBULA_MAX_DAILY_LOSS_QUOTE", "0")
+    try:
+        limit = float(raw_limit)
+    except (TypeError, ValueError):
+        limit = 0.0
+    # The daily-loss limit is unused by engage/status/clear; a positive
+    # placeholder keeps the fail-closed state validation in CircuitBreaker.
+    return CircuitBreaker(state, limit if limit > 0 else "1")
+
+
+_BAR_STEP_MS = {"1H": 3_600_000, "4H": 14_400_000, "1D": 86_400_000}
+
+
+def _cycle_gap_report(state, *, now_ms=None, start_ms=None):
+    """List candle slots with no completed runtime cycle.
+
+    The expected range runs from ``start_ms`` (or the first processed slot)
+    through the last closed slot before ``now_ms``, so leading and trailing
+    gaps are reported. The slot step follows the bar recorded by the cycles.
+    """
+    import time as _time
+
+    processed = []
+    bars = set()
+    for event in state.list_cycle_events():
+        details = event.get("details") or {}
+        candle_ts = details.get("latest_candle_ts")
+        if not isinstance(candle_ts, int) or candle_ts <= 0:
+            return {"status": "cycle_coverage_unknown",
+                    "processed_cycles": len(set(processed)),
+                    "bar": None, "gap_count": None, "gaps": []}
+        if True:
+            processed.append(candle_ts)
+            if details.get("bar") not in _BAR_STEP_MS:
+                return {"status": "cycle_coverage_unknown",
+                        "processed_cycles": len(set(processed)),
+                        "bar": None, "gap_count": None, "gaps": []}
+            bars.add(details["bar"])
+    if len(bars) > 1:
+        return {"status": "mixed_timeframes_not_supported",
+                "processed_cycles": len(set(processed)),
+                "bars": sorted(bars), "gap_count": None, "gaps": []}
+    bar = bars.pop() if bars else "1H"
+    processed = sorted(set(processed))
+    step_ms = _BAR_STEP_MS[bar]
+    if now_ms is None:
+        now_ms = int(_time.time() * 1000)
+    last_expected = (now_ms // step_ms) * step_ms - step_ms
+    if not processed and start_ms is None:
+        return {"status": "cycle_coverage_unknown", "processed_cycles": 0,
+                "bar": bar, "gap_count": None, "gaps": []}
+    range_start = start_ms if start_ms is not None else processed[0]
+    range_start = (range_start // step_ms) * step_ms
+    range_end = max(processed[-1], last_expected) if processed else last_expected
+    present = set(processed)
+    gaps = [
+        slot for slot in range(range_start, range_end + step_ms, step_ms)
+        if slot not in present
+    ]
+    return {
+        "status": "cycle_gaps_detected" if gaps else "no_cycle_gaps",
+        "processed_cycles": len(processed),
+        "bar": bar,
+        "first_candle_ts": processed[0] if processed else None,
+        "last_candle_ts": processed[-1] if processed else None,
+        "last_expected_candle_ts": last_expected,
+        "gap_count": len(gaps),
+        "gaps": gaps,
+    }
+
+
+def _emergency_status(state):
+    with state._connect() as db:
+        row = db.execute(
+            "SELECT engaged,reason,updated_at FROM emergency_stop WHERE singleton=1"
+        ).fetchone()
+    if row is None:
+        raise ValueError("Emergency stop state is missing; manual recovery required")
+    return {
+        "status": "emergency_stop_engaged" if row[0] else "emergency_stop_clear",
+        "engaged": bool(row[0]),
+        "reason": row[1],
+        "updated_at": row[2],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(prog="nebula")
-    parser.add_argument("command", choices=["check-demo-public", "verify-demo-once", "analyze-once", "preflight-once", "portfolio-once", "recover-once", "orchestrate-once", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
+    parser.add_argument("command", choices=["check-demo-public", "verify-demo-once", "analyze-once", "preflight-once", "portfolio-once", "recover-once", "orchestrate-once", "emergency-stop", "emergency-status", "emergency-clear", "observe-outcomes", "backup-state", "restore-state", "cycle-gaps", "backtest", "portfolio-backtest", "diagnose-portfolio", "download-history", "collect-prospective", "audit-data"])
+    parser.add_argument("--reason", default="", help="Operator reason recorded with an emergency stop")
+    parser.add_argument("--start-ms", type=int, default=None, help="Expected coverage start (epoch ms) for cycle-gaps")
+    parser.add_argument("--confirm", default="", help="Exact confirmation token for guarded operator commands")
     parser.add_argument("--db", default=os.getenv("NEBULA_DB_PATH", "nebula.sqlite3"))
     parser.add_argument("--bar", default="1H")
     parser.add_argument("--data", help="Local ascending OHLCV CSV for offline backtest or dataset audit")
@@ -52,6 +199,40 @@ def main():
         parser.error("candidate-plan sizing options are only valid with analyze-once or preflight-once")
     if args.command == "preflight-once" and args.plan_risk_quote is None:
         parser.error("preflight-once requires --plan-risk-quote and --plan-max-notional-quote")
+    if args.command in {"emergency-stop", "emergency-status", "emergency-clear", "observe-outcomes", "backup-state", "restore-state", "cycle-gaps"}:
+        # Operator controls act on local state only: no credentials, no network.
+        state = StateStore(args.db)
+        if args.command == "observe-outcomes":
+            emit_result(json.dumps(_outcome_observation_summary(state), indent=2, sort_keys=True))
+            return
+        if args.command == "cycle-gaps":
+            emit_result(json.dumps(
+                _cycle_gap_report(state, start_ms=args.start_ms), indent=2, sort_keys=True,
+            ))
+            return
+        if args.command == "backup-state":
+            emit_result(json.dumps(state.backup_to(args.output), indent=2, sort_keys=True))
+            return
+        if args.command == "restore-state":
+            if not args.data:
+                parser.error("restore-state requires --data PATH")
+            if args.confirm != "restore-state":
+                parser.error("restore-state requires --confirm restore-state")
+            emit_result(json.dumps(state.restore_from(args.data), indent=2, sort_keys=True))
+            return
+        breaker = _operator_breaker(state)
+        if args.command == "emergency-stop":
+            breaker.engage_emergency_stop(args.reason or "operator emergency stop")
+            emit_result(json.dumps(_emergency_status(state), indent=2, sort_keys=True))
+            return
+        if args.command == "emergency-status":
+            emit_result(json.dumps(_emergency_status(state), indent=2, sort_keys=True))
+            return
+        if args.confirm != "clear-emergency-stop":
+            parser.error("emergency-clear requires --confirm clear-emergency-stop")
+        breaker.clear_emergency_stop(explicit_confirmation=True)
+        emit_result(json.dumps(_emergency_status(state), indent=2, sort_keys=True))
+        return
     if args.command == "download-history":
         if not args.symbol:
             parser.error("download-history requires --symbol BTC-USDT")
@@ -174,8 +355,37 @@ def main():
         orchestrator = ExecutionOrchestrator(
             client, state, settings, bar=args.bar,
         )
-        report = orchestrator.run_once(execute=args.execute_demo)
-        emit_result(json.dumps(report, indent=2, sort_keys=True, default=str))
+        try:
+            report = orchestrator.run_once(execute=args.execute_demo)
+        except Exception as exc:
+            # Outcome observation still runs for a failed cycle so lifecycle
+            # evidence is not skipped when the cycle itself breaks.
+            failure = {
+                "mode": "demo_execution" if args.execute_demo else "shadow_only",
+                "status": "cycle_failed",
+                "error_type": type(exc).__name__,
+                # Unknown: the failure may have happened after a submission.
+                "order_submission_attempts": None,
+            }
+            try:
+                failure["outcome_observation"] = _outcome_observation_summary(state)
+            except Exception as obs_exc:
+                failure["outcome_observation"] = {
+                    "status": "observation_failed", "error_type": type(obs_exc).__name__,
+                }
+            emit_result(json.dumps(
+                _redact_execution_report(failure), indent=2, sort_keys=True, default=str,
+            ))
+            raise SystemExit(1) from exc
+        try:
+            report["outcome_observation"] = _outcome_observation_summary(state)
+        except Exception as exc:
+            report["outcome_observation"] = {
+                "status": "observation_failed", "error_type": type(exc).__name__,
+            }
+        emit_result(json.dumps(
+            _redact_execution_report(report), indent=2, sort_keys=True, default=str,
+        ))
         return
     if args.command == "preflight-once":
         from .entry_plan import EntryPlanPolicy
