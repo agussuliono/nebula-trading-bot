@@ -546,7 +546,7 @@ class StateStore:
                 gross, fee = fills_gross, fills_fee
             elif snapshot_cumulative is not None:
                 gross, fee = snapshot_cumulative, snapshot_fee
-            elif exchange_order_id:
+            elif exchange_order_id or status not in ("reserved", "rejected"):
                 raise ValueError(
                     "Position inventory reconciliation is incomplete: a submitted"
                     " order has neither fill ledger nor snapshot evidence"
@@ -1124,6 +1124,8 @@ class StateStore:
             raise ValueError("Cumulative fill exceeds requested order size")
         if cumulative > 0 and average <= 0:
             raise ValueError("Filled order has no valid average price")
+        if cumulative > 0 and ("fee" not in order or "feeCcy" not in order):
+            raise ValueError("Filled order snapshot is missing fee evidence")
         state = str(order.get("state", "unknown"))
         order_id = str(order.get("ordId") or "")
         if order_id and (not order_id.isascii() or not order_id.isdigit()):
@@ -1330,6 +1332,7 @@ class StateStore:
         state = str(order.get("state", "unknown"))
         if state not in {"live", "partially_filled", "filled", "canceled", "mmp_canceled"}:
             raise ValueError("Unrecognized OCO child order state")
+        fee_evidence_present = "fee" in order and "feeCcy" in order
         try:
             child_fee = Decimal(str(order.get("fee", "0") or "0"))
             child_rebate = Decimal(str(order.get("rebate", "0") or "0"))
@@ -1337,6 +1340,16 @@ class StateStore:
             raise ValueError("Invalid fee or rebate in OCO child order") from exc
         if not child_fee.is_finite() or not child_rebate.is_finite() or child_rebate < 0:
             raise ValueError("Invalid fee or rebate in OCO child order")
+        if filled > 0 and not fee_evidence_present:
+            child_fee_value = None
+            child_fee_currency = None
+            child_rebate_value = None
+            child_rebate_currency = None
+        else:
+            child_fee_value = str(child_fee)
+            child_fee_currency = str(order.get("feeCcy") or "")
+            child_rebate_value = str(child_rebate)
+            child_rebate_currency = str(order.get("rebateCcy") or "")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute("SELECT cumulative_fill_size FROM exit_child_orders WHERE entry_client_order_id=? AND exchange_order_id=?",
@@ -1349,9 +1362,9 @@ class StateStore:
                 average_fill_price=?,fee=?,fee_currency=?,rebate=?,rebate_currency=?,
                 updated_at=CURRENT_TIMESTAMP
                 WHERE entry_client_order_id=? AND exchange_order_id=?""",
-                (state,str(requested),str(filled),str(average),str(child_fee),
-                 str(order.get("feeCcy") or ""),str(child_rebate),
-                 str(order.get("rebateCcy") or ""),entry_client_order_id,str(exchange_order_id)))
+                (state,str(requested),str(filled),str(average),child_fee_value,
+                 child_fee_currency,child_rebate_value,
+                 child_rebate_currency,entry_client_order_id,str(exchange_order_id)))
             row = db.execute("SELECT * FROM exit_child_orders WHERE entry_client_order_id=? AND exchange_order_id=?",
                              (entry_client_order_id,str(exchange_order_id))).fetchone()
             return dict(row)

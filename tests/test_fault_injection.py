@@ -131,6 +131,7 @@ def test_stale_lower_cumulative_fill_is_rejected_without_overwriting_snapshot(tm
     client.order = {
         "ordId": "41001", "clOrdId": ENTRY_ID, "state": "partially_filled",
         "sz": "0.010", "accFillSz": "0.004", "avgPx": "50000",
+        "fee": "-0.01", "feeCcy": "USDT",
     }
     assert manager.reconcile(ENTRY_ID)["status"] == "partially_filled"
 

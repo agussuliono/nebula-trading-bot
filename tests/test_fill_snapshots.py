@@ -19,17 +19,17 @@ def test_cumulative_fill_snapshot_is_persisted(tmp_path):
 def test_fill_snapshot_cannot_regress(tmp_path):
     store = setup(tmp_path)
     store.save_order_snapshot("NB1", {"ordId": "1", "state": "partially_filled", "sz": "1",
-        "accFillSz": "0.4", "avgPx": "100"})
+        "accFillSz": "0.4", "avgPx": "100", "fee": "-0.02", "feeCcy": "USDT"})
     with pytest.raises(ValueError, match="regressed"):
         store.save_order_snapshot("NB1", {"ordId": "1", "state": "partially_filled", "sz": "1",
-            "accFillSz": "0.3", "avgPx": "100"})
+            "accFillSz": "0.3", "avgPx": "100", "fee": "-0.02", "feeCcy": "USDT"})
 
 
 def test_fill_snapshot_cannot_exceed_order_size(tmp_path):
     store = setup(tmp_path)
     with pytest.raises(ValueError, match="exceeds"):
         store.save_order_snapshot("NB1", {"ordId": "1", "state": "filled", "sz": "1",
-            "accFillSz": "1.1", "avgPx": "100"})
+            "accFillSz": "1.1", "avgPx": "100", "fee": "-0.02", "feeCcy": "USDT"})
 
 
 def _order_snapshot(**overrides):
