@@ -80,4 +80,11 @@ jobs:
 
       - name: Report cycle gaps
         if: always()
-        run: nebula cycle-gaps --db /home/nebularunner/nebula-forward-test/state.db
+        run: |
+          if [ -n "$NEBULA_FORWARD_TEST_START_MS" ]; then
+            nebula cycle-gaps --db /home/nebularunner/nebula-forward-test/state.db --start-ms "$NEBULA_FORWARD_TEST_START_MS"
+          else
+            nebula cycle-gaps --db /home/nebularunner/nebula-forward-test/state.db
+          fi
+        env:
+          NEBULA_FORWARD_TEST_START_MS: ${{ vars.NEBULA_FORWARD_TEST_START_MS }}
