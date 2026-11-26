@@ -18,7 +18,7 @@ from nebula.research_events import (
     verify_heartbeat,
 )
 
-SEED = bytes(range(32))
+SEED = __import__('secrets').token_bytes(32)
 
 
 def _heartbeat():
