@@ -141,7 +141,21 @@ class RiskEntryPermit:
         self._write_started = True
 
 
-def issue_risk_entry_permit(client, state, account_uid, *, instrument, size, price):
-    """Internal issuer called only after a fully approved risk authorization."""
+def issue_risk_entry_permit(client, state, account_uid, *, instrument, size, price, evidence=None):
+    """Issue a risk permit only against authorizer-produced evidence.
+
+    The evidence object is created inside PortfolioRiskAuthorizer after every
+    snapshot, daily-loss, external-flow, and drawdown check passes. A caller
+    without that evidence cannot mint a permit through this factory.
+    """
+    evidence_type = type(evidence)
+    if (evidence is None
+            or evidence_type.__module__ != "nebula.risk_authorizer"
+            or evidence_type.__name__ != "_RiskAuthorizationEvidence"
+            or getattr(evidence, "binding", None) != {
+                "instId": str(instrument), "sz": str(size), "px": str(price)}
+            or getattr(evidence, "account_uid", None) != str(account_uid or "")):
+        raise StartupPermitError(
+            "Risk permit requires evidence from a completed portfolio risk authorization")
     return RiskEntryPermit(_RISK_ISSUER, client, state, account_uid,
                            instrument=instrument, size=size, price=price)

@@ -387,3 +387,20 @@ def test_daily_pnl_reconciliation_rejects_type_two_margin_bill(tmp_path):
             regular=[], oco=[], conditional=[], lock=None, unresolved=[],
             now_ms=NOW_MS, daily_realized="0",
         )
+
+
+def test_observe_equity_records_mark_without_entry_candidate(tmp_path):
+    client = SnapshotClient()
+    state = StateStore(str(tmp_path / "observe.sqlite3"))
+    from dataclasses import replace
+    settings = replace(read_only_settings(), max_drawdown_pct=0.05)
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, settings,
+        plan_provider=lambda **kwargs: pytest.fail("observe must not need a plan"),
+        clock_ms=lambda: NOW_MS,
+    )
+    result = authorizer.observe_equity()
+    assert result["observed"] is True
+    with state._connect() as db:
+        marks = db.execute("SELECT COUNT(*) FROM daily_equity_marks").fetchone()[0]
+    assert marks >= 1

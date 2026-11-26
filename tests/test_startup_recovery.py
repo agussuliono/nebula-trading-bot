@@ -27,6 +27,10 @@ class CleanAccount:
 
 
 def seed_filled_position(state, entry_id="NBSTARTUPENTRY"):
+    from nebula.account_ledger import AccountLedger
+    AccountLedger(state).establish_daily_baseline(
+        equity_quote="1000", timestamp_ms=1795132800000,
+        account_fingerprint="demo-account-hash")
     state.reserve_entry_intent(entry_id, "BTC-USDT", 123, "buy")
     state.update_intent(entry_id, "submitting")
     state.update_intent(entry_id, "acknowledged", "10001")
@@ -178,6 +182,10 @@ def test_missing_required_table_blocks_startup(tmp_path):
 def test_position_lock_with_missing_owner_blocks_startup(tmp_path):
     path = str(tmp_path / "orphan-lock.db")
     state = StateStore(path)
+    from nebula.account_ledger import AccountLedger
+    AccountLedger(state).establish_daily_baseline(
+        equity_quote="1000", timestamp_ms=1795132800000,
+        account_fingerprint="demo-account-hash")
     state.reserve_entry_intent("NBLOCKOWNER", "BTC-USDT", 123, "buy")
     with sqlite3.connect(path) as db:
         db.execute(
@@ -428,3 +436,21 @@ def test_account_read_failure_fails_closed_and_retains_position_lock(tmp_path):
     assert result["status"] == "blocked_reconciliation_failure"
     assert result["entry_authorized"] is False
     assert result["exchange_writes"] == 0
+
+
+def test_trading_history_without_equity_tables_blocks_startup(tmp_path):
+    state = StateStore(str(tmp_path / "no-ledger.db"))
+    state.reserve_entry_intent("NBHISTORY", "BTC-USDT", 123, "buy")
+    report = StartupRecovery(CleanAccount(), state).validate_local_database()
+    assert report["ok"] is False
+    assert "equity_ledger_history_missing" in report["errors"]
+
+
+def test_baseline_without_opening_mark_blocks_startup(tmp_path):
+    state = StateStore(str(tmp_path / "no-mark.db"))
+    seed_filled_position(state)
+    with state._connect() as db:
+        db.execute("DELETE FROM daily_equity_marks")
+    report = StartupRecovery(CleanAccount(), state).validate_local_database()
+    assert report["ok"] is False
+    assert "equity_ledger_history_incomplete" in report["errors"]

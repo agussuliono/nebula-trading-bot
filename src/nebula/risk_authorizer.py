@@ -16,6 +16,19 @@ class RiskAuthorizationError(RuntimeError):
     pass
 
 
+_EVIDENCE_TOKEN = object()
+
+
+class _RiskAuthorizationEvidence:
+    """Proof object minted only inside a completed risk authorization."""
+
+    def __init__(self, token, *, account_uid, instrument, size, price):
+        if token is not _EVIDENCE_TOKEN:
+            raise RiskAuthorizationError("Risk evidence can only be minted by the authorizer")
+        self.account_uid = str(account_uid or "")
+        self.binding = {"instId": str(instrument), "sz": str(size), "px": str(price)}
+
+
 class PortfolioRiskAuthorizer:
     """Fail-closed adapter between order sizing and the read-only portfolio engine."""
 
@@ -154,6 +167,11 @@ class PortfolioRiskAuthorizer:
             )
         except BillReconciliationError as exc:
             raise RiskAuthorizationError("Account bills are not fully reconciled: " + str(exc)) from exc
+        # External flows are validated before any equity mark is stored, so a
+        # deposit or withdrawal can never enter the cumulative history.
+        if Decimal(str(reconciliation.external_flows_quote)) != 0:
+            raise RiskAuthorizationError(
+                "External account flows detected; drawdown evidence requires manual review")
         ledger.record_equity_mark(
             equity_quote=equity, timestamp_ms=now_ms,
             account_fingerprint=fingerprint,
@@ -178,9 +196,6 @@ class PortfolioRiskAuthorizer:
             timestamp_ms=now_ms, reconciliation=reconciliation,
             account_fingerprint=fingerprint,
         )
-        if Decimal(str(result["external_flows_quote"])) != 0:
-            raise RiskAuthorizationError(
-                "External account flows detected; drawdown evidence requires manual review")
         return result["daily_pnl_quote"]
 
     def observe_equity(self) -> dict:
@@ -328,11 +343,16 @@ class PortfolioRiskAuthorizer:
             if not isinstance(approved, dict):
                 raise RiskAuthorizationError("Portfolio engine did not produce a priced risk plan")
             from .entry_gate import issue_risk_entry_permit
-            risk_permit = issue_risk_entry_permit(
-                self.client, self.state,
-                str(account_config[0].get("uid") or ""),
+            uid = str(account_config[0].get("uid") or "")
+            evidence = _RiskAuthorizationEvidence(
+                _EVIDENCE_TOKEN, account_uid=uid,
                 instrument=approved["instrument"], size=approved["size"],
                 price=approved["entry_price"],
+            )
+            risk_permit = issue_risk_entry_permit(
+                self.client, self.state, uid,
+                instrument=approved["instrument"], size=approved["size"],
+                price=approved["entry_price"], evidence=evidence,
             )
             return {
                 "entry_allowed": True,

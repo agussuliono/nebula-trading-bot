@@ -121,10 +121,22 @@ class StartupRecovery:
         # means the drawdown high-water mark was lost; fail closed.
         history = db.execute("SELECT COUNT(*) FROM intents").fetchone()[0] + \
             db.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
-        if history and {"daily_equity_baselines", "daily_equity_marks"}.issubset(tables):
-            if not db.execute("SELECT COUNT(*) FROM daily_equity_baselines").fetchone()[0]:
+        if history:
+            if not {"daily_equity_baselines", "daily_equity_marks"}.issubset(tables):
                 errors.append("equity_ledger_history_missing")
                 return {"ok": False, "errors": errors}
+            baselines = db.execute(
+                "SELECT trading_day,opening_timestamp_ms FROM daily_equity_baselines").fetchall()
+            if not baselines:
+                errors.append("equity_ledger_history_missing")
+                return {"ok": False, "errors": errors}
+            for baseline in baselines:
+                opening_mark = db.execute(
+                    "SELECT COUNT(*) FROM daily_equity_marks WHERE trading_day=? AND timestamp_ms=?",
+                    (baseline[0], baseline[1])).fetchone()[0]
+                if not opening_mark:
+                    errors.append("equity_ledger_history_incomplete")
+                    return {"ok": False, "errors": errors}
 
         lock_rows = db.execute("SELECT * FROM position_lock").fetchall()
         if len(lock_rows) > 1:

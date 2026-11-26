@@ -598,6 +598,18 @@ class OkxDemoClient:
                     risk_permit.authorize_request(self, payload)
                 except Exception as exc:
                     raise SafetyError("Spot entry blocked by portfolio risk gate") from exc
+                # Final boundary re-check: a latched emergency stop (including
+                # a cumulative-drawdown trip) blocks buys even when permits
+                # were issued before the stop engaged. OCO writes are separate.
+                state = self._startup_entry_state
+                try:
+                    with state._connect() as db:
+                        row = db.execute(
+                            "SELECT engaged FROM emergency_stop WHERE singleton=1").fetchone()
+                except Exception as exc:
+                    raise SafetyError("Spot entry blocked: emergency stop state unreadable") from exc
+                if row is None or int(row[0]) != 0:
+                    raise SafetyError("Spot entry blocked by emergency stop")
         else:
             raise SafetyError("Endpoint is not allowlisted for NEBULA V1: " + method + " " + path)
 
