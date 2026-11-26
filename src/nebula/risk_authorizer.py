@@ -107,7 +107,19 @@ class PortfolioRiskAuthorizer:
                 + ",".join(preliminary.get("blockers", []))
             )
         equity = preliminary.get("account_equity_usdt")
-        if baseline is None:
+        if baseline is None and ledger.has_complete_history(fingerprint):
+            # UTC rollover with intact history: open today's baseline from the
+            # reconciled snapshot even with an active, OCO-protected position.
+            # Prior-day PnL history is expected here, not ledger loss.
+            ledger.establish_daily_baseline(
+                equity_quote=equity, timestamp_ms=now_ms,
+                account_fingerprint=fingerprint,
+            )
+            baseline = ledger.get_daily_baseline(now_ms)
+            bills = self.client.get_account_bills(
+                begin=str(baseline["opening_timestamp_ms"]), end=str(now_ms)
+            )
+        elif baseline is None:
             if lock or regular or oco or conditional or unresolved:
                 raise RiskAuthorizationError(
                     "Daily baseline missing while account has existing exposure or unresolved state"
@@ -342,21 +354,8 @@ class PortfolioRiskAuthorizer:
             approved = report.get("planned_entry")
             if not isinstance(approved, dict):
                 raise RiskAuthorizationError("Portfolio engine did not produce a priced risk plan")
-            from .entry_gate import issue_risk_entry_permit
-            uid = str(account_config[0].get("uid") or "")
-            evidence = _RiskAuthorizationEvidence(
-                _EVIDENCE_TOKEN, account_uid=uid,
-                instrument=approved["instrument"], size=approved["size"],
-                price=approved["entry_price"],
-            )
-            risk_permit = issue_risk_entry_permit(
-                self.client, self.state, uid,
-                instrument=approved["instrument"], size=approved["size"],
-                price=approved["entry_price"], evidence=evidence,
-            )
-            return {
+            result = {
                 "entry_allowed": True,
-                "risk_permit": risk_permit,
                 "planned_entry": {
                     "instrument": approved["instrument"],
                     "size": approved["size"],
@@ -372,6 +371,23 @@ class PortfolioRiskAuthorizer:
                         report["projected_daily_pnl_after_planned_stop_quote"],
                 },
             }
+            # Execution permits exist only on the order-gated path, where the
+            # cumulative-drawdown check was enforced. Read-only preflight
+            # results never carry a permit.
+            if require_order_gate:
+                from .entry_gate import issue_risk_entry_permit
+                uid = str(account_config[0].get("uid") or "")
+                evidence = _RiskAuthorizationEvidence(
+                    _EVIDENCE_TOKEN, account_uid=uid,
+                    instrument=approved["instrument"], size=approved["size"],
+                    price=approved["entry_price"],
+                )
+                result["risk_permit"] = issue_risk_entry_permit(
+                    self.client, self.state, uid,
+                    instrument=approved["instrument"], size=approved["size"],
+                    price=approved["entry_price"], evidence=evidence,
+                )
+            return result
         except RiskAuthorizationError:
             raise
         except Exception as exc:

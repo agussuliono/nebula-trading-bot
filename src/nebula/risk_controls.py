@@ -20,20 +20,13 @@ class CircuitBreaker:
         if not self.limit.is_finite() or self.limit <= 0:
             raise ValueError("max_daily_loss_quote must be a finite positive decimal")
         with self.state._connect() as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS daily_pnl_events (
-                position_id TEXT PRIMARY KEY,
-                trading_day TEXT NOT NULL,
-                realized_pnl_quote TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )""")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_daily_pnl_day ON daily_pnl_events(trading_day)")
-            db.execute("""CREATE TABLE IF NOT EXISTS emergency_stop (
-                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                engaged INTEGER NOT NULL,
-                reason TEXT NOT NULL,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )""")
-            db.execute("INSERT OR IGNORE INTO emergency_stop(singleton,engaged,reason) VALUES(1,0,'')")
+            tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"daily_pnl_events", "emergency_stop"}.issubset(tables):
+                raise ValueError("Circuit breaker safety state is missing; manual recovery required")
+            row = db.execute("SELECT engaged FROM emergency_stop WHERE singleton=1").fetchone()
+            if row is None:
+                raise ValueError("Emergency stop state is missing; manual recovery required")
 
     @staticmethod
     def utc_day(now=None):

@@ -78,6 +78,9 @@ class StateStore:
 
     def _init_db(self):
         with self._connect() as db:
+            pre_existing = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='intents'"
+            ).fetchone() is not None
             db.execute("""CREATE TABLE IF NOT EXISTS intents (
                 client_order_id TEXT PRIMARY KEY,
                 instrument TEXT NOT NULL,
@@ -169,6 +172,25 @@ class StateStore:
                 details_json TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )""")
+            if not pre_existing:
+                # Safety state is created only for a fresh database. A
+                # pre-existing database missing these tables is damaged
+                # state and must fail closed, never silently re-initialize
+                # a latched emergency stop to disengaged.
+                db.execute("""CREATE TABLE IF NOT EXISTS daily_pnl_events (
+                    position_id TEXT PRIMARY KEY,
+                    trading_day TEXT NOT NULL,
+                    realized_pnl_quote TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )""")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_daily_pnl_day ON daily_pnl_events(trading_day)")
+                db.execute("""CREATE TABLE IF NOT EXISTS emergency_stop (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    engaged INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )""")
+                db.execute("INSERT OR IGNORE INTO emergency_stop(singleton,engaged,reason) VALUES(1,0,'')")
 
     @staticmethod
     def make_client_order_id(strategy: str, instrument: str, candle_ts: int, side: str) -> str:

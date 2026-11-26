@@ -404,3 +404,35 @@ def test_observe_equity_records_mark_without_entry_candidate(tmp_path):
     with state._connect() as db:
         marks = db.execute("SELECT COUNT(*) FROM daily_equity_marks").fetchone()[0]
     assert marks >= 1
+
+
+def test_preflight_result_carries_no_risk_permit(tmp_path):
+    preflight, client, state = make_preflight(tmp_path)
+    result = preflight.evaluate(candidate())
+    assert "risk_permit" not in str(result.get("authorization", {}).keys())
+    assert result.get("authorization", {}).get("risk_permit") is None
+
+
+def test_daily_baseline_rolls_over_after_prior_day_trade(tmp_path):
+    from nebula.account_ledger import AccountLedger
+    import hashlib
+    client = SnapshotClient()
+    state = StateStore(str(tmp_path / "rollover.sqlite3"))
+    fingerprint = hashlib.sha256(b"test-demo-account-uid").hexdigest()
+    ledger = AccountLedger(state)
+    prior_day = NOW_MS - 86_400_000
+    ledger.establish_daily_baseline(equity_quote="1000", timestamp_ms=prior_day,
+                                    account_fingerprint=fingerprint)
+    from nebula.risk_controls import CircuitBreaker
+    breaker = CircuitBreaker(state, 20)
+    breaker.record_closed_trade("NBPRIOR", "-5")
+    from dataclasses import replace
+    settings = replace(read_only_settings(), max_drawdown_pct=0.05)
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, settings,
+        plan_provider=lambda **kwargs: pytest.fail("observe must not need a plan"),
+        clock_ms=lambda: NOW_MS,
+    )
+    result = authorizer.observe_equity()
+    assert result["observed"] is True
+    assert ledger.get_daily_baseline(NOW_MS) is not None

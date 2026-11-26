@@ -454,3 +454,22 @@ def test_baseline_without_opening_mark_blocks_startup(tmp_path):
     report = StartupRecovery(CleanAccount(), state).validate_local_database()
     assert report["ok"] is False
     assert "equity_ledger_history_incomplete" in report["errors"]
+
+
+def test_missing_emergency_stop_row_blocks_startup_and_breaker(tmp_path):
+    state = StateStore(str(tmp_path / "stop-row.db"))
+    with state._connect() as db:
+        db.execute("DELETE FROM emergency_stop")
+    with pytest.raises(ValueError, match="Emergency stop"):
+        StartupRecovery(CleanAccount(), state)
+    from nebula.risk_controls import CircuitBreaker
+    with pytest.raises(ValueError, match="Emergency stop"):
+        CircuitBreaker(state, 20)
+
+
+def test_missing_emergency_stop_table_blocks_startup(tmp_path):
+    state = StateStore(str(tmp_path / "stop-table.db"))
+    with state._connect() as db:
+        db.execute("DROP TABLE emergency_stop")
+    with pytest.raises(ValueError, match="safety state is missing"):
+        StartupRecovery(CleanAccount(), state)

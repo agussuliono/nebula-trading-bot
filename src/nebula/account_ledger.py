@@ -217,6 +217,24 @@ class AccountLedger:
                 "external_flows_quote": str(flows),
                 "reconciled_bill_count": reconciliation.bill_count, "complete": True}
 
+    def has_complete_history(self, account_fingerprint) -> bool:
+        """True when prior-day baselines exist and every one has its opening mark."""
+        with self.state._connect() as db:
+            baselines = db.execute(
+                "SELECT trading_day,opening_timestamp_ms,account_fingerprint "
+                "FROM daily_equity_baselines").fetchall()
+            if not baselines:
+                return False
+            for baseline in baselines:
+                if baseline["account_fingerprint"] != str(account_fingerprint):
+                    return False
+                mark = db.execute(
+                    "SELECT COUNT(*) FROM daily_equity_marks WHERE trading_day=? AND timestamp_ms=?",
+                    (baseline["trading_day"], baseline["opening_timestamp_ms"])).fetchone()[0]
+                if not mark:
+                    return False
+        return True
+
     def cumulative_drawdown(self, *, timestamp_ms, account_fingerprint,
                             max_drawdown_pct):
         """Peak-to-current drawdown across every reconciled equity mark.

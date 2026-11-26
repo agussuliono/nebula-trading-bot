@@ -148,13 +148,11 @@ def issue_risk_entry_permit(client, state, account_uid, *, instrument, size, pri
     snapshot, daily-loss, external-flow, and drawdown check passes. A caller
     without that evidence cannot mint a permit through this factory.
     """
-    evidence_type = type(evidence)
-    if (evidence is None
-            or evidence_type.__module__ != "nebula.risk_authorizer"
-            or evidence_type.__name__ != "_RiskAuthorizationEvidence"
-            or getattr(evidence, "binding", None) != {
+    from .risk_authorizer import _RiskAuthorizationEvidence
+    if (not isinstance(evidence, _RiskAuthorizationEvidence)
+            or evidence.binding != {
                 "instId": str(instrument), "sz": str(size), "px": str(price)}
-            or getattr(evidence, "account_uid", None) != str(account_uid or "")):
+            or evidence.account_uid != str(account_uid or "")):
         raise StartupPermitError(
             "Risk permit requires evidence from a completed portfolio risk authorization")
     return RiskEntryPermit(_RISK_ISSUER, client, state, account_uid,

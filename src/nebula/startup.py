@@ -107,6 +107,7 @@ class StartupRecovery:
         required = {
             "intents", "order_snapshots", "position_lock", "protection_intents",
             "exit_child_orders", "audit_events", "fills",
+            "daily_pnl_events", "emergency_stop",
         }
         missing = sorted(required - tables)
         if missing:
@@ -116,6 +117,9 @@ class StartupRecovery:
         if foreign:
             errors.append("foreign_key_check_failed")
         if errors:
+            return {"ok": False, "errors": errors}
+        if db.execute("SELECT COUNT(*) FROM emergency_stop WHERE singleton=1").fetchone()[0] != 1:
+            errors.append("emergency_stop_state_missing")
             return {"ok": False, "errors": errors}
         # Ledger continuity: prior trading history without equity history
         # means the drawdown high-water mark was lost; fail closed.
