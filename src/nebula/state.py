@@ -2,8 +2,10 @@
 import hashlib
 import json
 import os
+import uuid
 import sqlite3
 import stat
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +85,7 @@ class StateStore:
             known_nebula_tables = {
                 "intents", "order_snapshots", "kv", "exit_child_orders", "fills",
                 "protection_intents", "position_lock", "audit_events",
+                "trade_episodes", "outcome_events",
                 "daily_pnl_events", "emergency_stop", "nebula_schema_meta",
                 "account_bills", "daily_equity_baselines", "daily_equity_marks",
                 "daily_equity_mark_chain",
@@ -173,6 +176,27 @@ class StateStore:
                 owner_client_order_id TEXT NOT NULL,
                 instrument TEXT NOT NULL,
                 acquired_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )""")
+            # Fase 0C: one opaque episode identity per reserved entry. The
+            # mapping to raw order IDs stays in trading state, never exported.
+            db.execute("""CREATE TABLE IF NOT EXISTS trade_episodes (
+                trade_episode_id TEXT PRIMARY KEY,
+                entry_client_order_id TEXT NOT NULL UNIQUE REFERENCES intents(client_order_id),
+                instrument TEXT NOT NULL,
+                signal_key TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                net_pnl_quote TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                closed_at TEXT,
+                accounting_finalized_at TEXT
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS outcome_events (
+                outcome_event_id TEXT PRIMARY KEY,
+                trade_episode_id TEXT NOT NULL REFERENCES trade_episodes(trade_episode_id),
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                exported_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )""")
             db.execute("""CREATE TABLE IF NOT EXISTS audit_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -319,7 +343,8 @@ class StateStore:
             return value
 
     def reserve_entry_intent(self, client_order_id: str, instrument: str, candle_ts: int,
-                             side: str, risk_plan: dict[str, Any] | None = None) -> bool:
+                             side: str, risk_plan: dict[str, Any] | None = None,
+                             signal_key: str | None = None) -> bool:
         """Atomically reserve the sole position slot and the entry intent."""
         if side != "buy":
             raise ValueError("entry intents must be Spot buy orders")
@@ -355,6 +380,10 @@ class StateStore:
                        (client_order_id, instrument))
             db.execute("INSERT INTO intents(client_order_id,instrument,candle_ts,side,status,risk_plan_json) VALUES(?,?,?,?,'reserved',?)",
                        (client_order_id, instrument, candle_ts, side, encoded_plan))
+            db.execute(
+                "INSERT INTO trade_episodes(trade_episode_id,entry_client_order_id,instrument,signal_key) VALUES(?,?,?,?)",
+                (str(uuid.uuid4()), client_order_id, instrument, signal_key),
+            )
             return True
 
     def reserve_exit_intent(self, client_order_id: str, instrument: str, candle_ts: int,
@@ -398,6 +427,137 @@ class StateStore:
             row = db.execute("SELECT * FROM position_lock WHERE singleton=1").fetchone()
             return dict(row) if row else None
 
+    def get_trade_episode(self, entry_client_order_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM trade_episodes WHERE entry_client_order_id=?",
+                (entry_client_order_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_trade_episodes(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM trade_episodes ORDER BY created_at,trade_episode_id").fetchall()
+            return [dict(row) for row in rows]
+
+    def update_trade_episode(self, trade_episode_id: str, *, status: str,
+                             net_pnl_quote: str | None = None) -> None:
+        with self._connect() as db:
+            if status == "closed":
+                db.execute(
+                    "UPDATE trade_episodes SET status=?,closed_at=CURRENT_TIMESTAMP WHERE trade_episode_id=?",
+                    (status, trade_episode_id),
+                )
+            elif status == "accounting_finalized":
+                db.execute(
+                    """UPDATE trade_episodes SET status=?,net_pnl_quote=?,
+                       closed_at=COALESCE(closed_at,CURRENT_TIMESTAMP),
+                       accounting_finalized_at=CURRENT_TIMESTAMP WHERE trade_episode_id=?""",
+                    (status, net_pnl_quote, trade_episode_id),
+                )
+            else:
+                db.execute(
+                    "UPDATE trade_episodes SET status=? WHERE trade_episode_id=?",
+                    (status, trade_episode_id),
+                )
+
+    OUTCOME_PAYLOAD_FIELDS = {
+        "outcome_event_id", "trade_episode_id", "signal_key", "instrument",
+        "event_type", "event_time_utc", "side", "fill_price", "fill_size",
+        "fee", "fee_currency", "protection_status", "exit_reason",
+        "observed_slippage_bps", "net_pnl_quote",
+    }
+    OUTCOME_EVENT_TYPES = {
+        "entry_intent_created", "entry_filled", "entry_remainder_cancelled",
+        "entry_not_filled", "protection_activated", "exit_partial_filled",
+        "exit_filled", "reconciliation_incomplete", "position_closed",
+        "accounting_finalized",
+    }
+
+    @classmethod
+    def validate_outcome_payload(cls, payload: Any) -> dict[str, Any]:
+        """Reject any outcome payload outside the Fase 0C export allowlist."""
+        if not isinstance(payload, dict):
+            raise ValueError("Outcome payload must be an object")
+        unknown = set(payload) - cls.OUTCOME_PAYLOAD_FIELDS
+        if unknown:
+            raise ValueError(f"Outcome payload has non-allowlisted fields: {sorted(unknown)}")
+        for field in ("outcome_event_id", "trade_episode_id", "instrument", "event_type"):
+            if not isinstance(payload.get(field), str) or not payload[field]:
+                raise ValueError(f"Outcome payload field {field} must be a non-empty string")
+        if payload["event_type"] not in cls.OUTCOME_EVENT_TYPES:
+            raise ValueError("Outcome payload event_type is not recognized")
+        if any(not isinstance(value, str) for value in payload.values()):
+            raise ValueError("Outcome payload values must all be strings")
+        if "net_pnl_quote" in payload and payload["event_type"] != "accounting_finalized":
+            raise ValueError("net_pnl_quote is only allowed on accounting_finalized")
+        return payload
+
+    def list_position_intents(self, entry_client_order_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM intents WHERE client_order_id=? OR position_client_order_id=? ORDER BY created_at,client_order_id",
+                (entry_client_order_id, entry_client_order_id),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_entry_intents_without_episode(self) -> list[dict[str, Any]]:
+        """Buy intents with no trade episode (legacy or bypass-created)."""
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT i.* FROM intents i
+                   LEFT JOIN trade_episodes e ON e.entry_client_order_id=i.client_order_id
+                   WHERE i.side='buy' AND e.trade_episode_id IS NULL
+                   ORDER BY i.created_at,i.client_order_id"""
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def record_outcome_event(self, outcome_event_id: str, trade_episode_id: str,
+                             event_type: str, payload: dict[str, Any]) -> bool:
+        """Idempotently persist one outcome event; True when newly recorded."""
+        self.validate_outcome_payload(payload)
+        if (payload["outcome_event_id"] != outcome_event_id
+                or payload["trade_episode_id"] != trade_episode_id
+                or payload["event_type"] != event_type):
+            raise ValueError("Outcome payload identity does not match its record keys")
+        with self._connect() as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO outcome_events(outcome_event_id,trade_episode_id,event_type,payload_json) VALUES(?,?,?,?)",
+                (outcome_event_id, trade_episode_id, event_type,
+                 json.dumps(payload, sort_keys=True, separators=(",", ":"))),
+            )
+            return cursor.rowcount == 1
+
+    def list_outcome_events(self, trade_episode_id: str | None = None,
+                            unexported_only: bool = False) -> list[dict[str, Any]]:
+        query = "SELECT * FROM outcome_events"
+        clauses, params = [], []
+        if trade_episode_id is not None:
+            clauses.append("trade_episode_id=?")
+            params.append(trade_episode_id)
+        if unexported_only:
+            clauses.append("exported_at IS NULL")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at,outcome_event_id"
+        with self._connect() as db:
+            rows = db.execute(query, params).fetchall()
+            events = []
+            for row in rows:
+                event = dict(row)
+                event["payload"] = json.loads(event.pop("payload_json"))
+                events.append(event)
+            return events
+
+    def mark_outcome_exported(self, outcome_event_ids: list[str]) -> None:
+        if not outcome_event_ids:
+            return
+        with self._connect() as db:
+            db.executemany(
+                "UPDATE outcome_events SET exported_at=CURRENT_TIMESTAMP WHERE outcome_event_id=?",
+                [(event_id,) for event_id in outcome_event_ids],
+            )
+
     def release_terminal_zero_fill_entry_lock(self, client_order_id: str) -> bool:
         """Release an entry slot only after a persisted terminal zero-fill result."""
         from decimal import Decimal, InvalidOperation
@@ -420,7 +580,9 @@ class StateStore:
             cursor = db.execute("DELETE FROM position_lock WHERE singleton=1 AND owner_client_order_id=?", (client_order_id,))
             if cursor.rowcount:
                 db.execute("INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
-                           ("zero_fill_entry_lock_released", client_order_id, json.dumps({"exchange_state": snapshot["exchange_state"]})))
+                           ("zero_fill_entry_lock_released", client_order_id,
+                            json.dumps({"exchange_state": snapshot["exchange_state"],
+                                        "cumulative_fill_size": "0"}, sort_keys=True)))
             return cursor.rowcount == 1
 
     def release_rejected_entry_lock(self, client_order_id: str) -> bool:
@@ -428,9 +590,17 @@ class StateStore:
         from decimal import Decimal, InvalidOperation
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            intent = db.execute("SELECT status,side FROM intents WHERE client_order_id=?", (client_order_id,)).fetchone()
-            snapshot = db.execute("SELECT cumulative_fill_size FROM order_snapshots WHERE client_order_id=?", (client_order_id,)).fetchone()
+            intent = db.execute("SELECT status,side,exchange_order_id FROM intents WHERE client_order_id=?", (client_order_id,)).fetchone()
+            snapshot = db.execute("SELECT exchange_state,cumulative_fill_size FROM order_snapshots WHERE client_order_id=?", (client_order_id,)).fetchone()
             if not intent or intent["side"] != "buy" or intent["status"] != "rejected":
+                return False
+            if not snapshot and intent["exchange_order_id"]:
+                # An exchange order ID without a snapshot does not prove
+                # the order was never filled.
+                return False
+            if snapshot and snapshot["exchange_state"] not in {"canceled", "mmp_canceled"}:
+                # A non-terminal snapshot (e.g. live) contradicts rejection
+                # even when its cumulative fill is still zero.
                 return False
             if snapshot:
                 try:
@@ -442,7 +612,88 @@ class StateStore:
                 if not cumulative.is_finite() or cumulative != 0:
                     return False
             cursor = db.execute("DELETE FROM position_lock WHERE singleton=1 AND owner_client_order_id=?", (client_order_id,))
+            if cursor.rowcount:
+                db.execute("INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
+                           ("rejected_entry_lock_released", client_order_id,
+                            json.dumps({"intent_status": intent["status"],
+                                        "exchange_state": snapshot["exchange_state"] if snapshot else None,
+                                        "cumulative_fill_size": "0",
+                                        "exchange_order_id_present": bool(intent["exchange_order_id"])},
+                                       sort_keys=True)))
             return cursor.rowcount == 1
+
+    LOCK_RELEASE_EVENT_TYPES = {
+        "position_lock_released",
+        "zero_fill_entry_lock_released",
+        "rejected_entry_lock_released",
+    }
+
+    def has_lock_release_evidence(self, entry_client_order_id: str) -> bool:
+        """True only when a sanctioned release path recorded valid evidence."""
+        with self._connect() as db:
+            intent = db.execute(
+                "SELECT status,exchange_order_id FROM intents WHERE client_order_id=?",
+                (entry_client_order_id,),
+            ).fetchone()
+            snapshot = db.execute(
+                "SELECT exchange_state,cumulative_fill_size FROM order_snapshots WHERE client_order_id=?",
+                (entry_client_order_id,),
+            ).fetchone()
+            try:
+                snapshot_cumulative = (
+                    Decimal(str(snapshot["cumulative_fill_size"])) if snapshot else None
+                )
+            except InvalidOperation:
+                snapshot_cumulative = None
+            rows = db.execute(
+                """SELECT event_type,details_json FROM audit_events
+                   WHERE client_order_id=?
+                   AND event_type IN ('position_lock_released',
+                                      'zero_fill_entry_lock_released',
+                                      'rejected_entry_lock_released')""",
+                (entry_client_order_id,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    details = json.loads(row["details_json"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(details, dict):
+                    continue
+                if row["event_type"] == "position_lock_released":
+                    try:
+                        base = Decimal(str(details["base_balance"]))
+                        dust = Decimal(str(details["dust_limit"]))
+                    except (KeyError, InvalidOperation):
+                        continue
+                    if (details.get("open_orders_checked") is True
+                            and base.is_finite() and dust.is_finite()
+                            and 0 <= base <= dust):
+                        return True
+                elif row["event_type"] == "zero_fill_entry_lock_released":
+                    if (snapshot is not None
+                            and snapshot["exchange_state"] in {"canceled", "mmp_canceled"}
+                            and snapshot_cumulative == 0
+                            and details.get("exchange_state") == snapshot["exchange_state"]
+                            and details.get("cumulative_fill_size") == "0"):
+                        return True
+                elif row["event_type"] == "rejected_entry_lock_released":
+                    if intent is None or intent["status"] != "rejected":
+                        continue
+                    if details.get("intent_status") != "rejected":
+                        continue
+                    if details.get("cumulative_fill_size") != "0":
+                        continue
+                    if details.get("exchange_order_id_present") is not bool(intent["exchange_order_id"]):
+                        continue
+                    if snapshot is None:
+                        if not intent["exchange_order_id"] and details.get("exchange_state") is None:
+                            return True
+                    elif (snapshot["exchange_state"] in {"canceled", "mmp_canceled"}
+                            and snapshot_cumulative == 0
+                            and details.get("exchange_state") == snapshot["exchange_state"]):
+                        return True
+            return False
 
     def release_position_lock_after_flat_check(self, *, position_client_order_id: str,
                                                base_balance: str, dust_limit: str,
@@ -486,6 +737,10 @@ class StateStore:
             return True
 
     def record_event(self, event_type: str, client_order_id: str | None = None, details: dict | None = None) -> None:
+        if event_type in self.LOCK_RELEASE_EVENT_TYPES:
+            raise ValueError(
+                "Lock-release evidence may only be recorded by a sanctioned release path"
+            )
         # Callers must never put credentials, signatures, or full request headers here.
         payload = json.dumps(details or {}, sort_keys=True, separators=(",", ":"))
         with self._connect() as db:
