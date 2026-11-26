@@ -195,6 +195,8 @@ def main():
             entry_plan_policy=plan_policy,
         )
         emit_result(json.dumps(report, indent=2, sort_keys=True))
+        if report.get("status") not in {"approved", "no_candidate"}:
+            raise SystemExit(1)
         return
     if args.command == "recover-once":
         # Authenticated read-only startup recovery. This path never creates an

@@ -38,6 +38,7 @@ class ReadOnlySnapshotClient:
         self.calls.append("account_config")
         return [{
             "acctLv": "1", "autoLoan": False, "enableSpotBorrow": False,
+            "spotBorrowAutoRepay": False,
             "perm": "read_only,trade", "uid": "test-demo-account-uid",
         }]
 
@@ -105,7 +106,7 @@ def policy():
     )
 
 
-def test_preflight_orchestrator_does_not_read_private_data_without_candidate(
+def test_preflight_orchestrator_verifies_private_auth_without_candidate(
     monkeypatch, tmp_path
 ):
     monkeypatch.setattr("nebula.preflight.ReadOnlyRuntime", FakeRuntime)
@@ -118,9 +119,40 @@ def test_preflight_orchestrator_does_not_read_private_data_without_candidate(
     )
 
     assert report["status"] == "no_candidate"
+    assert report["private_api_auth"]["status"] == "auth_verified"
+    assert report["private_api_auth"]["permissions_ok"] is True
     assert report["orders_enabled"] is False
     assert report["order_submission_attempts"] == 0
-    assert client.calls == []
+    assert client.calls == ["account_config", "balance"]
+
+
+def test_preflight_orchestrator_fails_closed_when_key_permissions_wrong(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("nebula.preflight.ReadOnlyRuntime", FakeRuntime)
+    client = ReadOnlySnapshotClient()
+    original = client.get_account_config
+
+    def wrong_permissions():
+        rows = original()
+        rows[0]["perm"] = "read_only,trade,withdraw"
+        return rows
+
+    client.get_account_config = wrong_permissions
+    state = StateStore(str(tmp_path / "bad-key.sqlite3"))
+
+    report = run_read_only_preflight(
+        client, state, settings_read_only(),
+        bar="1H", entry_plan_policy=policy(), clock_ms=lambda: NOW_MS,
+    )
+
+    assert report["status"] == "auth_failed"
+    assert report["private_api_auth"]["permissions_ok"] is False
+    assert "api_key_permissions_not_exactly_read_only_trade" in (
+        report["private_api_auth"]["blockers"]
+    )
+    assert report["market_analysis"] is None
+    assert report["order_submission_attempts"] == 0
 
 
 def test_preflight_orchestrator_approves_candidate_without_exchange_writes(
@@ -153,10 +185,17 @@ def test_preflight_orchestrator_approves_candidate_without_exchange_writes(
     assert report["order_submission_attempts"] == 0
     assert report["risk_preflight"]["execution"] == "not_submitted_preflight_only"
     assert client.calls == [
+        "account_config", "balance",
         "instrument_rules", "account_config", "balance", "tickers",
         "pending_regular", "pending_oco", "pending_conditional", "account_bills",
         "account_bills",
     ]
+    serialized = str(report)
+    for financial_field in (
+        "account_equity_usdt", "available_usdt",
+        "projected_daily_pnl_after_planned_stop_quote",
+    ):
+        assert financial_field not in serialized
     assert not hasattr(client, "place_spot_limit")
     assert not hasattr(client, "place_spot_oco_exit")
 
