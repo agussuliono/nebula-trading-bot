@@ -1,5 +1,6 @@
 import json
 import sys
+from decimal import Decimal
 
 import pytest
 
@@ -457,6 +458,72 @@ def test_cycle_gap_report_unknown_for_invalid_candle_timestamp(tmp_path):
     })
     report = _cycle_gap_report(state, now_ms=BASE_TS + HOUR_MS)
     assert report["status"] == "cycle_coverage_unknown"
+
+
+def test_ambiguous_sell_without_exchange_id_fails_closed(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="2")
+    assert state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="1")
+    state.update_intent("NBexit", "submitting")
+    state.update_intent("NBexit", "submission_unknown")
+    with pytest.raises(ValueError, match="incomplete"):
+        state.reserve_protection_intent(
+            entry_client_order_id="NBentry", instrument="BTC-USDT",
+            algo_client_order_id="NBalgo", filled_size="1",
+            take_profit="130", stop_loss="90",
+        )
+
+
+def test_snapshot_rebate_field_increases_inventory(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    risk_plan = {"instrument": "BTC-USDT", "size": "2", "entry_price": "100",
+                 "stop_loss": "90", "take_profit": "130", "risk_to_stop_quote": "20"}
+    assert state.reserve_entry_intent("NBentry", "BTC-USDT", 1, "buy", risk_plan)
+    state.update_intent("NBentry", "submitting", "111")
+    state.update_intent("NBentry", "acknowledged", "111")
+    state.update_intent("NBentry", "filled", "111")
+    state.save_order_snapshot("NBentry", {"ordId": "111", "state": "filled", "sz": "2",
+                                          "accFillSz": "2", "avgPx": "100",
+                                          "fee": "-0.2", "feeCcy": "USDT",
+                                          "rebate": "0.1", "rebateCcy": "BTC"})
+    intent = state.reserve_protection_intent(
+        entry_client_order_id="NBentry", instrument="BTC-USDT",
+        algo_client_order_id="NBalgo", filled_size="2.1",
+        take_profit="130", stop_loss="90",
+    )
+    assert intent["filled_size"] == "2.1"
+
+
+def test_ledger_snapshot_overlap_never_double_counts(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="2")
+    state.save_order_snapshot("NBentry", {"ordId": "111", "state": "filled", "sz": "2",
+                                          "accFillSz": "2", "avgPx": "100",
+                                          "fee": "-0.1", "feeCcy": "USDT"})
+    with pytest.raises(RuntimeError, match="net inventory"):
+        state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="2.1")
+    assert state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry", size="2")
+
+
+def test_child_order_fee_and_unknown_state_reconciled(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="1")
+    state.reserve_protection_intent(
+        entry_client_order_id="NBentry", instrument="BTC-USDT",
+        algo_client_order_id="NBalgo", filled_size="1",
+        take_profit="130", stop_loss="90",
+    )
+    state.save_exit_child_orders("NBentry", "BTC-USDT", ["222"])
+    with state._connect() as db:
+        with pytest.raises(ValueError, match="incomplete"):
+            state._net_inventory(db, "NBentry", "BTC-USDT")
+    state.update_exit_child_order("NBentry", "222", {
+        "state": "filled", "sz": "0.5", "accFillSz": "0.5", "avgPx": "110",
+        "fee": "-0.005", "feeCcy": "BTC",
+    })
+    with state._connect() as db:
+        net = state._net_inventory(db, "NBentry", "BTC-USDT")
+    assert net == Decimal("0.495")
 
 
 def test_outcome_observation_summary_on_empty_state(tmp_path):

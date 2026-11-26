@@ -162,6 +162,8 @@ class StateStore:
                 average_fill_price TEXT NOT NULL,
                 fee TEXT NOT NULL,
                 fee_currency TEXT NOT NULL,
+                rebate TEXT NOT NULL DEFAULT '0',
+                rebate_currency TEXT NOT NULL DEFAULT '',
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )""")
             db.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -174,6 +176,10 @@ class StateStore:
                 requested_size TEXT NOT NULL DEFAULT '0',
                 cumulative_fill_size TEXT NOT NULL DEFAULT '0',
                 average_fill_price TEXT NOT NULL DEFAULT '0',
+                fee TEXT,
+                fee_currency TEXT,
+                rebate TEXT,
+                rebate_currency TEXT,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY(entry_client_order_id, exchange_order_id)
             )""")
@@ -188,6 +194,8 @@ class StateStore:
                 fill_price TEXT NOT NULL,
                 fee TEXT NOT NULL,
                 fee_currency TEXT NOT NULL,
+                rebate TEXT NOT NULL DEFAULT '0',
+                rebate_currency TEXT NOT NULL DEFAULT '',
                 fill_time TEXT NOT NULL DEFAULT '',
                 raw_json TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -286,6 +294,19 @@ class StateStore:
                             value TEXT NOT NULL
                         )""")
                         db.execute("INSERT OR IGNORE INTO nebula_schema_meta(key,value) VALUES('initialized','1')")
+            for table, column, ddl in (
+                ("order_snapshots", "rebate", "ALTER TABLE order_snapshots ADD COLUMN rebate TEXT NOT NULL DEFAULT '0'"),
+                ("order_snapshots", "rebate_currency", "ALTER TABLE order_snapshots ADD COLUMN rebate_currency TEXT NOT NULL DEFAULT ''"),
+                ("fills", "rebate", "ALTER TABLE fills ADD COLUMN rebate TEXT NOT NULL DEFAULT '0'"),
+                ("fills", "rebate_currency", "ALTER TABLE fills ADD COLUMN rebate_currency TEXT NOT NULL DEFAULT ''"),
+                ("exit_child_orders", "fee", "ALTER TABLE exit_child_orders ADD COLUMN fee TEXT"),
+                ("exit_child_orders", "fee_currency", "ALTER TABLE exit_child_orders ADD COLUMN fee_currency TEXT"),
+                ("exit_child_orders", "rebate", "ALTER TABLE exit_child_orders ADD COLUMN rebate TEXT"),
+                ("exit_child_orders", "rebate_currency", "ALTER TABLE exit_child_orders ADD COLUMN rebate_currency TEXT"),
+            ):
+                existing_columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                if existing_columns and column not in existing_columns:
+                    db.execute(ddl)
 
     @staticmethod
     def make_client_order_id(strategy: str, instrument: str, candle_ts: int, side: str) -> str:
@@ -441,6 +462,9 @@ class StateStore:
         def signed_base_fee(fee, fee_currency):
             return Decimal(str(fee)) if fee_currency == base_ccy else Decimal("0")
 
+        def base_rebate(rebate, rebate_currency):
+            return Decimal(str(rebate)) if rebate_currency == base_ccy else Decimal("0")
+
         orders = []  # (side, client_order_id or None, exchange_order_id or None, child_cumulative or None)
         entry = db.execute(
             "SELECT exchange_order_id FROM intents WHERE client_order_id=? AND side='buy'",
@@ -448,46 +472,75 @@ class StateStore:
         ).fetchone()
         if entry is None:
             return Decimal("0")
-        orders.append(("buy", position_client_order_id, entry["exchange_order_id"], None))
+        entry_status = db.execute(
+            "SELECT status FROM intents WHERE client_order_id=?",
+            (position_client_order_id,),
+        ).fetchone()["status"]
+        orders.append(("buy", position_client_order_id, entry["exchange_order_id"], None, entry_status))
         for row in db.execute(
-            "SELECT client_order_id,exchange_order_id FROM intents"
+            "SELECT client_order_id,exchange_order_id,status FROM intents"
             " WHERE position_client_order_id=? AND side='sell'",
             (position_client_order_id,),
         ).fetchall():
-            orders.append(("sell", row["client_order_id"], row["exchange_order_id"], None))
+            orders.append(("sell", row["client_order_id"], row["exchange_order_id"], None, row["status"]))
         for row in db.execute(
-            "SELECT exchange_order_id,cumulative_fill_size FROM exit_child_orders"
-            " WHERE entry_client_order_id=?",
+            "SELECT exchange_order_id,cumulative_fill_size,state,fee,fee_currency,rebate,rebate_currency"
+            " FROM exit_child_orders WHERE entry_client_order_id=?",
             (position_client_order_id,),
         ).fetchall():
-            orders.append(("sell", None, row["exchange_order_id"], row["cumulative_fill_size"]))
+            orders.append(("sell", None, row["exchange_order_id"], row, row["state"]))
 
         net = Decimal("0")
-        for side, client_order_id, exchange_order_id, child_cumulative in orders:
+        for side, client_order_id, exchange_order_id, child_row, status in orders:
+            if status in ("submitting", "submission_unknown") and not exchange_order_id:
+                raise ValueError(
+                    "Position inventory reconciliation is incomplete: an order"
+                    " may have been submitted but its exchange outcome is unknown"
+                )
             fills = []
             if exchange_order_id:
                 fills = db.execute(
-                    "SELECT fill_size,fee,fee_currency FROM fills"
+                    "SELECT fill_size,fee,fee_currency,rebate,rebate_currency FROM fills"
                     " WHERE instrument=? AND exchange_order_id=?",
                     (instrument, str(exchange_order_id)),
                 ).fetchall()
             fills_gross = sum((Decimal(str(f["fill_size"])) for f in fills), Decimal("0"))
             fills_fee = sum(
-                (signed_base_fee(f["fee"], f["fee_currency"]) for f in fills), Decimal("0")
+                (signed_base_fee(f["fee"], f["fee_currency"])
+                 + base_rebate(f["rebate"], f["rebate_currency"]) for f in fills),
+                Decimal("0"),
             )
             snapshot_cumulative = None
             snapshot_fee = Decimal("0")
             if client_order_id is not None:
                 snapshot = db.execute(
-                    "SELECT cumulative_fill_size,fee,fee_currency FROM order_snapshots"
-                    " WHERE client_order_id=?",
+                    "SELECT cumulative_fill_size,fee,fee_currency,rebate,rebate_currency"
+                    " FROM order_snapshots WHERE client_order_id=?",
                     (client_order_id,),
                 ).fetchone()
                 if snapshot is not None:
                     snapshot_cumulative = Decimal(str(snapshot["cumulative_fill_size"]))
-                    snapshot_fee = signed_base_fee(snapshot["fee"], snapshot["fee_currency"])
-            elif child_cumulative is not None:
-                snapshot_cumulative = Decimal(str(child_cumulative))
+                    snapshot_fee = (
+                        signed_base_fee(snapshot["fee"], snapshot["fee_currency"])
+                        + base_rebate(snapshot["rebate"], snapshot["rebate_currency"])
+                    )
+            elif child_row is not None:
+                if child_row["state"] == "unknown":
+                    raise ValueError(
+                        "Position inventory reconciliation is incomplete: an OCO"
+                        " child order state is unknown"
+                    )
+                snapshot_cumulative = Decimal(str(child_row["cumulative_fill_size"]))
+                if snapshot_cumulative > 0 and child_row["fee"] is None and fills_gross < snapshot_cumulative:
+                    raise ValueError(
+                        "Position inventory reconciliation is incomplete: an OCO"
+                        " child order fee is unknown"
+                    )
+                if child_row["fee"] is not None:
+                    snapshot_fee = (
+                        signed_base_fee(child_row["fee"], child_row["fee_currency"])
+                        + base_rebate(child_row["rebate"], child_row["rebate_currency"])
+                    )
 
             if fills and (snapshot_cumulative is None or fills_gross >= snapshot_cumulative):
                 gross, fee = fills_gross, fills_fee
@@ -1059,6 +1112,12 @@ class StateStore:
             raise ValueError("Invalid fee in exchange order snapshot")
         # Preserve OKX sign: negative is a fee, positive is a rebate.
         fee = fee_value
+        try:
+            rebate_value = Decimal(str(order.get("rebate", "0") or "0"))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("Invalid rebate in exchange order snapshot") from exc
+        if not rebate_value.is_finite() or rebate_value < 0:
+            raise ValueError("Invalid rebate in exchange order snapshot")
         if requested <= 0:
             raise ValueError("Exchange order snapshot has no valid requested size")
         if cumulative > requested:
@@ -1107,15 +1166,17 @@ class StateStore:
                     raise ValueError("Exchange order state made an invalid lifecycle transition")
             db.execute("""INSERT INTO order_snapshots(
                 client_order_id,exchange_order_id,exchange_state,requested_size,cumulative_fill_size,
-                average_fill_price,fee,fee_currency,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                average_fill_price,fee,fee_currency,rebate,rebate_currency,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
             ON CONFLICT(client_order_id) DO UPDATE SET
                 exchange_order_id=excluded.exchange_order_id, exchange_state=excluded.exchange_state,
                 requested_size=excluded.requested_size,cumulative_fill_size=excluded.cumulative_fill_size,
                 average_fill_price=excluded.average_fill_price,fee=excluded.fee,
-                fee_currency=excluded.fee_currency,updated_at=CURRENT_TIMESTAMP""",
+                fee_currency=excluded.fee_currency,rebate=excluded.rebate,
+                rebate_currency=excluded.rebate_currency,updated_at=CURRENT_TIMESTAMP""",
                 (client_order_id, str(order.get("ordId") or ""), state, str(requested), str(cumulative),
-                 str(average), str(fee), str(order.get("feeCcy") or "")))
+                 str(average), str(fee), str(order.get("feeCcy") or ""),
+                 str(rebate_value), str(order.get("rebateCcy") or "")))
             row = db.execute("SELECT * FROM order_snapshots WHERE client_order_id=?", (client_order_id,)).fetchone()
             return dict(row)
 
@@ -1269,6 +1330,13 @@ class StateStore:
         state = str(order.get("state", "unknown"))
         if state not in {"live", "partially_filled", "filled", "canceled", "mmp_canceled"}:
             raise ValueError("Unrecognized OCO child order state")
+        try:
+            child_fee = Decimal(str(order.get("fee", "0") or "0"))
+            child_rebate = Decimal(str(order.get("rebate", "0") or "0"))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("Invalid fee or rebate in OCO child order") from exc
+        if not child_fee.is_finite() or not child_rebate.is_finite() or child_rebate < 0:
+            raise ValueError("Invalid fee or rebate in OCO child order")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute("SELECT cumulative_fill_size FROM exit_child_orders WHERE entry_client_order_id=? AND exchange_order_id=?",
@@ -1278,9 +1346,12 @@ class StateStore:
             if filled < Decimal(old["cumulative_fill_size"]):
                 raise ValueError("OCO child cumulative fill regressed")
             db.execute("""UPDATE exit_child_orders SET state=?,requested_size=?,cumulative_fill_size=?,
-                average_fill_price=?,updated_at=CURRENT_TIMESTAMP
+                average_fill_price=?,fee=?,fee_currency=?,rebate=?,rebate_currency=?,
+                updated_at=CURRENT_TIMESTAMP
                 WHERE entry_client_order_id=? AND exchange_order_id=?""",
-                (state,str(requested),str(filled),str(average),entry_client_order_id,str(exchange_order_id)))
+                (state,str(requested),str(filled),str(average),str(child_fee),
+                 str(order.get("feeCcy") or ""),str(child_rebate),
+                 str(order.get("rebateCcy") or ""),entry_client_order_id,str(exchange_order_id)))
             row = db.execute("SELECT * FROM exit_child_orders WHERE entry_client_order_id=? AND exchange_order_id=?",
                              (entry_client_order_id,str(exchange_order_id))).fetchone()
             return dict(row)
@@ -1304,6 +1375,9 @@ class StateStore:
         size = parse(fill["fillSz"], "fillSz")
         price = parse(fill["fillPx"], "fillPx")
         fee = parse(fill["fee"], "fee", signed=True)
+        rebate = parse(fill.get("rebate", "0") or "0", "rebate", signed=True)
+        if rebate < 0:
+            raise ValueError("Invalid rebate in OKX fill")
         instrument, order_id, trade_id = str(fill["instId"]), str(fill["ordId"]), str(fill["tradeId"])
         if not order_id.isdigit() or not trade_id.lstrip("-").isdigit():
             raise ValueError("Invalid OKX order/trade ID")
@@ -1315,17 +1389,19 @@ class StateStore:
             if existing:
                 if existing["raw_json"] != raw:
                     # Fields like ts may vary in representation; compare economic fields instead.
-                    old = db.execute("SELECT side,fill_size,fill_price,fee,fee_currency FROM fills WHERE instrument=? AND exchange_order_id=? AND trade_id=?",
+                    old = db.execute("SELECT side,fill_size,fill_price,fee,fee_currency,rebate,rebate_currency FROM fills WHERE instrument=? AND exchange_order_id=? AND trade_id=?",
                                      (instrument,order_id,trade_id)).fetchone()
-                    new_values = (fill["side"],str(size),str(price),str(fee),str(fill["feeCcy"]))
+                    new_values = (fill["side"],str(size),str(price),str(fee),str(fill["feeCcy"]),
+                                  str(rebate),str(fill.get("rebateCcy") or ""))
                     if tuple(old) != new_values:
                         raise ValueError("Conflicting duplicate OKX trade ID; ledger integrity check failed")
                 return False
             db.execute("""INSERT INTO fills(instrument,exchange_order_id,trade_id,client_order_id,side,
-                fill_size,fill_price,fee,fee_currency,fill_time,raw_json)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                fill_size,fill_price,fee,fee_currency,rebate,rebate_currency,fill_time,raw_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (instrument,order_id,trade_id,str(fill.get("clOrdId") or ""),fill["side"],str(size),str(price),
-                 str(fee),str(fill["feeCcy"]),str(fill.get("fillTime") or fill.get("ts") or ""),raw))
+                 str(fee),str(fill["feeCcy"]),str(rebate),str(fill.get("rebateCcy") or ""),
+                 str(fill.get("fillTime") or fill.get("ts") or ""),raw))
             return True
 
     def get_position_context(self, position_client_order_id: str) -> dict[str, Any]:
