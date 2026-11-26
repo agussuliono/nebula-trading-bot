@@ -141,6 +141,28 @@ def test_ed25519_rfc8032_vector_and_identity_rejection():
     identity = b"\x01" + b"\x00" * 31
     forged = identity + (0).to_bytes(32, "little")
     assert ed25519_verify(identity, b"anything", forged) is False
+    alt_identity = b"\x01" + b"\x00" * 30 + b"\x80"
+    forged_alt = alt_identity + (0).to_bytes(32, "little")
+    assert ed25519_verify(alt_identity, b"anything", forged_alt) is False
+    assert ed25519_verify(public, b"anything", forged_alt) is False
+
+
+def test_alternate_identity_encoding_rejected_by_registry():
+    import base64
+
+    alt_identity = b"\x01" + b"\x00" * 30 + b"\x80"
+    event = {
+        "event_type": "register",
+        "registry_seq": 1,
+        "prev_registry_hash": "0" * 64,
+        "issued_at_utc": "2026-11-26T00:00:00Z",
+        "scheduler_id": "sched-1",
+        "key_id": hashlib.sha256(alt_identity).hexdigest(),
+        "key_epoch": 1,
+        "public_key": base64.urlsafe_b64encode(alt_identity).rstrip(b"=").decode(),
+    }
+    with pytest.raises(EventError):
+        validate_registry_event(event)
 
 
 def test_accept_sequence_persists_and_rejects_replay(tmp_path):

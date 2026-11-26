@@ -244,13 +244,15 @@ _I = pow(2, (_Q - 1) // 4, _Q)
 
 
 def _xrecover(y: int) -> int:
-    xx = (y * y - 1) * pow(_D * y * y + 1, _Q - 2, _Q)
+    xx = ((y * y - 1) * pow(_D * y * y + 1, _Q - 2, _Q)) % _Q
     x = pow(xx, (_Q + 3) // 8, _Q)
     if (x * x - xx) % _Q != 0:
         x = (x * _I) % _Q
+    if (x * x - xx) % _Q != 0:
+        raise EventError("point is not on the Ed25519 curve")
     if x % 2 != 0:
         x = _Q - x
-    return x
+    return x % _Q
 
 
 _BY = (4 * pow(5, _Q - 2, _Q)) % _Q
@@ -279,7 +281,7 @@ def _scalarmult(p: tuple[int, int], e: int) -> tuple[int, int]:
 
 
 def _encode_point(p: tuple[int, int]) -> bytes:
-    x, y = p
+    x, y = p[0] % _Q, p[1] % _Q
     bits = [(y >> i) & 1 for i in range(255)] + [x & 1]
     return bytes(sum(bits[i * 8 + j] << j for j in range(8)) for i in range(32))
 
@@ -290,9 +292,11 @@ def _decode_point(raw: bytes) -> tuple[int, int]:
         raise EventError("non-canonical point encoding")
     sign = (raw[31] >> 7) & 1
     x = _xrecover(y)
+    if x == 0 and sign == 1:
+        raise EventError("non-canonical point encoding: x=0 with sign bit set")
     if (x & 1) != sign:
-        x = _Q - x
-    point = (x, y)
+        x = (_Q - x) % _Q
+    point = (x % _Q, y % _Q)
     if _encode_point(point) != raw:
         raise EventError("point does not re-encode canonically")
     return point
@@ -303,9 +307,13 @@ _IDENTITY = (0, 1)
 
 def _is_valid_subgroup_point(point: tuple[int, int]) -> bool:
     """Reject identity and small-order points; require prime-order subgroup."""
-    if point == _IDENTITY:
+    x, y = point[0] % _Q, point[1] % _Q
+    if (y * y - x * x - 1 - _D * x * x * y * y) % _Q != 0:
         return False
-    return _scalarmult(point, _L) == _IDENTITY
+    normalized = (x, y)
+    if normalized == _IDENTITY:
+        return False
+    return _scalarmult(normalized, _L) == _IDENTITY
 
 
 def _hint(data: bytes) -> int:
