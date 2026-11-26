@@ -160,6 +160,34 @@ class ExecutionOrchestrator:
             recovery = recovery_cls(self.client, self.state)
             recovery_result = recovery.run()
 
+            # Record reconciled equity evidence every execution cycle, even
+            # with an active position or no candidate, so cumulative drawdown
+            # cannot miss a decline between entry authorizations.
+            equity_observation = None
+            if hasattr(self.client, "get_account_bills"):
+                try:
+                    from .risk_authorizer import PortfolioRiskAuthorizer
+                    observer_cls = self.risk_authorizer_cls or PortfolioRiskAuthorizer
+                    observer = observer_cls(
+                        self.client, self.state, self.settings,
+                        plan_provider=lambda **_: plan,
+                        bar_ms=self.BAR_MS[self.bar],
+                    )
+                    equity_observation = observer.observe_equity()
+                except Exception as exc:
+                    equity_observation = {"observed": False, "error_type": type(exc).__name__}
+                    if recovery_result.get("status") not in {
+                            "position_reconciled_protection_active",
+                            "position_reconciled_exit_in_progress"}:
+                        return {
+                            "mode": "demo_execution_blocked",
+                            "status": "equity_observation_failed",
+                            "recovery": recovery_result,
+                            "equity_observation": equity_observation,
+                            "execution": "not_submitted",
+                            "order_submission_attempts": 0,
+                        }
+
             # Existing positions must be reconciled even when the market scan
             # has no new buy candidate. An active OCO remains exchange-protected;
             # a triggered OCO is reconciled and may release the lock only after

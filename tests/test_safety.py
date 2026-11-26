@@ -57,6 +57,11 @@ def test_order_request_is_guarded_and_marked_demo(tmp_path):
     client.install_startup_entry_permit(permit, state)
     permit.consume(client, state, instrument="BTC-USDT", size="0.001",
                     price="50000", client_order_id="NB123")
+    from nebula.entry_gate import issue_risk_entry_permit
+    risk_permit = issue_risk_entry_permit(client, state, "demo-test-uid",
+                                          instrument="BTC-USDT", size="0.001", price="50000")
+    risk_permit.consume(client, state, client_order_id="NB123")
+    client.install_risk_entry_permit(risk_permit, state)
     client.get_spot_instrument = lambda inst_id: {
         "instType": "SPOT", "instId": inst_id, "baseCcy": "BTC", "quoteCcy": "USDT",
         "tickSz": "0.1", "lotSz": "0.001", "minSz": "0.001", "state": "live",
@@ -476,3 +481,28 @@ def test_exchange_timeout_rejects_non_finite_or_invalid_values(timeout):
 def test_exchange_timeout_accepts_finite_positive_number():
     client = OkxDemoClient(Settings(), timeout=0.25)
     assert client.timeout == 0.25
+
+
+def test_spot_buy_without_risk_permit_is_blocked_at_http_boundary(tmp_path):
+    class Session:
+        def request(self, *args, **kwargs):
+            raise AssertionError("HTTP must not be reached without a risk permit")
+
+    s = Settings(api_key="<redacted>", secret_key="demo-secret", passphrase="demo-pass",
+                 enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
+                 max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100)
+    client = OkxDemoClient(s, session=Session())
+    from nebula.entry_gate import issue_startup_entry_permit
+    from nebula.state import StateStore
+    state = StateStore(str(tmp_path / "risk-permit.db"))
+    permit = issue_startup_entry_permit(client, state, "demo-test-uid")
+    client.install_startup_entry_permit(permit, state)
+    permit.consume(client, state, instrument="BTC-USDT", size="0.001",
+                    price="50000", client_order_id="NB124")
+    client.get_spot_instrument = lambda inst_id: {
+        "instType": "SPOT", "instId": inst_id, "baseCcy": "BTC", "quoteCcy": "USDT",
+        "tickSz": "0.1", "lotSz": "0.001", "minSz": "0.001", "state": "live",
+    }
+    with pytest.raises(SafetyError, match="risk permit"):
+        client.place_spot_limit(inst_id="BTC-USDT", side="buy", size="0.001",
+                                price="50000", client_order_id="NB124")

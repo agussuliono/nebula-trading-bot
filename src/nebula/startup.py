@@ -117,6 +117,14 @@ class StartupRecovery:
             errors.append("foreign_key_check_failed")
         if errors:
             return {"ok": False, "errors": errors}
+        # Ledger continuity: prior trading history without equity history
+        # means the drawdown high-water mark was lost; fail closed.
+        history = db.execute("SELECT COUNT(*) FROM intents").fetchone()[0] + \
+            db.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+        if history and {"daily_equity_baselines", "daily_equity_marks"}.issubset(tables):
+            if not db.execute("SELECT COUNT(*) FROM daily_equity_baselines").fetchone()[0]:
+                errors.append("equity_ledger_history_missing")
+                return {"ok": False, "errors": errors}
 
         lock_rows = db.execute("SELECT * FROM position_lock").fetchall()
         if len(lock_rows) > 1:

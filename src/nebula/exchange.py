@@ -330,6 +330,7 @@ class OkxDemoClient:
         )
         self._startup_entry_permit = None
         self._startup_entry_state = None
+        self._risk_entry_permit = None
         self._public_circuit = _PublicApiCircuitBreaker()
 
     def install_startup_entry_permit(self, permit, state_store):
@@ -342,6 +343,14 @@ class OkxDemoClient:
         # Managers holding the old object cannot authorize through this client.
         self._startup_entry_permit = permit
         self._startup_entry_state = state_store
+
+    def install_risk_entry_permit(self, permit, state_store):
+        from .entry_gate import RiskEntryPermit
+        if not isinstance(permit, RiskEntryPermit):
+            raise SafetyError("A valid portfolio risk permit is required")
+        if permit._client is not self or permit._state is not state_store:
+            raise SafetyError("Risk permit is bound to a different client or state store")
+        self._risk_entry_permit = permit
 
     @staticmethod
     def _timestamp() -> str:
@@ -582,6 +591,13 @@ class OkxDemoClient:
                     permit.authorize_request(self, payload)
                 except Exception as exc:
                     raise SafetyError("Spot entry blocked by startup recovery gate") from exc
+                risk_permit = self._risk_entry_permit
+                if risk_permit is None:
+                    raise SafetyError("Spot entry blocked: portfolio risk permit is missing")
+                try:
+                    risk_permit.authorize_request(self, payload)
+                except Exception as exc:
+                    raise SafetyError("Spot entry blocked by portfolio risk gate") from exc
         else:
             raise SafetyError("Endpoint is not allowlisted for NEBULA V1: " + method + " " + path)
 
