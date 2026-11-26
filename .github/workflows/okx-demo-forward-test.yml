@@ -36,7 +36,7 @@ jobs:
       NEBULA_MAX_DAILY_LOSS_QUOTE: '350'
       NEBULA_MAX_POSITION_QUOTE: '9000'
       NEBULA_MAX_DRAWDOWN_PCT: '0.05'
-      NEBULA_DB_PATH: /home/hatch/nebula-forward-test/state.db
+      NEBULA_DB_PATH: /home/nebularunner/nebula-forward-test/state.db
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - name: Check out source
@@ -54,8 +54,8 @@ jobs:
 
       - name: Prepare persistent state directory
         run: |
-          mkdir -p /home/hatch/nebula-forward-test
-          chmod 700 /home/hatch/nebula-forward-test
+          mkdir -p /home/nebularunner/nebula-forward-test
+          chmod 700 /home/nebularunner/nebula-forward-test
 
       - name: Run one forward-test cycle
         env:
