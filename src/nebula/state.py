@@ -552,6 +552,20 @@ class StateStore:
         ).fetchall():
             orders.append(("sell", None, row["exchange_order_id"], row, row["state"]))
 
+        related_exchange_ids = {
+            str(order[2]) for order in orders if order[2]
+        }
+        orphan_sell_fills = db.execute(
+            "SELECT exchange_order_id FROM fills WHERE instrument=? AND side='sell'"
+            " AND (client_order_id IS NULL OR client_order_id='')",
+            (instrument,),
+        ).fetchall()
+        if any(str(row["exchange_order_id"]) not in related_exchange_ids
+               for row in orphan_sell_fills):
+            raise ValueError(
+                "Position inventory reconciliation is incomplete: an orphan sell"
+                " fill cannot be attributed to a known order"
+            )
         net = Decimal("0")
         for side, client_order_id, exchange_order_id, child_row, status in orders:
             if status in ("submitting", "submission_unknown") and not exchange_order_id:
@@ -1520,14 +1534,20 @@ class StateStore:
         """Manually attribute one legacy sell to its owning buy position, audited."""
         if not isinstance(evidence, str) or not evidence.strip():
             raise ValueError("Manual legacy reconciliation requires supporting evidence")
+        evidence = evidence.strip()
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             sell = db.execute(
-                "SELECT instrument,side,position_client_order_id FROM intents WHERE client_order_id=?",
+                "SELECT instrument,side,position_client_order_id,exchange_order_id"
+                " FROM intents WHERE client_order_id=?",
                 (sell_client_order_id,),
             ).fetchone()
             if sell is None or sell["side"] != "sell" or sell["position_client_order_id"] is not None:
                 raise ValueError("Only an unlinked legacy sell intent can be reconciled")
+            if not sell["exchange_order_id"] or evidence != str(sell["exchange_order_id"]):
+                raise ValueError(
+                    "Legacy reconciliation evidence must be the sell exchange order ID"
+                )
             position = db.execute(
                 "SELECT instrument,side FROM intents WHERE client_order_id=?",
                 (position_client_order_id,),
@@ -1536,6 +1556,27 @@ class StateStore:
                 raise ValueError("Legacy sell owner must be an existing Spot buy position")
             if position["instrument"] != sell["instrument"]:
                 raise ValueError("Legacy sell instrument does not match the owning position")
+            sell_fills = db.execute(
+                "SELECT fill_size,fill_time FROM fills WHERE instrument=?"
+                " AND (client_order_id=? OR exchange_order_id=?) ORDER BY fill_time",
+                (sell["instrument"], sell_client_order_id, str(sell["exchange_order_id"])),
+            ).fetchall()
+            if not sell_fills or any(not row["fill_time"] for row in sell_fills):
+                raise ValueError("Legacy sell ownership cannot be proven without timed fills")
+            position_fills = db.execute(
+                "SELECT fill_size,fill_time FROM fills WHERE instrument=?"
+                " AND side='buy' AND client_order_id=? ORDER BY fill_time",
+                (sell["instrument"], position_client_order_id),
+            ).fetchall()
+            if not position_fills or any(not row["fill_time"] for row in position_fills):
+                raise ValueError("Legacy sell ownership cannot be proven without timed position fills")
+            if str(sell_fills[0]["fill_time"]) < str(position_fills[0]["fill_time"]):
+                raise ValueError("Legacy sell predates the candidate owning position")
+            sell_total = sum((Decimal(str(row["fill_size"])) for row in sell_fills), Decimal("0"))
+            position_total = sum(
+                (Decimal(str(row["fill_size"])) for row in position_fills), Decimal("0"))
+            if sell_total > position_total:
+                raise ValueError("Legacy sell exceeds the candidate owning position fills")
             db.execute(
                 "UPDATE intents SET position_client_order_id=? WHERE client_order_id=?",
                 (position_client_order_id, sell_client_order_id),

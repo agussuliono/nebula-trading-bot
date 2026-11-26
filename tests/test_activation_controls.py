@@ -808,7 +808,7 @@ def test_previously_migrated_snapshot_default_zero_rebate_rebuilt(tmp_path):
         assert state._net_inventory(db, "NBentry", "BTC-USDT") == Decimal("2.1")
 
 
-def _filled_entry_named(state, client_order_id, exchange_id, size):
+def _filled_entry_named(state, client_order_id, exchange_id, size, fill_time="1000"):
     risk_plan = {"instrument": "BTC-USDT", "size": size, "entry_price": "100",
                  "stop_loss": "90", "take_profit": "130", "risk_to_stop_quote": "20"}
     assert state.reserve_entry_intent(client_order_id, "BTC-USDT", 1, "buy", risk_plan)
@@ -817,7 +817,8 @@ def _filled_entry_named(state, client_order_id, exchange_id, size):
     state.update_intent(client_order_id, "filled", exchange_id)
     state.save_fill({"instId": "BTC-USDT", "ordId": exchange_id, "tradeId": f"9{exchange_id}",
                      "side": "buy", "fillSz": size, "fillPx": "100",
-                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": client_order_id})
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": client_order_id,
+                     "fillTime": fill_time})
 
 
 def test_rejected_legacy_sell_with_execution_evidence_fails_closed(tmp_path):
@@ -841,15 +842,20 @@ def test_manual_reconciliation_attributes_legacy_sell_to_owner(tmp_path):
     state.update_intent("NBlegacy", "filled", "333")
     state.save_fill({"instId": "BTC-USDT", "ordId": "333", "tradeId": "9333",
                      "side": "sell", "fillSz": "0.4", "fillPx": "110",
-                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBlegacy"})
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBlegacy",
+                     "fillTime": "2000"})
     with state._connect() as db:
         with pytest.raises(ValueError, match="legacy sell"):
             state._net_inventory(db, "NBentryA", "BTC-USDT")
-        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "exchange fill 333 matches position A entry window")
-        assert state._net_inventory(db, "NBentryA", "BTC-USDT") == Decimal("0.6")
         db.execute("DELETE FROM position_lock")
-    _filled_entry_named(state, "NBentryB", "222", "0.6")
+    _filled_entry_named(state, "NBentryB", "222", "0.6", fill_time="3000")
+    with pytest.raises(ValueError, match="exchange order ID"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "manual verification")
+    with pytest.raises(ValueError, match="predates"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryB", "333")
+    state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
     with state._connect() as db:
+        assert state._net_inventory(db, "NBentryA", "BTC-USDT") == Decimal("0.6")
         assert state._net_inventory(db, "NBentryB", "BTC-USDT") == Decimal("0.6")
 
 
@@ -892,9 +898,21 @@ def test_rejected_legacy_sell_with_ledger_fill_only_fails_closed(tmp_path):
     state.update_intent("NBlegacy", "rejected")
     state.save_fill({"instId": "BTC-USDT", "ordId": "444", "tradeId": "9444",
                      "side": "sell", "fillSz": "0.4", "fillPx": "110",
-                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBlegacy"})
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBlegacy",
+                     "fillTime": "2000"})
     with state._connect() as db:
         with pytest.raises(ValueError, match="legacy sell"):
+            state._net_inventory(db, "NBentry", "BTC-USDT")
+
+
+def test_orphan_sell_fill_without_client_id_fails_closed(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry(state, size="1")
+    state.save_fill({"instId": "BTC-USDT", "ordId": "999", "tradeId": "9999",
+                     "side": "sell", "fillSz": "0.4", "fillPx": "110",
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": ""})
+    with state._connect() as db:
+        with pytest.raises(ValueError, match="orphan sell"):
             state._net_inventory(db, "NBentry", "BTC-USDT")
 
 
