@@ -181,7 +181,7 @@ class Protocol:
     prospective_min_observations: int
     prospective_min_duration_days: int
     prospective_min_completeness: float
-    preregistered_exclusions: Mapping = MappingProxyType({})
+    preregistered_exclusions: Mapping = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
