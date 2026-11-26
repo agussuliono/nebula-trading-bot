@@ -6,6 +6,7 @@
 
 ## v0.16.15 patch note
 
+- Added the Fase 0B research registry (`nebula.research_registry`): single-writer importer, append-only evidence tables, hash chain with checkpoints, experiment/trial registry, locked-holdout access gate, and frozen CSCV/PBO + DSR statistics. Research-only; no trading state access, no network, no order path.
 - VM workflow installs now use hash-locked runtime and build dependencies: `requirements.lock` pins runtime packages, `requirements-build.lock` pins `setuptools`/`wheel`, and editable installs run with `--no-build-isolation` after those locks are installed. Preflight output redaction now drops nested financial and credential-adjacent fields by sensitive key patterns, with regression tests for nested balances, PnL, entry-plan details, and account identifiers.
 
 ## v0.16.14 patch note
@@ -195,7 +196,7 @@ The ranking score is a deterministic implementation choice, not a proven predict
 
 ## Test status for v0.16.16
 
-- 617 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
+- 636 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
 - Tests cover fee/slippage impact, next-open execution, same-bar stop priority, risk sizing, daily-loss/drawdown halts, chronological single-asset and portfolio walk-forward splits, multi-asset deterministic selection, global one-position enforcement, synchronized timestamps, portfolio cost-stress scenarios, CSV validation and public history-candle request construction.
 - Tests use local synthetic data and mocked HTTP; they do not establish OKX connectivity or exchange execution behavior.
 - No API credentials were used and no Demo or live orders were sent.
