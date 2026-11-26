@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '5 * * * *'
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type execute-demo-cycle to run one Demo cycle manually"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -18,7 +23,10 @@ jobs:
     runs-on: [self-hosted, nebula-vm]
     timeout-minutes: 10
     environment: okx-demo-execution
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.NEBULA_FORWARD_TEST_ENABLED == 'true' &&
+      (github.event_name == 'schedule' || inputs.confirm == 'execute-demo-cycle')
     env:
       NEBULA_ENABLE_DEMO_ORDERS: 'true'
       NEBULA_KILL_SWITCH: 'false'
@@ -44,7 +52,9 @@ jobs:
         run: python -m pip install --disable-pip-version-check -e .
 
       - name: Prepare persistent state directory
-        run: mkdir -p /home/hatch/nebula-forward-test
+        run: |
+          mkdir -p /home/hatch/nebula-forward-test
+          chmod 700 /home/hatch/nebula-forward-test
 
       - name: Run one forward-test cycle
         env:
