@@ -71,3 +71,11 @@ jobs:
           test -n "$OKX_SECRET_KEY"
           test -n "$OKX_PASSPHRASE"
           nebula orchestrate-once --execute-demo
+
+      - name: Back up forward-test state
+        run: |
+          mkdir -p /home/nebularunner/nebula-forward-test/backups
+          nebula backup-state --db /home/nebularunner/nebula-forward-test/state.db --output /home/nebularunner/nebula-forward-test/backups/state-backup.db
+
+      - name: Report cycle gaps
+        run: nebula cycle-gaps --db /home/nebularunner/nebula-forward-test/state.db
