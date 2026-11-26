@@ -706,10 +706,10 @@ class ResearchRegistry:
         return tuple(row[0] for row in rows)
 
     def record_performance_seen(
-        self, experiment_id: str, candidate_index: int, actor: str
+        self, experiment_id: str, candidate_id: str, actor: str
     ) -> None:
         """Append a timestamped event marking candidate performance as seen."""
-        payload = canonical_json({"candidate_index": candidate_index})
+        payload = canonical_json({"candidate_id": candidate_id})
         self._append_experiment_status(
             experiment_id, "performance_seen", payload, actor
         )
@@ -717,13 +717,13 @@ class ResearchRegistry:
     def record_candidate_exclusion(
         self,
         experiment_id: str,
-        candidate_index: int,
+        candidate_id: str,
         reason: str,
         actor: str,
     ) -> None:
         """Append a timestamped exclusion event (chronology from event order)."""
         payload = canonical_json(
-            {"candidate_index": candidate_index, "reason": reason}
+            {"candidate_id": candidate_id, "reason": reason}
         )
         self._append_experiment_status(
             experiment_id, "candidate_excluded", payload, actor
@@ -737,12 +737,12 @@ class ResearchRegistry:
             "('performance_seen', 'candidate_excluded') ORDER BY rowid",
             (experiment_id,),
         ).fetchall()
-        seen_at: dict[int, int] = {}
-        excluded: set[int] = set()
+        seen_at: dict[str, int] = {}
+        excluded: set[str] = set()
         for rowid, status, reason in rows:
             payload = json.loads(reason)
-            index = payload.get("candidate_index")
-            if not isinstance(index, int) or isinstance(index, bool):
+            index = payload.get("candidate_id")
+            if not isinstance(index, str):
                 continue
             if status == "performance_seen":
                 seen_at.setdefault(index, rowid)
@@ -759,8 +759,8 @@ class ResearchRegistry:
         ).fetchall()
         excluded = set()
         for (reason,) in rows:
-            index = json.loads(reason).get("candidate_index")
-            if isinstance(index, int) and not isinstance(index, bool):
+            index = json.loads(reason).get("candidate_id")
+            if isinstance(index, str):
                 excluded.add(index)
         return frozenset(excluded)
 
@@ -774,9 +774,9 @@ class ResearchRegistry:
         reasons = {}
         for (reason,) in rows:
             payload = json.loads(reason)
-            index = payload.get("candidate_index")
-            if isinstance(index, int) and not isinstance(index, bool):
-                reasons[index] = payload.get("reason")
+            index = payload.get("candidate_id")
+            if isinstance(index, str):
+                reasons.setdefault(index, set()).add(payload.get("reason"))
         return reasons
 
     def trial_returns(self, experiment_id: str) -> tuple[tuple[str, tuple[float, ...]], ...]:
@@ -786,8 +786,8 @@ class ResearchRegistry:
             "WHERE experiment_id = ? ORDER BY trial_id",
             (experiment_id,),
         ).fetchall()
-        for index, _ in enumerate(rows):
-            self.record_performance_seen(experiment_id, index, "registry-read")
+        for trial_id, _ in rows:
+            self.record_performance_seen(experiment_id, trial_id, "registry-read")
         result = []
         for trial_id, metrics_json in rows:
             returns = json.loads(metrics_json).get("returns")

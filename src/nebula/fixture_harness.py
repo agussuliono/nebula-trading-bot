@@ -352,8 +352,8 @@ def evaluate_pbo_gate(
             "candidate excluded after performance was seen"
         )
     reasons = registry.exclusion_reasons(experiment_id)
-    for index, reason in reasons.items():
-        if frozen.protocol.preregistered_exclusions.get(index) != reason:
+    for index, reason_set in reasons.items():
+        if len(reason_set) != 1 or frozen.protocol.preregistered_exclusions.get(index) not in reason_set:
             return StatResult.inconclusive(
                 "candidate excluded without preregistration"
             )
@@ -364,10 +364,13 @@ def evaluate_pbo_gate(
     combinations = _derive_combinations(trials)
     if not combinations:
         return StatResult.inconclusive("CSCV artifact missing")
-    return cscv_pbo(
-        combinations,
-        preregistered_exclusions=set(frozen.protocol.preregistered_exclusions),
-    )
+    trial_ids = [tid for tid, _ in registry.trial_returns(experiment_id)]
+    excluded_indexes = {
+        trial_ids.index(tid)
+        for tid in frozen.protocol.preregistered_exclusions
+        if tid in trial_ids
+    }
+    return cscv_pbo(combinations, preregistered_exclusions=excluded_indexes)
 
 
 @dataclass(frozen=True)
@@ -597,8 +600,8 @@ def _stat_artifacts(registry, experiment_id: str, frozen: "FrozenProtocol") -> d
 
 def run_pbo_and_record(registry, experiment_id: str, frozen) -> StatResult:
     """Record performance_seen, evaluate PBO, and record the result."""
-    for index in range(len(registry.trial_ids(experiment_id))):
-        registry.record_performance_seen(experiment_id, index, "fixture-harness")
+    for trial_id in registry.trial_ids(experiment_id):
+        registry.record_performance_seen(experiment_id, trial_id, "fixture-harness")
     result = evaluate_pbo_gate(frozen, registry, experiment_id)
     registry.record_validation(
         f"pbo-{experiment_id}",
@@ -651,10 +654,21 @@ def _artifact_passed(
             and payload.get("trial_ids") == sorted(registry.trial_ids(experiment_id))
             and payload.get("protocol_sha256") == frozen.sha256
             and payload.get("returns_sha256") == expected
+            and payload.get("experiment_id") == experiment_id
+            and payload.get("dataset_sha256") in frozen.protocol.dataset_hashes.values()
         )
     if method == "walk_forward":
         folds = payload.get("fold_returns")
         if payload.get("schema") != "walk-forward-v1" or not isinstance(folds, list) or len(folds) < 2:
+            return False
+        if payload.get("protocol_sha256") != frozen.sha256:
+            return False
+        stored = dict(registry.trial_returns(experiment_id))
+        returns = stored.get(payload.get("trial_id"))
+        if returns is None:
+            return False
+        expected_folds = [list(returns[i : i + 2]) for i in range(0, len(returns), 2)]
+        if folds != expected_folds:
             return False
         sharpes = []
         for fold in folds:
@@ -667,6 +681,11 @@ def _artifact_passed(
     if method == "stress":
         gross = payload.get("gross_returns")
         if payload.get("schema") != "stress-v1" or not isinstance(gross, list) or len(gross) < 2:
+            return False
+        if payload.get("protocol_sha256") != frozen.sha256:
+            return False
+        stored = dict(registry.trial_returns(experiment_id))
+        if list(stored.get(payload.get("trial_id"), ())) != [float(v) for v in gross if isinstance(v, (int, float))]:
             return False
         if payload.get("fee_bps") != frozen.protocol.fee_bps:
             return False

@@ -42,24 +42,36 @@ def _snapshot_bytes(frozen):
             "returns_sha256": hashlib.sha256(
                 json.dumps(TRIALS, separators=(",", ":")).encode()
             ).hexdigest(),
+            "experiment_id": "exp1",
+            "dataset_sha256": SYNTH_HASH,
         }
     ).encode()
 
 
-WF_BYTES = json.dumps(
-    {
-        "schema": "walk-forward-v1",
-        "fold_returns": [[0.02, 0.03, 0.01], [0.01, 0.02, 0.03], [0.03, 0.01, 0.02]],
-    }
-).encode()
-STRESS_BYTES = json.dumps(
-    {
-        "schema": "stress-v1",
-        "fee_bps": 10.0,
-        "slippage_bps": 5.0,
-        "gross_returns": [0.03, 0.02, 0.01, 0.02, 0.03, 0.01, 0.02, 0.03],
-    }
-).encode()
+def _wf_bytes(frozen):
+    returns = TRIALS[0]
+    folds = [returns[i : i + 2] for i in range(0, len(returns), 2)]
+    return json.dumps(
+        {
+            "schema": "walk-forward-v1",
+            "trial_id": "t0",
+            "protocol_sha256": frozen.sha256,
+            "fold_returns": folds,
+        }
+    ).encode()
+
+
+def _stress_bytes(frozen):
+    return json.dumps(
+        {
+            "schema": "stress-v1",
+            "trial_id": "t0",
+            "protocol_sha256": frozen.sha256,
+            "fee_bps": 10.0,
+            "slippage_bps": 5.0,
+            "gross_returns": TRIALS[0],
+        }
+    ).encode()
 
 
 def protocol(**overrides):
@@ -117,37 +129,45 @@ def test_unpinned_catalog_protocol_is_rejected():
 
 
 def test_pbo_exclusion_after_performance_seen_event(registry, frozen):
-    registry.record_performance_seen("exp1", 1, "test")
-    registry.record_candidate_exclusion("exp1", 1, "weak", "test")
+    registry.record_performance_seen("exp1", "t1", "test")
+    registry.record_candidate_exclusion("exp1", "t1", "weak", "test")
     assert evaluate_pbo_gate(frozen, registry, "exp1").status == "inconclusive"
 
 
 def test_pbo_reading_returns_marks_exposure(tmp_path):
-    frozen = freeze_protocol(protocol(preregistered_exclusions={1: "weak"}))
+    frozen = freeze_protocol(protocol(preregistered_exclusions={"t1": "weak"}))
     reg = ResearchRegistry(str(tmp_path / "r.db"))
     reg.register_experiment("exp1", "hyp", frozen.sha256, "d" * 64, "abc123", "c" * 64)
     reg.freeze_protocol("exp1", "test")
     for idx, returns in enumerate(TRIALS):
         reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", {}, {"returns": returns})
     reg.trial_returns("exp1")
-    reg.record_candidate_exclusion("exp1", 1, "weak", "test")
+    reg.record_candidate_exclusion("exp1", "t1", "weak", "test")
     assert evaluate_pbo_gate(frozen, reg, "exp1").status == "inconclusive"
     reg.close()
 
 
+def test_pbo_conflicting_exclusion_reasons(registry):
+    frozen = freeze_protocol(protocol(preregistered_exclusions={"t1": "weak"}))
+    registry.record_candidate_exclusion("exp1", "t1", "other", "test")
+    registry.record_candidate_exclusion("exp1", "t1", "weak", "test")
+    assert registry.exclusion_reasons("exp1") == {"t1": {"weak", "other"}}
+    assert evaluate_pbo_gate(frozen, registry, "exp1").status == "inconclusive"
+
+
 def test_pbo_unregistered_pre_performance_exclusion(registry, frozen):
-    registry.record_candidate_exclusion("exp1", 1, "weak", "test")
+    registry.record_candidate_exclusion("exp1", "t1", "weak", "test")
     assert evaluate_pbo_gate(frozen, registry, "exp1").status == "inconclusive"
 
 
 def test_pbo_preregistered_exclusion_is_ok(tmp_path):
-    frozen = freeze_protocol(protocol(preregistered_exclusions={1: "weak"}))
+    frozen = freeze_protocol(protocol(preregistered_exclusions={"t1": "weak"}))
     reg = ResearchRegistry(str(tmp_path / "r.db"))
     reg.register_experiment("exp1", "hyp", frozen.sha256, "d" * 64, "abc123", "c" * 64)
     reg.freeze_protocol("exp1", "test")
     for idx, returns in enumerate(TRIALS):
         reg.record_trial(f"t{idx}", "exp1", "group-a", "completed", {}, {"returns": returns})
-    reg.record_candidate_exclusion("exp1", 1, "weak", "test")
+    reg.record_candidate_exclusion("exp1", "t1", "weak", "test")
     assert evaluate_pbo_gate(frozen, reg, "exp1").status == "ok"
     reg.close()
 
@@ -165,12 +185,12 @@ def _record_evidence(registry, frozen):
     run_pbo_and_record(registry, "exp1", frozen)
     run_dsr_and_record(registry, "exp1", frozen)
     record_artifact_validation(registry, "exp1", "snapshot", _snapshot_bytes(frozen), frozen)
-    record_artifact_validation(registry, "exp1", "walk_forward", WF_BYTES, frozen)
-    record_artifact_validation(registry, "exp1", "stress", STRESS_BYTES, frozen)
+    record_artifact_validation(registry, "exp1", "walk_forward", _wf_bytes(frozen), frozen)
+    record_artifact_validation(registry, "exp1", "stress", _stress_bytes(frozen), frozen)
     return PromotionEvidence(
         snapshot_bytes=_snapshot_bytes(frozen),
-        walk_forward_bytes=WF_BYTES,
-        stress_bytes=STRESS_BYTES,
+        walk_forward_bytes=_wf_bytes(frozen),
+        stress_bytes=_stress_bytes(frozen),
         trial_ids=("t0", "t1", "t2"),
     )
 
@@ -221,7 +241,9 @@ def test_promotion_rejects_fabricated_stat_with_correct_metadata(registry, froze
 def test_promotion_rejects_forged_artifact_content(registry, frozen):
     evidence = _record_evidence(registry, frozen)
     forged = PromotionEvidence(
-        snapshot_bytes=json.dumps({"schema": "walk-forward-v1", "plateau_score": 0.99}).encode(),
+        snapshot_bytes=json.dumps(
+            {"schema": "walk-forward-v1", "trial_id": "t0", "protocol_sha256": frozen.sha256, "fold_returns": [[0.5, 0.6], [0.5, 0.6]]}
+        ).encode(),
         walk_forward_bytes=evidence.walk_forward_bytes,
         stress_bytes=evidence.stress_bytes,
         trial_ids=evidence.trial_ids,
