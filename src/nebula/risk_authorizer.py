@@ -21,7 +21,13 @@ _ISSUED_EVIDENCE: set[int] = set()
 
 
 def _issue_evidence(*, account_uid, instrument, size, price):
-    """Mint evidence through the authorizer's official internal path."""
+    """Mint evidence through the authorizer's official internal path.
+
+    Trust boundary: code running inside the bot process is trusted. This
+    registry stops accidental or indirect permit minting (direct evidence
+    construction is rejected and each evidence is single-use); it is not a
+    defense against malicious code already executing in the same interpreter.
+    """
     evidence = _RiskAuthorizationEvidence(
         _EVIDENCE_TOKEN, account_uid=account_uid,
         instrument=instrument, size=size, price=price,

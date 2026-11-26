@@ -198,6 +198,25 @@ class StateStore:
                     value TEXT NOT NULL
                 )""")
                 db.execute("INSERT OR IGNORE INTO nebula_schema_meta(key,value) VALUES('initialized','1')")
+            else:
+                # Legacy migration: a pre-existing database without the marker
+                # gets one only after its safety state proves complete; a
+                # damaged legacy database stays unmarked and fails closed.
+                tables = {row[0] for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                if "nebula_schema_meta" not in tables:
+                    safety_complete = (
+                        {"daily_pnl_events", "emergency_stop"}.issubset(tables)
+                        and db.execute(
+                            "SELECT COUNT(*) FROM emergency_stop WHERE singleton=1"
+                        ).fetchone()[0] == 1
+                    )
+                    if safety_complete:
+                        db.execute("""CREATE TABLE IF NOT EXISTS nebula_schema_meta (
+                            key TEXT PRIMARY KEY,
+                            value TEXT NOT NULL
+                        )""")
+                        db.execute("INSERT OR IGNORE INTO nebula_schema_meta(key,value) VALUES('initialized','1')")
 
     @staticmethod
     def make_client_order_id(strategy: str, instrument: str, candle_ts: int, side: str) -> str:

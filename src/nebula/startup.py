@@ -141,6 +141,10 @@ class StartupRecovery:
                 if not opening_mark:
                     errors.append("equity_ledger_history_incomplete")
                     return {"ok": False, "errors": errors}
+            from .account_ledger import AccountLedger
+            if "daily_equity_mark_chain" not in tables or not AccountLedger(self.state).verify_mark_chain():
+                errors.append("equity_mark_chain_invalid")
+                return {"ok": False, "errors": errors}
 
         lock_rows = db.execute("SELECT * FROM position_lock").fetchall()
         if len(lock_rows) > 1:

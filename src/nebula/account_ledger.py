@@ -49,8 +49,15 @@ class AccountLedger:
                 timestamp_ms INTEGER NOT NULL,
                 equity_quote TEXT NOT NULL,
                 prev_hash TEXT NOT NULL,
-                mark_hash TEXT NOT NULL
+                mark_hash TEXT NOT NULL,
+                UNIQUE(trading_day, timestamp_ms)
             )""")
+            db.execute("""CREATE TRIGGER IF NOT EXISTS daily_equity_mark_chain_no_update
+                BEFORE UPDATE ON daily_equity_mark_chain
+                BEGIN SELECT RAISE(ABORT, 'equity mark chain is append-only'); END""")
+            db.execute("""CREATE TRIGGER IF NOT EXISTS daily_equity_mark_chain_no_delete
+                BEFORE DELETE ON daily_equity_mark_chain
+                BEGIN SELECT RAISE(ABORT, 'equity mark chain is append-only'); END""")
             db.execute("""CREATE TABLE IF NOT EXISTS daily_equity_baselines (
                 trading_day TEXT PRIMARY KEY,
                 opening_equity_quote TEXT NOT NULL,
@@ -258,6 +265,12 @@ class AccountLedger:
             return False
         mark_set = {(m["trading_day"], int(m["timestamp_ms"]), str(Decimal(m["equity_quote"])))
                     for m in marks}
+        if len(mark_set) != len(marks):
+            return False
+        chain_set = {(e["trading_day"], int(e["timestamp_ms"]), str(Decimal(e["equity_quote"])))
+                     for e in chain}
+        if chain_set != mark_set:
+            return False
         prev_hash = "GENESIS"
         for entry in chain:
             expected = _hashlib.sha256(
