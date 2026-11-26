@@ -98,6 +98,15 @@ class DemoOrderManager:
                 }
             except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
                 raise OrderManagerError("Approved risk amount or protective levels are invalid") from exc
+            if hasattr(self.client, "install_risk_entry_permit"):
+                risk_permit = approval.get("risk_permit")
+                if risk_permit is None:
+                    raise OrderManagerError("Risk authorization issued no risk permit; refusing Spot entry")
+                try:
+                    risk_permit.consume(self.client, self.state, client_order_id=client_order_id)
+                    self.client.install_risk_entry_permit(risk_permit, self.state)
+                except Exception as exc:
+                    raise OrderManagerError("Risk permit is invalid or stale") from exc
         # Production exchange-backed buys require a fresh permit from a
         # clean, read-only StartupRecovery run. It is consumed before local
         # reservation, so even a crash cannot reuse it for a second entry.

@@ -16,6 +16,44 @@ class RiskAuthorizationError(RuntimeError):
     pass
 
 
+_EVIDENCE_TOKEN = object()
+_ISSUED_EVIDENCE: set[int] = set()
+
+
+def _issue_evidence(*, account_uid, instrument, size, price):
+    """Mint evidence through the authorizer's official internal path.
+
+    Trust boundary: code running inside the bot process is trusted. This
+    registry stops accidental or indirect permit minting (direct evidence
+    construction is rejected and each evidence is single-use); it is not a
+    defense against malicious code already executing in the same interpreter.
+    """
+    evidence = _RiskAuthorizationEvidence(
+        _EVIDENCE_TOKEN, account_uid=account_uid,
+        instrument=instrument, size=size, price=price,
+    )
+    _ISSUED_EVIDENCE.add(id(evidence))
+    return evidence
+
+
+def _consume_evidence(evidence) -> bool:
+    """True once, only for evidence minted by _issue_evidence."""
+    if id(evidence) in _ISSUED_EVIDENCE:
+        _ISSUED_EVIDENCE.discard(id(evidence))
+        return True
+    return False
+
+
+class _RiskAuthorizationEvidence:
+    """Proof object minted only inside a completed risk authorization."""
+
+    def __init__(self, token, *, account_uid, instrument, size, price):
+        if token is not _EVIDENCE_TOKEN:
+            raise RiskAuthorizationError("Risk evidence can only be minted by the authorizer")
+        self.account_uid = str(account_uid or "")
+        self.binding = {"instId": str(instrument), "sz": str(size), "px": str(price)}
+
+
 class PortfolioRiskAuthorizer:
     """Fail-closed adapter between order sizing and the read-only portfolio engine."""
 
@@ -61,7 +99,8 @@ class PortfolioRiskAuthorizer:
         )
 
     def _daily_account_pnl(self, *, account_config, balance, tickers,
-                           regular, oco, conditional, lock, unresolved, now_ms, daily_realized):
+                           regular, oco, conditional, lock, unresolved, now_ms, daily_realized,
+                           enforce_drawdown=False):
         """Reconcile durable UTC equity baseline and every account bill since it."""
         if getattr(self.settings, "demo_account_exclusive", False) is not True:
             raise RiskAuthorizationError("Dedicated Demo account attestation is required")
@@ -93,7 +132,33 @@ class PortfolioRiskAuthorizer:
                 + ",".join(preliminary.get("blockers", []))
             )
         equity = preliminary.get("account_equity_usdt")
-        if baseline is None:
+        if baseline is None and ledger.has_complete_history(fingerprint):
+            # UTC rollover with intact history: validate the whole new day
+            # from 00:00 UTC before opening the baseline, so an external flow
+            # before the first observation cannot be absorbed silently.
+            day_start_ms = now_ms - (now_ms % 86_400_000)
+            day_bills = self.client.get_account_bills(
+                begin=str(day_start_ms), end=str(now_ms))
+            ledger.save_bills(day_bills)
+            try:
+                day_reconciliation = reconcile_spot_bills(
+                    day_bills, account_fingerprint=fingerprint,
+                    begin_ms=day_start_ms, end_ms=now_ms)
+            except BillReconciliationError as exc:
+                raise RiskAuthorizationError(
+                    "Account bills are not fully reconciled: " + str(exc)) from exc
+            if Decimal(str(day_reconciliation.external_flows_quote)) != 0:
+                raise RiskAuthorizationError(
+                    "External account flows detected; drawdown evidence requires manual review")
+            ledger.establish_daily_baseline(
+                equity_quote=equity, timestamp_ms=now_ms,
+                account_fingerprint=fingerprint,
+            )
+            baseline = ledger.get_daily_baseline(now_ms)
+            bills = self.client.get_account_bills(
+                begin=str(baseline["opening_timestamp_ms"]), end=str(now_ms)
+            )
+        elif baseline is None:
             if lock or regular or oco or conditional or unresolved:
                 raise RiskAuthorizationError(
                     "Daily baseline missing while account has existing exposure or unresolved state"
@@ -102,9 +167,21 @@ class PortfolioRiskAuthorizer:
                 raise RiskAuthorizationError(
                     "Daily baseline missing after a realized trade; daily loss history cannot be reconstructed"
                 )
+            with self.state._connect() as db:
+                history = db.execute(
+                    "SELECT COUNT(*) FROM daily_pnl_events").fetchone()[0] if db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='daily_pnl_events'"
+                ).fetchone() else 0
+            if history:
+                raise RiskAuthorizationError(
+                    "Equity ledger history is missing after prior trading; manual recovery required"
+                )
             day_start_ms = now_ms - (now_ms % 86_400_000)
+            # Bootstrap requires a clean account across the full 7-day bill
+            # window, so a replaced state DB cannot silently reset history
+            # while recent account activity exists.
             opening_bills = self.client.get_account_bills(
-                begin=str(day_start_ms), end=str(now_ms)
+                begin=str(now_ms - 7 * 86_400_000), end=str(now_ms)
             )
             ledger.save_bills(opening_bills)
             if opening_bills:
@@ -141,15 +218,62 @@ class PortfolioRiskAuthorizer:
             )
         except BillReconciliationError as exc:
             raise RiskAuthorizationError("Account bills are not fully reconciled: " + str(exc)) from exc
+        # External flows are validated before any equity mark is stored, so a
+        # deposit or withdrawal can never enter the cumulative history.
+        if Decimal(str(reconciliation.external_flows_quote)) != 0:
+            raise RiskAuthorizationError(
+                "External account flows detected; drawdown evidence requires manual review")
         ledger.record_equity_mark(
             equity_quote=equity, timestamp_ms=now_ms,
             account_fingerprint=fingerprint,
         )
+        if enforce_drawdown:
+            try:
+                drawdown = ledger.cumulative_drawdown(
+                    timestamp_ms=now_ms, account_fingerprint=fingerprint,
+                    max_drawdown_pct=getattr(self.settings, "max_drawdown_pct", 0),
+                )
+            except Exception as exc:
+                raise RiskAuthorizationError(
+                    "Cumulative drawdown cannot be verified: " + str(exc)) from exc
+            if drawdown["tripped"]:
+                from .risk_controls import CircuitBreaker
+                CircuitBreaker(self.state, self.settings.max_daily_loss_quote).engage_emergency_stop(
+                    "cumulative drawdown limit reached")
+                raise RiskAuthorizationError(
+                    "Cumulative drawdown limit reached: "
+                    f"{drawdown['drawdown_pct']} >= {drawdown['max_drawdown_pct']}")
         result = ledger.daily_equity_delta(
             timestamp_ms=now_ms, reconciliation=reconciliation,
             account_fingerprint=fingerprint,
         )
         return result["daily_pnl_quote"]
+
+    def observe_equity(self) -> dict:
+        """Record a reconciled equity mark for this cycle, entry or not.
+
+        Drawdown evidence must cover cycles with an active position and cycles
+        without a candidate, so observation runs independently of entry
+        authorization. A tripped drawdown latches the emergency stop.
+        """
+        self.settings.validate_private_read_permission()
+        now_ms = int(self.clock_ms())
+        account_config = self.client.get_account_config()
+        balance = self.client.get_balance()
+        tickers = self.client.get_tickers()
+        regular = self.client.get_pending_orders("SPOT")
+        oco = self.client.get_pending_algo_orders("oco")
+        conditional = self.client.get_pending_algo_orders("conditional")
+        breaker = CircuitBreaker(self.state, self.settings.max_daily_loss_quote)
+        daily_realized = breaker.status()["daily_realized_pnl_quote"]
+        daily_pnl = self._daily_account_pnl(
+            account_config=account_config, balance=balance, tickers=tickers,
+            regular=regular, oco=oco, conditional=conditional,
+            lock=self.state.get_position_lock(),
+            unresolved=self.state.list_unresolved_intents(),
+            now_ms=now_ms, daily_realized=daily_realized, enforce_drawdown=True,
+        )
+        return {"observed": True, "daily_pnl_quote": daily_pnl, "timestamp_ms": now_ms}
 
     def _authorize(self, *, instrument: str, requested_size: str,
                    requested_price: str, candle_ts: int,
@@ -243,7 +367,7 @@ class PortfolioRiskAuthorizer:
                 account_config=account_config, balance=balance, tickers=tickers,
                 regular=regular, oco=oco, conditional=conditional,
                 lock=lock, unresolved=unresolved, now_ms=now_ms,
-                daily_realized=daily_realized,
+                daily_realized=daily_realized, enforce_drawdown=require_order_gate,
             )
             policy = PortfolioPolicy(
                 max_snapshot_age_ms=self.settings.market_data_max_age_ms,
@@ -269,7 +393,7 @@ class PortfolioRiskAuthorizer:
             approved = report.get("planned_entry")
             if not isinstance(approved, dict):
                 raise RiskAuthorizationError("Portfolio engine did not produce a priced risk plan")
-            return {
+            result = {
                 "entry_allowed": True,
                 "planned_entry": {
                     "instrument": approved["instrument"],
@@ -286,6 +410,23 @@ class PortfolioRiskAuthorizer:
                         report["projected_daily_pnl_after_planned_stop_quote"],
                 },
             }
+            # Execution permits exist only on the order-gated path, where the
+            # cumulative-drawdown check was enforced. Read-only preflight
+            # results never carry a permit.
+            if require_order_gate:
+                from .entry_gate import issue_risk_entry_permit
+                uid = str(account_config[0].get("uid") or "")
+                evidence = _issue_evidence(
+                    account_uid=uid,
+                    instrument=approved["instrument"], size=approved["size"],
+                    price=approved["entry_price"],
+                )
+                result["risk_permit"] = issue_risk_entry_permit(
+                    self.client, self.state, uid,
+                    instrument=approved["instrument"], size=approved["size"],
+                    price=approved["entry_price"], evidence=evidence,
+                )
+            return result
         except RiskAuthorizationError:
             raise
         except Exception as exc:

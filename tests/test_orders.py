@@ -248,7 +248,7 @@ def test_real_okx_client_requires_portfolio_risk_authorization(tmp_path):
     client = FakeClient()
     client.settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        enable_demo_orders=True, kill_switch=False,
+        enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
     manager = setup(tmp_path, client)
@@ -265,7 +265,7 @@ def test_real_okx_client_accepts_only_concrete_portfolio_authorizer(tmp_path):
     client = FakeClient()
     settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        demo_account_exclusive=True, enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=20, max_position_quote=1000,
         market_data_max_age_ms=30_000,
     )
@@ -307,7 +307,7 @@ def test_real_okx_entry_rejects_authorization_without_protective_levels(tmp_path
     client = FakeClient()
     settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        demo_account_exclusive=True, enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=20, max_position_quote=1000,
     )
     client.settings = settings
@@ -353,7 +353,7 @@ def test_authorizer_subclass_cannot_fabricate_approval(tmp_path):
     client = FakeClient()
     client.settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        demo_account_exclusive=True, enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
     manager = DemoOrderManager(
@@ -371,7 +371,7 @@ def test_real_okx_client_rejects_generic_callable_that_fabricates_approval(tmp_p
     client = FakeClient()
     client.settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        demo_account_exclusive=True, enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
     manager = DemoOrderManager(client, StateStore(str(tmp_path / "mismatch.db")),
@@ -392,7 +392,7 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
     from nebula.state import StateStore
 
     settings = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
+        demo_account_exclusive=True, enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False, max_daily_loss_quote=20,
         max_risk_quote=2, max_position_quote=100, market_data_max_age_ms=30000)
     class SnapshotClient:
         def get_spot_instrument(self, inst_id):
@@ -441,7 +441,7 @@ def test_portfolio_authorizer_rejects_unconfirmed_candle_before_private_snapshot
     from nebula.state import StateStore
 
     settings = Settings(api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False, max_daily_loss_quote=20,
+        demo_account_exclusive=True, enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False, max_daily_loss_quote=20,
         max_risk_quote=2, max_position_quote=100)
     class NeverReadClient:
         def get_account_config(self):

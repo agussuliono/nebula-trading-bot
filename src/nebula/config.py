@@ -76,6 +76,7 @@ class Settings:
     market_data_max_age_ms: int = 30_000
     # Appended to preserve the existing positional Settings constructor contract.
     okx_api_region: str = DEFAULT_DEMO_REGION
+    max_drawdown_pct: float = 0.0
 
     def __post_init__(self):
         if self.okx_api_region not in DEMO_REST_URLS:
@@ -110,6 +111,7 @@ class Settings:
             max_daily_loss_quote=_finite_float("NEBULA_MAX_DAILY_LOSS_QUOTE", "0"),
             max_risk_quote=_finite_float("NEBULA_MAX_RISK_QUOTE", "0"),
             max_position_quote=_finite_float("NEBULA_MAX_POSITION_QUOTE", "0"),
+            max_drawdown_pct=_finite_float("NEBULA_MAX_DRAWDOWN_PCT", "0"),
             fee_bps=_finite_float("NEBULA_FEE_BPS", "10"),
             slippage_bps=_finite_float("NEBULA_SLIPPAGE_BPS", "10"),
             market_data_max_age_ms=_positive_int("NEBULA_MARKET_DATA_MAX_AGE_MS", "30000"),
@@ -125,6 +127,8 @@ class Settings:
             raise SafetyError("All risk limits must be finite and explicitly configured above zero")
         if self.max_risk_quote > self.max_daily_loss_quote:
             raise SafetyError("Per-trade risk cannot exceed the daily loss limit")
+        if not (math.isfinite(self.max_drawdown_pct) and 0 < self.max_drawdown_pct <= 1):
+            raise SafetyError("Cumulative drawdown limit must be a finite fraction in (0, 1]")
 
     def validate_private_read_permission(self) -> None:
         """Allow authenticated Demo reads without enabling any exchange writes."""

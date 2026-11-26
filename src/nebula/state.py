@@ -78,6 +78,18 @@ class StateStore:
 
     def _init_db(self):
         with self._connect() as db:
+            existing_tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            known_nebula_tables = {
+                "intents", "order_snapshots", "kv", "exit_child_orders", "fills",
+                "protection_intents", "position_lock", "audit_events",
+                "daily_pnl_events", "emergency_stop", "nebula_schema_meta",
+                "account_bills", "daily_equity_baselines", "daily_equity_marks",
+                "daily_equity_mark_chain",
+            }
+            # Any trace of the NEBULA schema marks this as a pre-existing
+            # database; a damaged one must never be re-initialized as fresh.
+            pre_existing = bool(existing_tables & known_nebula_tables)
             db.execute("""CREATE TABLE IF NOT EXISTS intents (
                 client_order_id TEXT PRIMARY KEY,
                 instrument TEXT NOT NULL,
@@ -169,6 +181,49 @@ class StateStore:
                 details_json TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )""")
+            if not pre_existing:
+                # Safety state is created only for a fresh database. A
+                # pre-existing database missing these tables is damaged
+                # state and must fail closed, never silently re-initialize
+                # a latched emergency stop to disengaged.
+                db.execute("""CREATE TABLE IF NOT EXISTS daily_pnl_events (
+                    position_id TEXT PRIMARY KEY,
+                    trading_day TEXT NOT NULL,
+                    realized_pnl_quote TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )""")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_daily_pnl_day ON daily_pnl_events(trading_day)")
+                db.execute("""CREATE TABLE IF NOT EXISTS emergency_stop (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    engaged INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )""")
+                db.execute("INSERT OR IGNORE INTO emergency_stop(singleton,engaged,reason) VALUES(1,0,'')")
+                db.execute("""CREATE TABLE IF NOT EXISTS nebula_schema_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )""")
+                db.execute("INSERT OR IGNORE INTO nebula_schema_meta(key,value) VALUES('initialized','1')")
+            else:
+                # Legacy migration: a pre-existing database without the marker
+                # gets one only after its safety state proves complete; a
+                # damaged legacy database stays unmarked and fails closed.
+                tables = {row[0] for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                if "nebula_schema_meta" not in tables:
+                    safety_complete = (
+                        {"daily_pnl_events", "emergency_stop"}.issubset(tables)
+                        and db.execute(
+                            "SELECT COUNT(*) FROM emergency_stop WHERE singleton=1"
+                        ).fetchone()[0] == 1
+                    )
+                    if safety_complete:
+                        db.execute("""CREATE TABLE IF NOT EXISTS nebula_schema_meta (
+                            key TEXT PRIMARY KEY,
+                            value TEXT NOT NULL
+                        )""")
+                        db.execute("INSERT OR IGNORE INTO nebula_schema_meta(key,value) VALUES('initialized','1')")
 
     @staticmethod
     def make_client_order_id(strategy: str, instrument: str, candle_ts: int, side: str) -> str:

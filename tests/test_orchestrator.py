@@ -120,7 +120,7 @@ class FakeProtection:
 def enabled_settings(**overrides):
     values = dict(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
-        demo_account_exclusive=True, enable_demo_orders=True, kill_switch=False,
+        demo_account_exclusive=True, enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=100, max_risk_quote=5, max_position_quote=100,
     )
     values.update(overrides)

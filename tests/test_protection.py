@@ -38,7 +38,7 @@ def test_oco_payload_is_demo_marked_and_uses_market_exit():
     class Session:
         def __init__(self): self.call=None
         def request(self, *a, **kw): self.call=(a,kw); return Response()
-    settings=Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True, kill_switch=False,
+    settings=Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
                       max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=50)
     session=Session(); client=OkxDemoClient(settings, session=session)
     client.get_spot_instrument = lambda inst_id: {
@@ -80,7 +80,7 @@ def test_algo_order_details_lookup_uses_persisted_client_algo_id():
     ],
 )
 def test_oco_adapter_rejects_instrument_rule_violations_before_post(size, tp, sl, state, error):
-    settings = Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True,
+    settings = Settings(api_key="k", secret_key="s", passphrase="p", enable_demo_orders=True, max_drawdown_pct=0.05,
                         kill_switch=False, max_daily_loss_quote=20, max_risk_quote=2,
                         max_position_quote=50)
     class NeverPostSession:

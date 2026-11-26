@@ -233,7 +233,7 @@ def test_order_authorizer_rejects_mismatched_plan_identity_before_reads(
     settings = Settings(
         api_key="demo-key", secret_key="demo-secret", passphrase="demo-pass",
         demo_account_exclusive=True,
-        enable_demo_orders=True, kill_switch=False,
+        enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
 
@@ -387,3 +387,116 @@ def test_daily_pnl_reconciliation_rejects_type_two_margin_bill(tmp_path):
             regular=[], oco=[], conditional=[], lock=None, unresolved=[],
             now_ms=NOW_MS, daily_realized="0",
         )
+
+
+def test_observe_equity_records_mark_without_entry_candidate(tmp_path):
+    client = SnapshotClient()
+    state = StateStore(str(tmp_path / "observe.sqlite3"))
+    from dataclasses import replace
+    settings = replace(read_only_settings(), max_drawdown_pct=0.05)
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, settings,
+        plan_provider=lambda **kwargs: pytest.fail("observe must not need a plan"),
+        clock_ms=lambda: NOW_MS,
+    )
+    result = authorizer.observe_equity()
+    assert result["observed"] is True
+    with state._connect() as db:
+        marks = db.execute("SELECT COUNT(*) FROM daily_equity_marks").fetchone()[0]
+    assert marks >= 1
+
+
+def test_preflight_result_carries_no_risk_permit(tmp_path):
+    preflight, client, state = make_preflight(tmp_path)
+    result = preflight.evaluate(candidate())
+    assert "risk_permit" not in str(result.get("authorization", {}).keys())
+    assert result.get("authorization", {}).get("risk_permit") is None
+
+
+def test_daily_baseline_rolls_over_after_prior_day_trade(tmp_path):
+    from nebula.account_ledger import AccountLedger
+    import hashlib
+    client = SnapshotClient()
+    state = StateStore(str(tmp_path / "rollover.sqlite3"))
+    fingerprint = hashlib.sha256(b"test-demo-account-uid").hexdigest()
+    ledger = AccountLedger(state)
+    prior_day = NOW_MS - 86_400_000
+    ledger.establish_daily_baseline(equity_quote="1000", timestamp_ms=prior_day,
+                                    account_fingerprint=fingerprint)
+    from nebula.risk_controls import CircuitBreaker
+    breaker = CircuitBreaker(state, 20)
+    breaker.record_closed_trade("NBPRIOR", "-5")
+    from dataclasses import replace
+    settings = replace(read_only_settings(), max_drawdown_pct=0.05)
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, settings,
+        plan_provider=lambda **kwargs: pytest.fail("observe must not need a plan"),
+        clock_ms=lambda: NOW_MS,
+    )
+    result = authorizer.observe_equity()
+    assert result["observed"] is True
+    assert ledger.get_daily_baseline(NOW_MS) is not None
+
+
+def test_rollover_rejects_external_flow_before_first_observation(tmp_path):
+    from nebula.account_ledger import AccountLedger
+    import hashlib
+    client = SnapshotClient()
+    state = StateStore(str(tmp_path / "rollover-flow.sqlite3"))
+    fingerprint = hashlib.sha256(b"test-demo-account-uid").hexdigest()
+    ledger = AccountLedger(state)
+    ledger.establish_daily_baseline(equity_quote="1000", timestamp_ms=NOW_MS - 86_400_000,
+                                    account_fingerprint=fingerprint)
+    day_start = NOW_MS - (NOW_MS % 86_400_000)
+    client.bills = [{
+        "billId": "12345", "ccy": "USDT", "balChg": "100", "bal": "1100",
+        "type": "1", "subType": "11", "instId": "", "ordId": "", "tradeId": "",
+        "ts": str(day_start + 3_600_000),
+    }]
+    from dataclasses import replace
+    settings = replace(read_only_settings(), max_drawdown_pct=0.05)
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, settings,
+        plan_provider=lambda **kwargs: pytest.fail("observe must not need a plan"),
+        clock_ms=lambda: NOW_MS,
+    )
+    with pytest.raises(RiskAuthorizationError, match="not fully reconciled"):
+        authorizer.observe_equity()
+    assert ledger.get_daily_baseline(NOW_MS) is None
+
+
+def test_deleted_peak_mark_breaks_chain_verification(tmp_path):
+    from nebula.account_ledger import AccountLedger, AccountLedgerError
+    import hashlib
+    state = StateStore(str(tmp_path / "chain.sqlite3"))
+    fingerprint = hashlib.sha256(b"test-demo-account-uid").hexdigest()
+    ledger = AccountLedger(state)
+    ledger.establish_daily_baseline(equity_quote="1000", timestamp_ms=NOW_MS,
+                                    account_fingerprint=fingerprint)
+    ledger.record_equity_mark(equity_quote="1200", timestamp_ms=NOW_MS + 1000,
+                              account_fingerprint=fingerprint)
+    assert ledger.verify_mark_chain() is True
+    with state._connect() as db:
+        db.execute("DELETE FROM daily_equity_marks WHERE equity_quote='1200'")
+    assert ledger.verify_mark_chain() is False
+    with pytest.raises(AccountLedgerError, match="integrity"):
+        ledger.cumulative_drawdown(timestamp_ms=NOW_MS + 2000,
+                                   account_fingerprint=fingerprint,
+                                   max_drawdown_pct=0.05)
+
+
+def test_mark_chain_rejects_update_and_delete(tmp_path):
+    from nebula.account_ledger import AccountLedger
+    import hashlib
+    import sqlite3
+    state = StateStore(str(tmp_path / "chain-triggers.sqlite3"))
+    fingerprint = hashlib.sha256(b"test-demo-account-uid").hexdigest()
+    ledger = AccountLedger(state)
+    ledger.establish_daily_baseline(equity_quote="1000", timestamp_ms=NOW_MS,
+                                    account_fingerprint=fingerprint)
+    with state._connect() as db:
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            db.execute("UPDATE daily_equity_mark_chain SET equity_quote='1'")
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            db.execute("DELETE FROM daily_equity_mark_chain")
+    assert ledger.verify_mark_chain() is True

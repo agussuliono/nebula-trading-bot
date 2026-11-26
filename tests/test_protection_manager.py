@@ -275,7 +275,7 @@ def test_local_oco_gate_block_remains_retryable_without_network_io(tmp_path):
 
     settings = Settings(
         api_key='demo-key', secret_key='demo-secret', passphrase='demo-pass',
-        enable_demo_orders=True, kill_switch=False,
+        enable_demo_orders=True, max_drawdown_pct=0.05, kill_switch=False,
         max_daily_loss_quote=20, max_risk_quote=2, max_position_quote=100,
     )
     session = Session()

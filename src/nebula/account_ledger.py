@@ -43,6 +43,21 @@ class AccountLedger:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_account_bills_ts ON account_bills(timestamp_ms)")
+            db.execute("""CREATE TABLE IF NOT EXISTS daily_equity_mark_chain (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                trading_day TEXT NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                equity_quote TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                mark_hash TEXT NOT NULL,
+                UNIQUE(trading_day, timestamp_ms)
+            )""")
+            db.execute("""CREATE TRIGGER IF NOT EXISTS daily_equity_mark_chain_no_update
+                BEFORE UPDATE ON daily_equity_mark_chain
+                BEGIN SELECT RAISE(ABORT, 'equity mark chain is append-only'); END""")
+            db.execute("""CREATE TRIGGER IF NOT EXISTS daily_equity_mark_chain_no_delete
+                BEFORE DELETE ON daily_equity_mark_chain
+                BEGIN SELECT RAISE(ABORT, 'equity mark chain is append-only'); END""")
             db.execute("""CREATE TABLE IF NOT EXISTS daily_equity_baselines (
                 trading_day TEXT PRIMARY KEY,
                 opening_equity_quote TEXT NOT NULL,
@@ -155,6 +170,7 @@ class AccountLedger:
                 (day, str(equity), ts, "USDT", str(account_fingerprint), source))
             db.execute("INSERT INTO daily_equity_marks(trading_day,timestamp_ms,equity_quote,source) VALUES(?,?,?,?)",
                        (day, ts, str(equity), source))
+            self._append_mark_chain(db, day, ts, equity)
             return dict(db.execute("SELECT * FROM daily_equity_baselines WHERE trading_day=?", (day,)).fetchone())
 
     def record_equity_mark(self, *, equity_quote, timestamp_ms, account_fingerprint,
@@ -183,6 +199,12 @@ class AccountLedger:
                              (day, ts)).fetchone()
             if not row or Decimal(row["equity_quote"]) != equity:
                 raise AccountLedgerError("Conflicting equity mark at the same timestamp")
+            import hashlib as _hashlib
+            chained = db.execute(
+                "SELECT COUNT(*) FROM daily_equity_mark_chain WHERE trading_day=? AND timestamp_ms=?",
+                (day, ts)).fetchone()[0]
+            if not chained:
+                self._append_mark_chain(db, day, ts, equity)
             return {"trading_day": day, "equity_quote": str(equity), "timestamp_ms": ts}
 
     def daily_equity_delta(self, *, timestamp_ms, reconciliation,
@@ -216,3 +238,105 @@ class AccountLedger:
                 "current_equity_quote": latest["equity_quote"],
                 "external_flows_quote": str(flows),
                 "reconciled_bill_count": reconciliation.bill_count, "complete": True}
+
+    @staticmethod
+    def _append_mark_chain(db, day, ts, equity):
+        import hashlib as _hashlib
+        prev = db.execute(
+            "SELECT mark_hash FROM daily_equity_mark_chain ORDER BY seq DESC LIMIT 1"
+        ).fetchone()
+        prev_hash = prev[0] if prev else "GENESIS"
+        mark_hash = _hashlib.sha256(
+            f"{prev_hash}|{day}|{ts}|{equity}".encode()).hexdigest()
+        db.execute(
+            "INSERT INTO daily_equity_mark_chain(trading_day,timestamp_ms,equity_quote,prev_hash,mark_hash) VALUES(?,?,?,?,?)",
+            (day, ts, str(equity), prev_hash, mark_hash))
+
+    def verify_mark_chain(self) -> bool:
+        """Recompute the append-only mark hash chain and cross-check marks."""
+        import hashlib as _hashlib
+        with self.state._connect() as db:
+            chain = db.execute(
+                "SELECT trading_day,timestamp_ms,equity_quote,prev_hash,mark_hash "
+                "FROM daily_equity_mark_chain ORDER BY seq").fetchall()
+            marks = db.execute(
+                "SELECT trading_day,timestamp_ms,equity_quote FROM daily_equity_marks").fetchall()
+        if len(chain) != len(marks):
+            return False
+        mark_set = {(m["trading_day"], int(m["timestamp_ms"]), str(Decimal(m["equity_quote"])))
+                    for m in marks}
+        if len(mark_set) != len(marks):
+            return False
+        chain_set = {(e["trading_day"], int(e["timestamp_ms"]), str(Decimal(e["equity_quote"])))
+                     for e in chain}
+        if chain_set != mark_set:
+            return False
+        prev_hash = "GENESIS"
+        for entry in chain:
+            expected = _hashlib.sha256(
+                f"{prev_hash}|{entry['trading_day']}|{int(entry['timestamp_ms'])}|{Decimal(entry['equity_quote'])}".encode()
+            ).hexdigest()
+            if entry["prev_hash"] != prev_hash or entry["mark_hash"] != expected:
+                return False
+            if (entry["trading_day"], int(entry["timestamp_ms"]),
+                    str(Decimal(entry["equity_quote"]))) not in mark_set:
+                return False
+            prev_hash = entry["mark_hash"]
+        return True
+
+    def has_complete_history(self, account_fingerprint) -> bool:
+        """True when prior-day baselines exist and every one has its opening mark."""
+        if not self.verify_mark_chain():
+            return False
+        with self.state._connect() as db:
+            baselines = db.execute(
+                "SELECT trading_day,opening_timestamp_ms,account_fingerprint "
+                "FROM daily_equity_baselines").fetchall()
+            if not baselines:
+                return False
+            for baseline in baselines:
+                if baseline["account_fingerprint"] != str(account_fingerprint):
+                    return False
+                mark = db.execute(
+                    "SELECT COUNT(*) FROM daily_equity_marks WHERE trading_day=? AND timestamp_ms=?",
+                    (baseline["trading_day"], baseline["opening_timestamp_ms"])).fetchone()[0]
+                if not mark:
+                    return False
+        return True
+
+    def cumulative_drawdown(self, *, timestamp_ms, account_fingerprint,
+                            max_drawdown_pct):
+        """Peak-to-current drawdown across every reconciled equity mark.
+
+        Fails closed when evidence is missing, stale, or bound to another
+        account. Equity marks only exist on the reconciled daily path, so a
+        missing mark can never read as zero drawdown.
+        """
+        try:
+            limit = Decimal(str(max_drawdown_pct))
+        except Exception as exc:
+            raise AccountLedgerError("max_drawdown_pct must be a finite fraction in (0, 1]") from exc
+        if not limit.is_finite() or limit <= 0 or limit > 1:
+            raise AccountLedgerError("max_drawdown_pct must be a finite fraction in (0, 1]")
+        if not self.verify_mark_chain():
+            raise AccountLedgerError("Equity mark history failed integrity verification")
+        ts = int(timestamp_ms)
+        with self.state._connect() as db:
+            fingerprints = db.execute(
+                "SELECT DISTINCT account_fingerprint FROM daily_equity_baselines").fetchall()
+            marks = db.execute(
+                "SELECT timestamp_ms,equity_quote FROM daily_equity_marks WHERE timestamp_ms<=? "
+                "ORDER BY timestamp_ms", (ts,)).fetchall()
+        if not fingerprints or any(row[0] != str(account_fingerprint) for row in fingerprints):
+            raise AccountLedgerError("Equity history is missing or belongs to a different account")
+        if not marks or int(marks[-1]["timestamp_ms"]) != ts:
+            raise AccountLedgerError("A fresh equity mark for the requested timestamp is required")
+        equities = [Decimal(row["equity_quote"]) for row in marks]
+        if any(not value.is_finite() or value <= 0 for value in equities):
+            raise AccountLedgerError("Equity history contains an invalid mark")
+        peak = max(equities)
+        current = equities[-1]
+        drawdown = (peak - current) / peak
+        return {"peak_equity_quote": str(peak), "current_equity_quote": str(current),
+                "drawdown_pct": str(drawdown), "max_drawdown_pct": str(limit),
+                "tripped": drawdown >= limit, "mark_count": len(equities)}

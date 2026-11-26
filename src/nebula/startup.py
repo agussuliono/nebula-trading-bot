@@ -107,6 +107,7 @@ class StartupRecovery:
         required = {
             "intents", "order_snapshots", "position_lock", "protection_intents",
             "exit_child_orders", "audit_events", "fills",
+            "daily_pnl_events", "emergency_stop",
         }
         missing = sorted(required - tables)
         if missing:
@@ -117,6 +118,33 @@ class StartupRecovery:
             errors.append("foreign_key_check_failed")
         if errors:
             return {"ok": False, "errors": errors}
+        if db.execute("SELECT COUNT(*) FROM emergency_stop WHERE singleton=1").fetchone()[0] != 1:
+            errors.append("emergency_stop_state_missing")
+            return {"ok": False, "errors": errors}
+        # Ledger continuity: prior trading history without equity history
+        # means the drawdown high-water mark was lost; fail closed.
+        history = db.execute("SELECT COUNT(*) FROM intents").fetchone()[0] + \
+            db.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+        if history:
+            if not {"daily_equity_baselines", "daily_equity_marks"}.issubset(tables):
+                errors.append("equity_ledger_history_missing")
+                return {"ok": False, "errors": errors}
+            baselines = db.execute(
+                "SELECT trading_day,opening_timestamp_ms FROM daily_equity_baselines").fetchall()
+            if not baselines:
+                errors.append("equity_ledger_history_missing")
+                return {"ok": False, "errors": errors}
+            for baseline in baselines:
+                opening_mark = db.execute(
+                    "SELECT COUNT(*) FROM daily_equity_marks WHERE trading_day=? AND timestamp_ms=?",
+                    (baseline[0], baseline[1])).fetchone()[0]
+                if not opening_mark:
+                    errors.append("equity_ledger_history_incomplete")
+                    return {"ok": False, "errors": errors}
+            from .account_ledger import AccountLedger
+            if "daily_equity_mark_chain" not in tables or not AccountLedger(self.state).verify_mark_chain():
+                errors.append("equity_mark_chain_invalid")
+                return {"ok": False, "errors": errors}
 
         lock_rows = db.execute("SELECT * FROM position_lock").fetchall()
         if len(lock_rows) > 1:
