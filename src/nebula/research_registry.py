@@ -693,6 +693,33 @@ class ResearchRegistry:
             ),
         )
 
+    def protocol_frozen(self, experiment_id: str, protocol_sha256: str) -> bool:
+        """Public check: registry holds this exact protocol as frozen."""
+        return self._protocol_is_frozen(experiment_id, protocol_sha256)
+
+    def trial_ids(self, experiment_id: str) -> tuple[str, ...]:
+        rows = self._conn.execute(
+            "SELECT trial_id FROM experiment_trials WHERE experiment_id = ? "
+            "ORDER BY trial_id",
+            (experiment_id,),
+        ).fetchall()
+        return tuple(row[0] for row in rows)
+
+    def post_performance_exclusions(self, experiment_id: str) -> frozenset:
+        """Candidate indexes recorded as excluded after performance was seen."""
+        rows = self._conn.execute(
+            "SELECT metrics_json FROM experiment_trials WHERE experiment_id = ?",
+            (experiment_id,),
+        ).fetchall()
+        excluded = set()
+        for (metrics_json,) in rows:
+            metrics = json.loads(metrics_json)
+            if metrics.get("excluded_after_performance") is True:
+                index = metrics.get("candidate_index")
+                if isinstance(index, int) and not isinstance(index, bool):
+                    excluded.add(index)
+        return frozenset(excluded)
+
     def trial_count(self, experiment_id: str) -> int:
         """Every recorded trial counts, including failed/aborted/invalid."""
         row = self._conn.execute(

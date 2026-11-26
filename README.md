@@ -209,7 +209,7 @@ The ranking score is a deterministic implementation choice, not a proven predict
 
 ## Test status for v0.16.19
 
-- 691 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
+- 687 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
 - Tests cover fee/slippage impact, next-open execution, same-bar stop priority, risk sizing, daily-loss/drawdown halts, chronological single-asset and portfolio walk-forward splits, multi-asset deterministic selection, global one-position enforcement, synchronized timestamps, portfolio cost-stress scenarios, CSV validation and public history-candle request construction.
 - Tests use local synthetic data and mocked HTTP; they do not establish OKX connectivity or exchange execution behavior.
 - No API credentials were used and no Demo or live orders were sent.

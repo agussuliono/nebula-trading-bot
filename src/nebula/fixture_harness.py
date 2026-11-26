@@ -91,7 +91,8 @@ class FixtureDecision:
 def verify_fixture(
     manifest: FixtureManifest,
     dataset: bytes,
-    catalog: TrustedCatalog,
+    catalog_entries: Mapping[str, CatalogEntry],
+    frozen: "FrozenProtocol",
     *,
     deployment_gate_passed: bool = False,
 ) -> FixtureDecision:
@@ -103,8 +104,10 @@ def verify_fixture(
     require verifiable generator metadata.
     """
     reasons: list[str] = []
-    if not catalog.authenticated():
-        reasons.append("fixture catalog is not authenticated")
+    if not frozen.verify():
+        reasons.append("frozen protocol hash mismatch")
+    if catalog_digest(catalog_entries) != frozen.protocol.catalog_sha256:
+        reasons.append("fixture catalog does not match frozen trust anchor")
     if not manifest.sha256:
         reasons.append("manifest hash missing")
     elif hashlib.sha256(dataset).hexdigest() != manifest.sha256:
@@ -114,7 +117,7 @@ def verify_fixture(
             reasons.append("non-fixture data rejected before deployment gate passes")
         else:
             reasons.append("fixture kind must be public or synthetic")
-    entry = catalog.entries.get(manifest.source_id)
+    entry = catalog_entries.get(manifest.source_id)
     if entry is None:
         reasons.append("source not in trusted fixture catalog")
     else:
@@ -134,6 +137,7 @@ class Protocol:
     trial_group: str
     hypothesis_family: str
     dataset_hashes: Mapping[str, str]
+    catalog_sha256: str
     prospective_cutoff: str
     fee_bps: float
     slippage_bps: float
@@ -157,6 +161,7 @@ class Protocol:
                 "trial_group": self.trial_group,
                 "hypothesis_family": self.hypothesis_family,
                 "dataset_hashes": dict(self.dataset_hashes),
+                "catalog_sha256": self.catalog_sha256,
                 "prospective_cutoff": self.prospective_cutoff,
                 "fee_bps": self.fee_bps,
                 "slippage_bps": self.slippage_bps,
@@ -252,13 +257,15 @@ def evaluate_prospective(
 def evaluate_pbo_gate(
     combinations: Optional[Sequence[tuple[Sequence[Optional[float]], Sequence[Optional[float]]]]],
     frozen: FrozenProtocol,
-    *,
-    post_performance_exclusions: frozenset | set | tuple = (),
+    registry,
+    experiment_id: str,
 ) -> StatResult:
-    """PBO gate: exclusions come only from the frozen protocol."""
+    """PBO gate: exclusions come from the frozen protocol and registry."""
     if not frozen.verify():
         return StatResult.inconclusive("frozen protocol hash mismatch")
-    if post_performance_exclusions:
+    if not registry.protocol_frozen(experiment_id, frozen.sha256):
+        return StatResult.inconclusive("protocol not frozen in registry")
+    if registry.post_performance_exclusions(experiment_id):
         return StatResult.inconclusive(
             "candidate excluded after performance was seen"
         )
@@ -307,6 +314,8 @@ def evaluate_dsr_gate(
     trials: Sequence[Sequence[float]],
     selected_index: int,
     artifacts: DsrArtifacts,
+    registry,
+    experiment_id: str,
 ) -> StatResult:
     """DSR gate: artifacts must bind to the actual trial returns."""
     if not trials:
@@ -319,9 +328,31 @@ def evaluate_dsr_gate(
         return StatResult.inconclusive("correlation artifact mismatch")
     if artifacts.registry_trial_count != len(trials):
         return StatResult.inconclusive("registry trial count mismatch")
+    if registry.trial_count(experiment_id) != len(trials):
+        return StatResult.inconclusive("trial set does not cover registry trials")
     if any(len(trial) != artifacts.sample_count for trial in trials):
         return StatResult.inconclusive("sample count mismatch")
     return deflated_sharpe_ratio(trials, selected_index)
+
+
+@dataclass(frozen=True)
+class PromotionEvidence:
+    """Artifact-bound promotion evidence; hashes must be 64-hex digests."""
+
+    snapshot_sha256: str
+    walk_forward_sha256: str
+    walk_forward_plateau: bool
+    stress_sha256: str
+    stress_passed: bool
+    trial_ids: tuple[str, ...]
+
+
+def _is_digest(value: str) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(c in "0123456789abcdef" for c in value)
+    )
 
 
 @dataclass(frozen=True)
@@ -334,41 +365,45 @@ def evaluate_promotion(
     *,
     frozen: FrozenProtocol,
     protocol: Protocol,
-    registry_protocol_sha256: str,
+    registry,
+    experiment_id: str,
     fixture_decision: FixtureDecision,
     prospective: ProspectiveDecision,
     pbo: StatResult,
     dsr: StatResult,
-    snapshot_complete: bool,
-    all_trials_recorded: bool,
-    cumulative_trials_reconstructed: bool,
-    walk_forward_plateau: bool,
-    stress_passed: bool,
+    evidence: PromotionEvidence,
 ) -> PromotionDecision:
-    """Promotion to Fase 2 design requires every spec gate to pass."""
+    """Promotion requires registry-bound evidence and the frozen threshold.
+
+    The frozen promotion_threshold is applied as: DSR >= threshold and
+    PBO <= 1 - threshold.
+    """
     reasons: list[str] = []
     try:
         frozen.assert_unchanged(protocol)
     except ValueError:
         reasons.append("protocol changed after freeze")
-    if registry_protocol_sha256 != frozen.sha256:
-        reasons.append("registry protocol hash mismatch")
+    if not registry.protocol_frozen(experiment_id, frozen.sha256):
+        reasons.append("protocol not frozen in registry")
     if not fixture_decision.accepted:
         reasons.append("fixture provenance not verified")
     if not prospective.eligible:
         reasons.extend(prospective.reasons or ("prospective sample insufficient",))
+    threshold = frozen.protocol.promotion_threshold
     if pbo.status != "ok" or pbo.value is None or not math.isfinite(pbo.value):
         reasons.append("PBO inconclusive")
+    elif pbo.value > 1.0 - threshold:
+        reasons.append("PBO above frozen promotion threshold")
     if dsr.status != "ok" or dsr.value is None or not math.isfinite(dsr.value):
         reasons.append("DSR inconclusive")
-    if not snapshot_complete:
-        reasons.append("context snapshot incomplete")
-    if not all_trials_recorded:
-        reasons.append("not all trials recorded")
-    if not cumulative_trials_reconstructed:
-        reasons.append("cumulative trial count not reconstructed")
-    if not walk_forward_plateau:
+    elif dsr.value < threshold:
+        reasons.append("DSR below frozen promotion threshold")
+    if not _is_digest(evidence.snapshot_sha256):
+        reasons.append("snapshot artifact missing")
+    if not _is_digest(evidence.walk_forward_sha256) or not evidence.walk_forward_plateau:
         reasons.append("walk-forward plateau not proven")
-    if not stress_passed:
+    if not _is_digest(evidence.stress_sha256) or not evidence.stress_passed:
         reasons.append("fee/slippage stress not passed")
+    if tuple(sorted(evidence.trial_ids)) != registry.trial_ids(experiment_id):
+        reasons.append("cumulative trial set does not match registry")
     return PromotionDecision(eligible=not reasons, reasons=tuple(reasons))
