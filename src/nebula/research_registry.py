@@ -697,7 +697,16 @@ class ResearchRegistry:
         ).fetchone()
         return int(row[0])
 
+    RESERVED_STATUSES = ("protocol_frozen",)
+
     def record_experiment_status(
+        self, experiment_id: str, new_status: str, reason: str, actor: str
+    ) -> None:
+        if new_status in self.RESERVED_STATUSES:
+            raise RegistryError(f"status {new_status} is reserved for its dedicated path")
+        self._append_experiment_status(experiment_id, new_status, reason, actor)
+
+    def _append_experiment_status(
         self, experiment_id: str, new_status: str, reason: str, actor: str
     ) -> None:
         row = self._conn.execute(
@@ -770,7 +779,7 @@ class ResearchRegistry:
         ).fetchone()
         if row is None:
             raise RegistryError(f"unknown experiment: {experiment_id}")
-        self.record_experiment_status(
+        self._append_experiment_status(
             experiment_id, "protocol_frozen", f"protocol {row[0]} frozen", actor
         )
 

@@ -205,3 +205,13 @@ def test_validation_bad_artifact_hash_is_inconclusive(registry):
         "researcher_decision_log_sha256": "c" * 64,
     }
     assert registry.record_validation("run1", "exp1", "dsr", artifacts, {}) == "inconclusive"
+
+
+def test_direct_protocol_frozen_status_is_rejected(registry):
+    from nebula.research_registry import RegistryError
+
+    registry.register_experiment("exp1", "hyp", "p" * 64, "d" * 64, "abc123", "c" * 64)
+    with pytest.raises(RegistryError):
+        registry.record_experiment_status("exp1", "protocol_frozen", "forged", "mallory")
+    assert registry.request_holdout_access("h1", "exp1", "p" * 64) is False
+    assert registry.holdout_read_allowed("h1", "exp1", "p" * 64) is False
