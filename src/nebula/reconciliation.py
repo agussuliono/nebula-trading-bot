@@ -1,6 +1,10 @@
 """Fail-closed read-only account reconciliation for OKX Spot Demo."""
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+
+
+_CCY_PATTERN = re.compile(r"^[A-Z0-9]{2,15}$")
 
 
 class ReconciliationError(RuntimeError):
@@ -8,8 +12,15 @@ class ReconciliationError(RuntimeError):
 
 
 def _decimal(value, field):
+    # Strict amount parsing without truthiness fallback: False, null,
+    # containers, and empty strings are not valid API amounts and must
+    # never read as a zero balance.
+    if isinstance(value, bool) or value is None or isinstance(value, (list, dict)):
+        raise ReconciliationError(f"Invalid {field} in account response")
+    if isinstance(value, str) and not value.strip():
+        raise ReconciliationError(f"Invalid {field} in account response")
     try:
-        result = Decimal(str(value or "0"))
+        result = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ReconciliationError(f"Invalid {field} in account response") from exc
     if not result.is_finite() or result < 0:
@@ -70,23 +81,37 @@ class DemoAccountReconciler:
             *self.client.get_pending_algo_orders("oco"),
             *self.client.get_pending_algo_orders("conditional"),
         ]
-        if len(balances) != 1 or not isinstance(balances[0].get("details"), list):
+        if (not isinstance(balances, list) or len(balances) != 1
+                or not isinstance(balances[0], dict)
+                or not isinstance(balances[0].get("details"), list)):
             raise ReconciliationError("Account balance response is missing its details array")
-        details = {row.get("ccy"): row for row in balances[0]["details"] if isinstance(row, dict)}
+        details = {}
         borrowings_present = False
         for row in balances[0]["details"]:
-            if not isinstance(row, dict) or "liab" not in row:
-                raise ReconciliationError("Account balance liability is missing")
+            if not isinstance(row, dict):
+                raise ReconciliationError("Account balance row is malformed")
+            ccy = row.get("ccy")
+            if not isinstance(ccy, str) or not _CCY_PATTERN.fullmatch(ccy):
+                raise ReconciliationError("Account balance row has a non-canonical currency")
+            if ccy in details:
+                raise ReconciliationError("Account balance response has duplicate currencies")
+            for field in ("availBal", "frozenBal", "liab"):
+                if field not in row:
+                    raise ReconciliationError(f"Account balance {field} is missing")
+            _decimal(row["availBal"], f"{ccy} availBal")
+            _decimal(row["frozenBal"], f"{ccy} frozenBal")
             if _liability(row["liab"], "liab") > 0:
                 borrowings_present = True
+            details[ccy] = row
         base_row, quote_row = details.get(base, {}), details.get(quote, {})
-        # An absent currency means zero, but malformed present values fail closed.
+        # An absent currency means zero only after the whole snapshot has
+        # validated; present rows must carry parseable required amounts.
         return SpotAccountSnapshot(
             instrument=instrument, base_currency=base,
-            available_base=_decimal(base_row.get("availBal", "0"), "base availBal"),
-            frozen_base=_decimal(base_row.get("frozenBal", "0"), "base frozenBal"),
-            available_quote=_decimal(quote_row.get("availBal", "0"), "quote availBal"),
-            frozen_quote=_decimal(quote_row.get("frozenBal", "0"), "quote frozenBal"),
+            available_base=_decimal(base_row["availBal"], "base availBal") if base_row else Decimal("0"),
+            frozen_base=_decimal(base_row["frozenBal"], "base frozenBal") if base_row else Decimal("0"),
+            available_quote=_decimal(quote_row["availBal"], "quote availBal") if quote_row else Decimal("0"),
+            frozen_quote=_decimal(quote_row["frozenBal"], "quote frozenBal") if quote_row else Decimal("0"),
             open_orders=tuple(x for x in orders if x.get("instId") == instrument),
             open_algo_orders=tuple(x for x in algos if x.get("instId") == instrument),
             borrowings_present=borrowings_present,

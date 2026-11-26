@@ -128,6 +128,38 @@ def test_finalize_keeps_lock_when_exchange_reports_residual_or_open_order(tmp_pa
     assert store.get_position_lock()["owner_client_order_id"] == "NBENTRY1"
 
 
+def test_finalize_keeps_lock_when_balance_snapshot_is_invalid(tmp_path):
+    class InvalidSnapshotClient:
+        def get_balance(self):
+            return [{"details":[{"ccy":"BTC","availBal":False,"frozenBal":"0","liab":"0"},
+                                {"ccy":"USDT","availBal":"99","frozenBal":"0","liab":"0"}]}]
+        def get_pending_orders(self, inst_type="SPOT"): return []
+        def get_pending_algo_orders(self, ord_type="oco"): return []
+    store = seed(tmp_path)
+    store.save_exit_child_orders("NBENTRY1", "BTC-USDT", ["200"])
+    store.update_exit_child_order("NBENTRY1", "200", {"sz":"0.009", "accFillSz":"0.009", "avgPx":"110", "state":"filled"})
+    manager = DemoProtectionManager(InvalidSnapshotClient(), store)
+    with pytest.raises(ProtectionManagerError, match="position lock remains held"):
+        manager.finalize_position_if_flat("NBENTRY1", accounting={"accounting_complete":True,"is_flat_by_fill_ledger":True})
+    assert store.get_position_lock()["owner_client_order_id"] == "NBENTRY1"
+
+
+def test_finalize_keeps_lock_when_currency_code_is_not_canonical(tmp_path):
+    class NoncanonicalClient:
+        def get_balance(self):
+            return [{"details":[{"ccy":"btc","availBal":"0.5","frozenBal":"0","liab":"0"},
+                                {"ccy":"USDT","availBal":"99","frozenBal":"0","liab":"0"}]}]
+        def get_pending_orders(self, inst_type="SPOT"): return []
+        def get_pending_algo_orders(self, ord_type="oco"): return []
+    store = seed(tmp_path)
+    store.save_exit_child_orders("NBENTRY1", "BTC-USDT", ["200"])
+    store.update_exit_child_order("NBENTRY1", "200", {"sz":"0.009", "accFillSz":"0.009", "avgPx":"110", "state":"filled"})
+    manager = DemoProtectionManager(NoncanonicalClient(), store)
+    with pytest.raises(ProtectionManagerError, match="position lock remains held"):
+        manager.finalize_position_if_flat("NBENTRY1", accounting={"accounting_complete":True,"is_flat_by_fill_ledger":True})
+    assert store.get_position_lock()["owner_client_order_id"] == "NBENTRY1"
+
+
 def test_reconcile_triggered_algo_discovers_child_order_ids(tmp_path):
     class Client:
         def get_algo_order(self, algo_client_order_id):
