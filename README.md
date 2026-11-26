@@ -2,8 +2,8 @@
 
 ## v0.16.16 patch note
 
-- Added the Fase 0A research event foundation (`nebula.research_events`): canonical JSON, allowlist event schemas, Ed25519 scheduler heartbeat signing, atomic anti-replay sequence store, best-effort bounded exporter (flag off by default), and sealed-config loading/merging. Research-only; no trading path changes.
 - Fixed the forward-test workflow install block indentation so both hash-locked `pip install` commands sit inside the YAML `run: |` block, and added a repo-hygiene regression test for VM workflow install indentation. Preflight public output now drops the whole risk `candidate` object and any `size` field, with regression tests proving the position-size value is absent from serialized output.
+- Added the Fase 0A research event foundation (`nebula.research_events`): canonical JSON, allowlist event schemas, Ed25519 scheduler heartbeat signing, atomic anti-replay sequence store, best-effort bounded exporter (flag off by default), and sealed-config loading/merging. Research-only; no trading path changes.
 
 ## v0.16.15 patch note
 
