@@ -1,19 +1,31 @@
 """Fase 1 offline fixture harness (spec v1.1).
 
-Research-only module. It verifies fixture provenance against a trusted
-catalog, freezes experiment protocols, and gates promotion decisions on
-prospective-sample sufficiency plus PBO/DSR validity. It never reads
-trading state, never touches the network, and has no path to order
-placement. Demo data is rejected until the Deployment Security Gate
-passes; verification failure never falls back to acceptance.
+Research-only module. It verifies fixture provenance against a pinned
+trusted catalog and the actual dataset bytes, freezes experiment
+protocols immutably, and gates promotion on prospective-sample
+sufficiency plus bound PBO/DSR artifacts. It never reads trading state,
+never touches the network, and has no path to order placement. Demo
+data is rejected until the Deployment Security Gate passes; every
+verification failure fails closed.
 """
 
 from __future__ import annotations
 
+import hashlib
+import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Mapping, Optional, Sequence
 
-from nebula.research_registry import StatResult, canonical_json, cscv_pbo, deflated_sharpe_ratio, sha256_hex
+from nebula.research_registry import (
+    StatResult,
+    canonical_json,
+    cscv_pbo,
+    deflated_sharpe_ratio,
+    pearson_correlation,
+    sha256_hex,
+)
 
 ALLOWED_HYPOTHESIS_FAMILIES = frozenset(
     {"regime_filter", "ema_atr_plateau", "volatility_position_scale"}
@@ -33,6 +45,35 @@ class CatalogEntry:
     seed: Optional[int] = None
 
 
+def catalog_digest(entries: Mapping[str, CatalogEntry]) -> str:
+    """Canonical digest of a catalog, used as its trust-anchor pin."""
+    payload = {
+        source_id: {
+            "kind": entry.kind,
+            "sha256": entry.sha256,
+            "generator": entry.generator,
+            "generator_version": entry.generator_version,
+            "seed": entry.seed,
+        }
+        for source_id, entry in sorted(entries.items())
+    }
+    return sha256_hex(canonical_json(payload))
+
+
+@dataclass(frozen=True)
+class TrustedCatalog:
+    """Catalog plus the separately pinned digest that authenticates it."""
+
+    entries: Mapping[str, CatalogEntry]
+    trusted_sha256: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "entries", MappingProxyType(dict(self.entries)))
+
+    def authenticated(self) -> bool:
+        return catalog_digest(self.entries) == self.trusted_sha256
+
+
 @dataclass(frozen=True)
 class FixtureManifest:
     dataset_id: str
@@ -49,26 +90,31 @@ class FixtureDecision:
 
 def verify_fixture(
     manifest: FixtureManifest,
-    catalog: Mapping[str, CatalogEntry],
+    dataset: bytes,
+    catalog: TrustedCatalog,
     *,
     deployment_gate_passed: bool = False,
 ) -> FixtureDecision:
-    """Accept a fixture only when its provenance verifies against the catalog.
+    """Accept a fixture only when provenance verifies end to end.
 
-    The manifest hash proves integrity, not origin: the source must exist
-    in the trusted catalog, the declared kind must match the catalog kind,
-    and the hash must match the catalog hash. Synthetic fixtures also
-    require verifiable generator metadata in the catalog entry.
+    The catalog must match its pinned digest, the manifest hash must
+    match the actual dataset bytes, and the source, kind, and hash must
+    match the authenticated catalog entry. Synthetic fixtures also
+    require verifiable generator metadata.
     """
     reasons: list[str] = []
+    if not catalog.authenticated():
+        reasons.append("fixture catalog is not authenticated")
     if not manifest.sha256:
         reasons.append("manifest hash missing")
+    elif hashlib.sha256(dataset).hexdigest() != manifest.sha256:
+        reasons.append("dataset bytes do not match manifest hash")
     if manifest.kind not in FIXTURE_KINDS:
         if not deployment_gate_passed:
             reasons.append("non-fixture data rejected before deployment gate passes")
         else:
             reasons.append("fixture kind must be public or synthetic")
-    entry = catalog.get(manifest.source_id)
+    entry = catalog.entries.get(manifest.source_id)
     if entry is None:
         reasons.append("source not in trusted fixture catalog")
     else:
@@ -96,6 +142,14 @@ class Protocol:
     prospective_min_duration_days: int
     prospective_min_completeness: float
     preregistered_exclusions: frozenset = frozenset()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "dataset_hashes", MappingProxyType(dict(self.dataset_hashes))
+        )
+        object.__setattr__(
+            self, "preregistered_exclusions", frozenset(self.preregistered_exclusions)
+        )
 
     def canonical(self) -> str:
         return canonical_json(
@@ -126,6 +180,9 @@ class FrozenProtocol:
                 "protocol changed after freeze; a new trial group is required"
             )
 
+    def verify(self) -> bool:
+        return sha256_hex(self.protocol.canonical()) == self.sha256
+
 
 def freeze_protocol(protocol: Protocol) -> FrozenProtocol:
     if protocol.hypothesis_family not in ALLOWED_HYPOTHESIS_FAMILIES:
@@ -140,7 +197,13 @@ def freeze_protocol(protocol: Protocol) -> FrozenProtocol:
         not value for value in protocol.dataset_hashes.values()
     ):
         raise ValueError("dataset hashes are required before freeze")
+    _parse_timestamp(protocol.prospective_cutoff)
     return FrozenProtocol(protocol=protocol, sha256=sha256_hex(protocol.canonical()))
+
+
+def _parse_timestamp(value: str) -> datetime:
+    parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    return parsed.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -154,43 +217,110 @@ def evaluate_prospective(
     observations: int,
     duration_days: int,
     completeness: float,
+    first_observation_at: str,
 ) -> ProspectiveDecision:
     protocol = frozen.protocol
     reasons: list[str] = []
-    if observations < protocol.prospective_min_observations:
+    if not frozen.verify():
+        reasons.append("frozen protocol hash mismatch")
+    if not isinstance(observations, int) or isinstance(observations, bool) or observations < 0:
+        reasons.append("prospective observations malformed")
+    elif observations < protocol.prospective_min_observations:
         reasons.append("prospective observations below frozen minimum")
-    if duration_days < protocol.prospective_min_duration_days:
+    if not isinstance(duration_days, int) or isinstance(duration_days, bool) or duration_days < 0:
+        reasons.append("prospective duration malformed")
+    elif duration_days < protocol.prospective_min_duration_days:
         reasons.append("prospective duration below frozen minimum")
-    if completeness < protocol.prospective_min_completeness:
+    if (
+        not isinstance(completeness, (int, float))
+        or isinstance(completeness, bool)
+        or not math.isfinite(completeness)
+        or not 0.0 <= completeness <= 1.0
+    ):
+        reasons.append("prospective completeness malformed")
+    elif completeness < protocol.prospective_min_completeness:
         reasons.append("prospective completeness below frozen minimum")
+    try:
+        first = _parse_timestamp(first_observation_at)
+        if first < _parse_timestamp(protocol.prospective_cutoff):
+            reasons.append("prospective observation before frozen cutoff")
+    except (ValueError, TypeError):
+        reasons.append("prospective timestamp malformed")
     return ProspectiveDecision(eligible=not reasons, reasons=tuple(reasons))
 
 
 def evaluate_pbo_gate(
     combinations: Optional[Sequence[tuple[Sequence[Optional[float]], Sequence[Optional[float]]]]],
+    frozen: FrozenProtocol,
     *,
-    preregistered_exclusions: frozenset | set | tuple = (),
     post_performance_exclusions: frozenset | set | tuple = (),
 ) -> StatResult:
-    """PBO gate: post-performance exclusions and missing artifacts fail closed."""
+    """PBO gate: exclusions come only from the frozen protocol."""
+    if not frozen.verify():
+        return StatResult.inconclusive("frozen protocol hash mismatch")
     if post_performance_exclusions:
         return StatResult.inconclusive(
             "candidate excluded after performance was seen"
         )
     if not combinations:
         return StatResult.inconclusive("CSCV artifact missing")
-    return cscv_pbo(combinations, preregistered_exclusions=set(preregistered_exclusions))
+    return cscv_pbo(
+        combinations,
+        preregistered_exclusions=set(frozen.protocol.preregistered_exclusions),
+    )
+
+
+@dataclass(frozen=True)
+class DsrArtifacts:
+    """Hashes and counts binding a DSR claim to its trial data."""
+
+    trial_returns_sha256: str
+    correlation_sha256: str
+    sample_count: int
+    registry_trial_count: int
+
+
+def _trials_digest(trials: Sequence[Sequence[float]]) -> str:
+    return sha256_hex(canonical_json({"trials": [list(t) for t in trials]}))
+
+
+def _correlation_digest(trials: Sequence[Sequence[float]]) -> str:
+    matrix = [
+        [pearson_correlation(a, b) for b in trials] for a in trials
+    ]
+    return sha256_hex(canonical_json({"correlation": matrix}))
+
+
+def build_dsr_artifacts(
+    trials: Sequence[Sequence[float]], registry_trial_count: int
+) -> DsrArtifacts:
+    sample_count = len(trials[0]) if trials else 0
+    return DsrArtifacts(
+        trial_returns_sha256=_trials_digest(trials),
+        correlation_sha256=_correlation_digest(trials),
+        sample_count=sample_count,
+        registry_trial_count=registry_trial_count,
+    )
 
 
 def evaluate_dsr_gate(
     trials: Sequence[Sequence[float]],
     selected_index: int,
-    *,
-    artifacts_present: bool,
+    artifacts: DsrArtifacts,
 ) -> StatResult:
-    """DSR gate: missing statistical artifacts fail closed."""
-    if not artifacts_present:
+    """DSR gate: artifacts must bind to the actual trial returns."""
+    if not trials:
         return StatResult.inconclusive("DSR artifact missing")
+    if any(not math.isfinite(value) for trial in trials for value in trial):
+        return StatResult.inconclusive("non-finite trial return")
+    if artifacts.trial_returns_sha256 != _trials_digest(trials):
+        return StatResult.inconclusive("trial returns artifact mismatch")
+    if artifacts.correlation_sha256 != _correlation_digest(trials):
+        return StatResult.inconclusive("correlation artifact mismatch")
+    if artifacts.registry_trial_count != len(trials):
+        return StatResult.inconclusive("registry trial count mismatch")
+    if any(len(trial) != artifacts.sample_count for trial in trials):
+        return StatResult.inconclusive("sample count mismatch")
     return deflated_sharpe_ratio(trials, selected_index)
 
 
@@ -203,25 +333,42 @@ class PromotionDecision:
 def evaluate_promotion(
     *,
     frozen: FrozenProtocol,
+    protocol: Protocol,
+    registry_protocol_sha256: str,
     fixture_decision: FixtureDecision,
     prospective: ProspectiveDecision,
     pbo: StatResult,
     dsr: StatResult,
     snapshot_complete: bool,
     all_trials_recorded: bool,
+    cumulative_trials_reconstructed: bool,
+    walk_forward_plateau: bool,
+    stress_passed: bool,
 ) -> PromotionDecision:
-    """Promotion to Fase 2 design requires every gate to pass."""
+    """Promotion to Fase 2 design requires every spec gate to pass."""
     reasons: list[str] = []
+    try:
+        frozen.assert_unchanged(protocol)
+    except ValueError:
+        reasons.append("protocol changed after freeze")
+    if registry_protocol_sha256 != frozen.sha256:
+        reasons.append("registry protocol hash mismatch")
     if not fixture_decision.accepted:
         reasons.append("fixture provenance not verified")
     if not prospective.eligible:
         reasons.extend(prospective.reasons or ("prospective sample insufficient",))
-    if pbo.status != "ok":
+    if pbo.status != "ok" or pbo.value is None or not math.isfinite(pbo.value):
         reasons.append("PBO inconclusive")
-    if dsr.status != "ok":
+    if dsr.status != "ok" or dsr.value is None or not math.isfinite(dsr.value):
         reasons.append("DSR inconclusive")
     if not snapshot_complete:
         reasons.append("context snapshot incomplete")
     if not all_trials_recorded:
         reasons.append("not all trials recorded")
+    if not cumulative_trials_reconstructed:
+        reasons.append("cumulative trial count not reconstructed")
+    if not walk_forward_plateau:
+        reasons.append("walk-forward plateau not proven")
+    if not stress_passed:
+        reasons.append("fee/slippage stress not passed")
     return PromotionDecision(eligible=not reasons, reasons=tuple(reasons))

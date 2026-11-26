@@ -67,6 +67,8 @@ class StatResult:
 def sharpe_ratio(returns: Sequence[float]) -> StatResult:
     """Sharpe ratio with sample standard deviation (ddof=1)."""
     n = len(returns)
+    if any(not math.isfinite(r) for r in returns):
+        return StatResult.inconclusive("non-finite return")
     if n < 2:
         return StatResult.inconclusive("sharpe needs at least 2 returns")
     mean = sum(returns) / n
@@ -103,6 +105,8 @@ def pbo_from_ranks(ranks: Sequence[float], n_candidates: int) -> StatResult:
         return StatResult.inconclusive("PBO needs at least 1 combination")
     lambdas = []
     for rank in ranks:
+        if not math.isfinite(rank):
+            return StatResult.inconclusive("non-finite rank")
         if rank < 1 or rank > n_candidates:
             return StatResult.inconclusive("rank outside 1..N")
         omega = rank / (n_candidates + 1)
