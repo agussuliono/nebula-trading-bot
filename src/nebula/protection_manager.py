@@ -154,6 +154,16 @@ class DemoProtectionManager:
                     "Entry fills/fees could not be reconciled to net Spot inventory; OCO is blocked"
                 ) from exc
 
+        if not exchange_backed and snapshot.get("fee_currency") == entry["instrument"].split("-")[0]:
+            # Snapshot-only path: size protection from net inventory after
+            # the signed base-currency fee, matching the state boundary.
+            net_quantity = gross_filled_quantity + Decimal(str(snapshot["fee"]))
+            if not net_quantity.is_finite() or net_quantity <= 0:
+                raise ProtectionManagerError(
+                    "Net base inventory after snapshot fee is not positive; OCO is blocked"
+                )
+            filled = format(net_quantity, "f")
+
         if approved_plan is not None:
             try:
                 approved_size = Decimal(str(approved_plan["size"]))
