@@ -90,7 +90,8 @@ def _ledger_completeness(state: StateStore, entry_id: str,
         if order_id:
             known_orders.add(order_id)
         if snapshot is None:
-            if str(intent.get("status") or "") in TERMINAL_ENTRY_STATUSES:
+            status = str(intent.get("status") or "")
+            if status in TERMINAL_ENTRY_STATUSES and status != "rejected":
                 complete = False
             continue
         cumulative = _strict_decimal(snapshot.get("cumulative_fill_size"))
@@ -210,13 +211,15 @@ def observe_episode(state: StateStore, episode: dict[str, Any],
     except AccountingError:
         accounting = None
     lock = state.get_position_lock()
-    lock_released = lock is None or lock.get("owner_client_order_id") != entry_id
+    lock_not_owned = lock is None or lock.get("owner_client_order_id") != entry_id
+    lock_released = lock_not_owned and state.has_lock_release_evidence(entry_id)
     flat = bool(accounting and accounting["is_flat_by_fill_ledger"])
 
     incomplete = (
         fills_error or not fills_valid or not ledger_complete
         or accounting is None
         or bool(accounting and accounting["unsupported_fee_currencies"])
+        or (lock_not_owned and not lock_released)
     )
     if not incomplete and sell_fills and not flat and entry_status in TERMINAL_ENTRY_STATUSES:
         incomplete = True
@@ -251,8 +254,12 @@ def observe_episode(state: StateStore, episode: dict[str, Any],
         exported_ids = []
         for event in state.list_outcome_events(episode["trade_episode_id"], unexported_only=True):
             try:
-                StateStore.validate_outcome_payload(event["payload"])
-                if exporter.export(event["payload"]):
+                payload = StateStore.validate_outcome_payload(event["payload"])
+                if (payload["outcome_event_id"] != event["outcome_event_id"]
+                        or payload["trade_episode_id"] != event["trade_episode_id"]
+                        or payload["event_type"] != event["event_type"]):
+                    continue
+                if exporter.export(payload):
                     exported_ids.append(event["outcome_event_id"])
             except Exception:
                 continue
@@ -260,11 +267,15 @@ def observe_episode(state: StateStore, episode: dict[str, Any],
     return recorded
 
 
-def observe_all(state: StateStore, exporter: Any | None = None) -> list[dict[str, Any]]:
+def observe_all(state: StateStore, exporter: Any | None = None) -> dict[str, Any]:
+    """Observe every episode and always report legacy positions without one."""
     recorded: list[dict[str, Any]] = []
     for episode in state.list_trade_episodes():
         recorded.extend(observe_episode(state, episode, exporter))
-    return recorded
+    return {
+        "recorded_events": recorded,
+        "legacy_episode_unavailable": legacy_episode_report(state),
+    }
 
 
 def legacy_episode_report(state: StateStore) -> list[dict[str, Any]]:

@@ -90,7 +90,7 @@ def test_full_lifecycle_reconstruction_and_idempotence(tmp_path):
     assert state.get_trade_episode("NBentry")["status"] == "accounting_finalized"
 
     reopened = StateStore(path)
-    assert observe_all(reopened) == []
+    assert observe_all(reopened) == {"recorded_events": [], "legacy_episode_unavailable": []}
     assert len(reopened.list_outcome_events(episode["trade_episode_id"])) == 7
 
 
@@ -243,3 +243,71 @@ def test_legacy_position_without_episode_is_reported(tmp_path):
         "reason": "legacy_episode_unavailable",
     }]
     assert state.get_trade_episode("NBlegacy") is None
+    result = observe_all(state)
+    assert result["recorded_events"] == []
+    assert [item["entry_client_order_id"] for item in result["legacy_episode_unavailable"]] == ["NBlegacy"]
+
+
+def _zero_fill_canceled(state):
+    episode = _open_episode(state)
+    state.save_order_snapshot("NBentry", {"ordId": "111", "state": "canceled", "sz": "2",
+                                          "accFillSz": "0", "avgPx": "0", "fee": "0", "feeCcy": "USDT"})
+    _advance(state, "NBentry", "canceled", "111")
+    return episode
+
+
+def test_missing_lock_without_release_evidence_is_not_final(tmp_path):
+    path = str(tmp_path / "state.sqlite3")
+    state = StateStore(path)
+    episode = _zero_fill_canceled(state)
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM position_lock WHERE singleton=1")
+    types = [event["event_type"] for event in observe_episode(state, episode)]
+    assert "reconciliation_incomplete" in types
+    assert "position_closed" not in types
+    assert "accounting_finalized" not in types
+
+
+def test_transferred_lock_without_release_evidence_is_not_final(tmp_path):
+    path = str(tmp_path / "state.sqlite3")
+    state = StateStore(path)
+    episode = _zero_fill_canceled(state)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE position_lock SET owner_client_order_id='NBother' WHERE singleton=1")
+    types = [event["event_type"] for event in observe_episode(state, episode)]
+    assert "reconciliation_incomplete" in types
+    assert "position_closed" not in types
+    assert "accounting_finalized" not in types
+
+
+def test_rejected_entry_lock_release_evidence_finalizes(tmp_path):
+    state = StateStore(str(tmp_path / "state.sqlite3"))
+    episode = _open_episode(state)
+    state.update_intent("NBentry", "submitting", "111")
+    state.update_intent("NBentry", "rejected", "111")
+    assert state.release_rejected_entry_lock("NBentry")
+    recorded = observe_episode(state, episode)
+    assert recorded[-1]["event_type"] == "accounting_finalized"
+    assert recorded[-1]["net_pnl_quote"] == "0"
+
+
+def test_export_rejects_row_identity_mismatch(tmp_path):
+    path = str(tmp_path / "state.sqlite3")
+    state = StateStore(path)
+    episode = _open_episode(state)
+    observe_episode(state, episode)
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "UPDATE outcome_events SET payload_json=replace(payload_json, ?, 'tampered-episode')",
+            (episode["trade_episode_id"],),
+        )
+    exported = []
+
+    class CollectingExporter:
+        def export(self, payload):
+            exported.append(payload)
+            return True
+
+    observe_episode(state, episode, CollectingExporter())
+    assert exported == []
+    assert len(state.list_outcome_events(episode["trade_episode_id"], unexported_only=True)) == 1

@@ -601,7 +601,23 @@ class StateStore:
                 if not cumulative.is_finite() or cumulative != 0:
                     return False
             cursor = db.execute("DELETE FROM position_lock WHERE singleton=1 AND owner_client_order_id=?", (client_order_id,))
+            if cursor.rowcount:
+                db.execute("INSERT INTO audit_events(event_type,client_order_id,details_json) VALUES(?,?,?)",
+                           ("rejected_entry_lock_released", client_order_id,
+                            json.dumps({"intent_status": intent["status"]}, sort_keys=True)))
             return cursor.rowcount == 1
+
+    def has_lock_release_evidence(self, entry_client_order_id: str) -> bool:
+        """True only when a sanctioned release path recorded its evidence."""
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT 1 FROM audit_events WHERE client_order_id=?
+                   AND event_type IN ('position_lock_released',
+                                      'zero_fill_entry_lock_released',
+                                      'rejected_entry_lock_released') LIMIT 1""",
+                (entry_client_order_id,),
+            ).fetchone()
+            return row is not None
 
     def release_position_lock_after_flat_check(self, *, position_client_order_id: str,
                                                base_balance: str, dust_limit: str,
