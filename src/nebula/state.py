@@ -460,9 +460,65 @@ class StateStore:
                     (status, trade_episode_id),
                 )
 
+    OUTCOME_PAYLOAD_FIELDS = {
+        "outcome_event_id", "trade_episode_id", "signal_key", "instrument",
+        "event_type", "event_time_utc", "side", "fill_price", "fill_size",
+        "fee", "fee_currency", "protection_status", "exit_reason",
+        "observed_slippage_bps", "net_pnl_quote",
+    }
+    OUTCOME_EVENT_TYPES = {
+        "entry_intent_created", "entry_filled", "entry_remainder_cancelled",
+        "entry_not_filled", "protection_activated", "exit_partial_filled",
+        "exit_filled", "reconciliation_incomplete", "position_closed",
+        "accounting_finalized",
+    }
+
+    @classmethod
+    def validate_outcome_payload(cls, payload: Any) -> dict[str, Any]:
+        """Reject any outcome payload outside the Fase 0C export allowlist."""
+        if not isinstance(payload, dict):
+            raise ValueError("Outcome payload must be an object")
+        unknown = set(payload) - cls.OUTCOME_PAYLOAD_FIELDS
+        if unknown:
+            raise ValueError(f"Outcome payload has non-allowlisted fields: {sorted(unknown)}")
+        for field in ("outcome_event_id", "trade_episode_id", "instrument", "event_type"):
+            if not isinstance(payload.get(field), str) or not payload[field]:
+                raise ValueError(f"Outcome payload field {field} must be a non-empty string")
+        if payload["event_type"] not in cls.OUTCOME_EVENT_TYPES:
+            raise ValueError("Outcome payload event_type is not recognized")
+        if any(not isinstance(value, str) for value in payload.values()):
+            raise ValueError("Outcome payload values must all be strings")
+        if "net_pnl_quote" in payload and payload["event_type"] != "accounting_finalized":
+            raise ValueError("net_pnl_quote is only allowed on accounting_finalized")
+        return payload
+
+    def list_position_intents(self, entry_client_order_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM intents WHERE client_order_id=? OR position_client_order_id=? ORDER BY created_at,client_order_id",
+                (entry_client_order_id, entry_client_order_id),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_entry_intents_without_episode(self) -> list[dict[str, Any]]:
+        """Buy intents with no trade episode (legacy or bypass-created)."""
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT i.* FROM intents i
+                   LEFT JOIN trade_episodes e ON e.entry_client_order_id=i.client_order_id
+                   WHERE i.side='buy' AND e.trade_episode_id IS NULL
+                   ORDER BY i.created_at,i.client_order_id"""
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def record_outcome_event(self, outcome_event_id: str, trade_episode_id: str,
                              event_type: str, payload: dict[str, Any]) -> bool:
         """Idempotently persist one outcome event; True when newly recorded."""
+        self.validate_outcome_payload(payload)
+        if (payload["outcome_event_id"] != outcome_event_id
+                or payload["trade_episode_id"] != trade_episode_id
+                or payload["event_type"] != event_type):
+            raise ValueError("Outcome payload identity does not match its record keys")
         with self._connect() as db:
             cursor = db.execute(
                 "INSERT OR IGNORE INTO outcome_events(outcome_event_id,trade_episode_id,event_type,payload_json) VALUES(?,?,?,?)",

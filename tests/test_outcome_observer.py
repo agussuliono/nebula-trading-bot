@@ -1,6 +1,10 @@
 """Fase 0C outcome observer tests."""
 
-from nebula.outcome_observer import observe_all, observe_episode
+import sqlite3
+
+import pytest
+
+from nebula.outcome_observer import legacy_episode_report, observe_all, observe_episode
 from nebula.state import StateStore
 
 RISK_PLAN = {
@@ -129,3 +133,113 @@ def test_export_failure_never_changes_trading_state(tmp_path):
     assert [event["event_type"] for event in recorded] == ["entry_intent_created"]
     assert state.get_position_lock()["owner_client_order_id"] == "NBentry"
     assert len(state.list_outcome_events(episode["trade_episode_id"], unexported_only=True)) == 1
+
+
+def test_snapshot_positive_without_fills_is_not_final(tmp_path):
+    state = StateStore(str(tmp_path / "state.sqlite3"))
+    episode = _open_episode(state)
+    state.save_order_snapshot("NBentry", {"ordId": "111", "state": "canceled", "sz": "2",
+                                          "accFillSz": "1", "avgPx": "100", "fee": "-0.1", "feeCcy": "USDT"})
+    _advance(state, "NBentry", "canceled", "111")
+    assert state.release_position_lock_after_flat_check(
+        position_client_order_id="NBentry", base_balance="0", dust_limit="0",
+        open_orders_checked=True)
+    types = [event["event_type"] for event in observe_episode(state, episode)]
+    assert "reconciliation_incomplete" in types
+    assert "entry_not_filled" not in types
+    assert "position_closed" not in types
+    assert "accounting_finalized" not in types
+
+
+def test_missing_snapshot_terminal_entry_is_not_final(tmp_path):
+    state = StateStore(str(tmp_path / "state.sqlite3"))
+    episode = _open_episode(state)
+    _advance(state, "NBentry", "canceled", "111")
+    types = [event["event_type"] for event in observe_episode(state, episode)]
+    assert "reconciliation_incomplete" in types
+    assert "position_closed" not in types
+    assert "accounting_finalized" not in types
+
+
+def test_corrupt_fill_value_is_not_final(tmp_path):
+    path = str(tmp_path / "state.sqlite3")
+    state = StateStore(path)
+    episode = _open_episode(state)
+    state.save_order_snapshot("NBentry", {"ordId": "111", "state": "filled", "sz": "2",
+                                          "accFillSz": "2", "avgPx": "100", "fee": "-0.1", "feeCcy": "USDT"})
+    _advance(state, "NBentry", "filled", "111")
+    assert state.save_fill(_fill("111", "1", "buy", "2", "100", "NBentry"))
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE fills SET fill_size='corrupt'")
+    types = [event["event_type"] for event in observe_episode(state, episode)]
+    assert "reconciliation_incomplete" in types
+    assert "position_closed" not in types
+    assert "accounting_finalized" not in types
+
+
+def test_base_fee_exit_classified_by_net_inventory(tmp_path):
+    state = StateStore(str(tmp_path / "state.sqlite3"))
+    episode = _open_episode(state)
+    state.save_order_snapshot("NBentry", {"ordId": "111", "state": "filled", "sz": "1",
+                                          "accFillSz": "1", "avgPx": "100", "fee": "-0.01", "feeCcy": "BTC"})
+    _advance(state, "NBentry", "filled", "111")
+    buy = _fill("111", "1", "buy", "1", "100", "NBentry")
+    buy["fee"], buy["feeCcy"] = "-0.01", "BTC"
+    assert state.save_fill(buy)
+    state.reserve_exit_intent("NBexit", "BTC-USDT", 2, "sell", "NBentry")
+    state.save_order_snapshot("NBexit", {"ordId": "222", "state": "filled", "sz": "0.99",
+                                         "accFillSz": "0.99", "avgPx": "110", "fee": "-0.001", "feeCcy": "USDT"})
+    _advance(state, "NBexit", "filled", "222")
+    sell = _fill("222", "2", "sell", "0.99", "110", "NBexit")
+    sell["fee"] = "-0.001"
+    assert state.save_fill(sell)
+    assert state.release_position_lock_after_flat_check(
+        position_client_order_id="NBentry", base_balance="0", dust_limit="0",
+        open_orders_checked=True)
+    recorded = observe_episode(state, episode)
+    types = [event["event_type"] for event in recorded]
+    assert "exit_filled" in types
+    assert "exit_partial_filled" not in types
+    assert recorded[-1]["event_type"] == "accounting_finalized"
+    assert all(event["fee_currency"] in {"BTC", "USDT"}
+               for event in recorded if event["event_type"].endswith("_filled"))
+
+
+def test_protection_transition_payload_distinguishes_status(tmp_path):
+    state = StateStore(str(tmp_path / "state.sqlite3"))
+    episode = _open_episode(state)
+    state.reserve_protection_intent(entry_client_order_id="NBentry", instrument="BTC-USDT",
+                                    algo_client_order_id="NBalgo", filled_size="2",
+                                    take_profit="130", stop_loss="90")
+    state.update_protection_intent("NBentry", "active", "999")
+    first = observe_episode(state, episode)
+    state.update_protection_intent("NBentry", "triggered", "999")
+    second = observe_episode(state, episode)
+    assert [e["protection_status"] for e in first if e["event_type"] == "protection_activated"] == ["active"]
+    assert [e["protection_status"] for e in second if e["event_type"] == "protection_activated"] == ["triggered"]
+
+
+def test_record_outcome_event_rejects_non_allowlisted_payload(tmp_path):
+    state = StateStore(str(tmp_path / "state.sqlite3"))
+    episode = _open_episode(state)
+    payload = {
+        "outcome_event_id": "x", "trade_episode_id": episode["trade_episode_id"],
+        "instrument": "BTC-USDT", "event_type": "entry_filled",
+        "exchange_order_id": "111",
+    }
+    with pytest.raises(ValueError):
+        state.record_outcome_event("x", episode["trade_episode_id"], "entry_filled", payload)
+
+
+def test_legacy_position_without_episode_is_reported(tmp_path):
+    state = StateStore(str(tmp_path / "state.sqlite3"))
+    assert state.reserve_intent("NBlegacy", "BTC-USDT", 1, "buy")
+    report = legacy_episode_report(state)
+    assert report == [{
+        "entry_client_order_id": "NBlegacy",
+        "instrument": "BTC-USDT",
+        "status": "reserved",
+        "holds_position_lock": False,
+        "reason": "legacy_episode_unavailable",
+    }]
+    assert state.get_trade_episode("NBlegacy") is None
