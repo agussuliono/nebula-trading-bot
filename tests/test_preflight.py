@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from nebula.config import Settings
 from nebula.entry_plan import EntryPlanPolicy
-from nebula.preflight import run_read_only_preflight
+from nebula.preflight import _redact_financials, run_read_only_preflight
 from nebula.state import StateStore
 
 
@@ -194,10 +194,55 @@ def test_preflight_orchestrator_approves_candidate_without_exchange_writes(
     for financial_field in (
         "account_equity_usdt", "available_usdt",
         "projected_daily_pnl_after_planned_stop_quote",
+        "candidate_entry_plan", "entry_price", "stop_loss",
+        "take_profit", "notional_quote",
     ):
         assert financial_field not in serialized
     assert not hasattr(client, "place_spot_limit")
     assert not hasattr(client, "place_spot_oco_exit")
+
+
+def test_redaction_removes_nested_sensitive_fields_but_keeps_status():
+    report = {
+        "status": "approved",
+        "selected_instrument": "AAA-USDT",
+        "risk_preflight": {
+            "execution": "not_submitted_preflight_only",
+            "account_equity_usdt": "1000",
+            "available_usdt": "900",
+            "projected_daily_pnl_after_planned_stop_quote": "-10",
+            "authorization": {
+                "planned_entry": {"entry_price": "100", "size": "0.1"},
+                "balance_details": [{"ccy": "USDT", "availBal": "900", "liab": "0"}],
+                "position_size": "0.1",
+                "notional_quote": "10",
+            },
+        },
+        "market_analysis": {
+            "signals": [{
+                "instrument": "AAA-USDT",
+                "candidate_entry_plan": {"entry_price": "100", "stop_loss": "90"},
+                "account_id": "demo-account",
+                "uid": "demo-uid",
+                "api_key": "must-not-leak",
+            }],
+        },
+    }
+
+    redacted = _redact_financials(report)
+    serialized = str(redacted)
+
+    assert redacted["status"] == "approved"
+    assert redacted["selected_instrument"] == "AAA-USDT"
+    assert redacted["risk_preflight"]["execution"] == "not_submitted_preflight_only"
+    for sensitive in (
+        "account_equity_usdt", "available_usdt", "projected_daily_pnl",
+        "planned_entry", "candidate_entry_plan", "entry_price", "stop_loss",
+        "balance_details", "availBal", "liab", "position_size",
+        "notional_quote", "account_id", "uid", "api_key", "must-not-leak",
+        "1000", "900",
+    ):
+        assert sensitive not in serialized
 
 
 

@@ -9,6 +9,7 @@ _FINANCIAL_FIELDS = {
     "available_usdt",
     "projected_daily_pnl_after_planned_stop_quote",
     "planned_entry",
+    "candidate_entry_plan",
     "entry_price",
     "size",
     "stop_loss",
@@ -19,14 +20,47 @@ _FINANCIAL_FIELDS = {
     "daily_pnl_quote",
 }
 
+_SENSITIVE_KEY_PARTS = (
+    "equity",
+    "balance",
+    "availbal",
+    "available",
+    "frozen",
+    "liab",
+    "borrow",
+    "pnl",
+    "profit",
+    "notional",
+    "entry_price",
+    "stop_loss",
+    "take_profit",
+    "risk_to_stop",
+    "planned_entry",
+    "candidate_entry_plan",
+    "position_size",
+    "api_key",
+    "secret",
+    "passphrase",
+    "token",
+    "uid",
+    "account_id",
+)
+
+
+def _is_sensitive_key(key) -> bool:
+    normalized = str(key).strip().lower()
+    if normalized in _FINANCIAL_FIELDS:
+        return True
+    return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
+
 
 def _redact_financials(value):
-    """Drop account-financial fields so preflight output is safe for public logs."""
+    """Drop account-financial and credential-adjacent fields for public logs."""
     if isinstance(value, dict):
         return {
             key: _redact_financials(item)
             for key, item in value.items()
-            if key not in _FINANCIAL_FIELDS
+            if not _is_sensitive_key(key)
         }
     if isinstance(value, list):
         return [_redact_financials(item) for item in value]

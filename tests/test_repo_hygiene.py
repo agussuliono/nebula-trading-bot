@@ -38,6 +38,22 @@ def test_readme_test_status_section_matches_current_version():
     assert f"## Test status for v{package_version}" in readme
 
 
+def test_build_and_runtime_dependencies_are_hash_locked():
+    with open(REPO_ROOT / "pyproject.toml", "rb") as handle:
+        build_requires = tomllib.load(handle)["build-system"]["requires"]
+
+    assert build_requires == ["setuptools==84.2.1", "wheel==0.48.0"]
+
+    build_lock = (REPO_ROOT / "requirements-build.lock").read_text(encoding="utf-8")
+    for package in ("setuptools==84.2.1", "wheel==0.48.0", "packaging==26.4"):
+        assert package in build_lock
+    assert "--hash=sha256:" in build_lock
+
+    runtime_lock = (REPO_ROOT / "requirements.lock").read_text(encoding="utf-8")
+    assert "requests==2.34.2" in runtime_lock
+    assert "--hash=sha256:" in runtime_lock
+
+
 def test_gitignore_covers_build_artifacts():
     ignored = {
         line.strip()
