@@ -859,6 +859,81 @@ def test_manual_reconciliation_attributes_legacy_sell_to_owner(tmp_path):
         assert state._net_inventory(db, "NBentryB", "BTC-USDT") == Decimal("0.6")
 
 
+def _legacy_sell_with_fill(state, *, fill_order_id="333", side="sell", fill_time="2000",
+                           entry_fill_time="1000"):
+    _filled_entry_named(state, "NBentryA", "111", "1", fill_time=entry_fill_time)
+    assert state.reserve_intent("NBlegacy", "BTC-USDT", 5, "sell")
+    state.update_intent("NBlegacy", "submitting", "333")
+    state.update_intent("NBlegacy", "acknowledged", "333")
+    state.update_intent("NBlegacy", "filled", "333")
+    state.save_fill({"instId": "BTC-USDT", "ordId": fill_order_id, "tradeId": "9333",
+                     "side": side, "fillSz": "0.4", "fillPx": "110",
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBlegacy",
+                     "fillTime": fill_time})
+
+
+def _assert_legacy_sell_unlinked(state):
+    with state._connect() as db:
+        row = db.execute("SELECT position_client_order_id FROM intents"
+                         " WHERE client_order_id='NBlegacy'").fetchone()
+        assert row["position_client_order_id"] is None
+        events = db.execute("SELECT COUNT(*) FROM audit_events"
+                            " WHERE event_type='legacy_sell_reconciled'").fetchone()[0]
+        assert events == 0
+        with pytest.raises(ValueError, match="legacy sell"):
+            state._net_inventory(db, "NBentryA", "BTC-USDT")
+
+
+def test_manual_reconciliation_rejects_fill_with_wrong_exchange_order_id(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _legacy_sell_with_fill(state, fill_order_id="999")
+    with pytest.raises(ValueError, match="exchange order ID|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_rejects_fill_with_wrong_side(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _legacy_sell_with_fill(state, side="buy")
+    with pytest.raises(ValueError, match="sell fill|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_rejects_malformed_fill_timestamp(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _legacy_sell_with_fill(state, fill_time="not-a-time")
+    with pytest.raises(ValueError, match="timestamp|fill time|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_compares_fill_timestamps_numerically(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _legacy_sell_with_fill(state, entry_fill_time="999", fill_time="1000")
+    state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    with state._connect() as db:
+        assert state._net_inventory(db, "NBentryA", "BTC-USDT") == Decimal("0.6")
+        events = db.execute("SELECT details_json FROM audit_events"
+                            " WHERE event_type='legacy_sell_reconciled'").fetchall()
+        assert len(events) == 1
+        assert '"evidence": "333"' in events[0]["details_json"]
+
+
+def test_manual_reconciliation_rejects_owner_superseded_by_later_position(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _legacy_sell_with_fill(state, entry_fill_time="1000", fill_time="2000")
+    with state._connect() as db:
+        db.execute("DELETE FROM position_lock")
+    _filled_entry_named(state, "NBentryB", "222", "0.6", fill_time="1500")
+    with pytest.raises(ValueError, match="intervenes|ambiguous|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    state.reconcile_legacy_sell("NBlegacy", "NBentryB", "333")
+    with state._connect() as db:
+        assert state._net_inventory(db, "NBentryA", "BTC-USDT") == Decimal("1")
+        assert state._net_inventory(db, "NBentryB", "BTC-USDT") == Decimal("0.2")
+
+
 def test_rebate_rebuild_preserves_proven_values_and_integrity(tmp_path):
     import sqlite3
     path = tmp_path / "premigrated-data.db"

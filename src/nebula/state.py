@@ -1549,32 +1549,91 @@ class StateStore:
                     "Legacy reconciliation evidence must be the sell exchange order ID"
                 )
             position = db.execute(
-                "SELECT instrument,side FROM intents WHERE client_order_id=?",
+                "SELECT instrument,side,exchange_order_id FROM intents WHERE client_order_id=?",
                 (position_client_order_id,),
             ).fetchone()
             if position is None or position["side"] != "buy":
                 raise ValueError("Legacy sell owner must be an existing Spot buy position")
             if position["instrument"] != sell["instrument"]:
                 raise ValueError("Legacy sell instrument does not match the owning position")
-            sell_fills = db.execute(
-                "SELECT fill_size,fill_time FROM fills WHERE instrument=?"
-                " AND (client_order_id=? OR exchange_order_id=?) ORDER BY fill_time",
-                (sell["instrument"], sell_client_order_id, str(sell["exchange_order_id"])),
-            ).fetchall()
-            if not sell_fills or any(not row["fill_time"] for row in sell_fills):
-                raise ValueError("Legacy sell ownership cannot be proven without timed fills")
-            position_fills = db.execute(
-                "SELECT fill_size,fill_time FROM fills WHERE instrument=?"
-                " AND side='buy' AND client_order_id=? ORDER BY fill_time",
+            if not position["exchange_order_id"]:
+                raise ValueError(
+                    "Legacy sell ownership cannot be proven without a position exchange order ID"
+                )
+
+            def parse_fill_time_ms(value: Any) -> int:
+                text = str(value or "").strip()
+                if text.isdigit():
+                    return int(text)
+                try:
+                    from datetime import datetime
+
+                    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise ValueError("Legacy sell ownership cannot be proven from a malformed fill timestamp") from exc
+                if parsed.tzinfo is None:
+                    raise ValueError("Legacy sell ownership cannot be proven from a malformed fill timestamp")
+                return int(parsed.timestamp() * 1000)
+
+            def validated_fills(client_order_id: str, exchange_order_id: str, side: str):
+                rows = db.execute(
+                    "SELECT side,client_order_id,exchange_order_id,fill_size,fill_time"
+                    " FROM fills WHERE instrument=?"
+                    " AND (client_order_id=? OR exchange_order_id=?)",
+                    (sell["instrument"], client_order_id, exchange_order_id),
+                ).fetchall()
+                if not rows:
+                    raise ValueError("Legacy sell ownership cannot be proven without timed fills")
+                total = Decimal("0")
+                times: list[int] = []
+                for row in rows:
+                    if row["side"] != side:
+                        raise ValueError(
+                            f"Legacy sell ownership cannot be proven from a non-{side} fill"
+                        )
+                    if str(row["exchange_order_id"]) != exchange_order_id:
+                        raise ValueError(
+                            "Legacy sell fill exchange order ID does not match the reconciled order"
+                        )
+                    fill_client = str(row["client_order_id"] or "")
+                    if fill_client not in {"", client_order_id}:
+                        raise ValueError(
+                            "Legacy sell fill client order ID does not match the reconciled order"
+                        )
+                    try:
+                        size = Decimal(str(row["fill_size"]))
+                    except (InvalidOperation, TypeError, ValueError) as exc:
+                        raise ValueError("Legacy sell ownership cannot be proven from an invalid fill size") from exc
+                    if not size.is_finite() or size <= 0:
+                        raise ValueError("Legacy sell ownership cannot be proven from an invalid fill size")
+                    total += size
+                    times.append(parse_fill_time_ms(row["fill_time"]))
+                return total, min(times), len(rows)
+
+            sell_total, first_sell_fill_ms, sell_fill_count = validated_fills(
+                sell_client_order_id, str(sell["exchange_order_id"]), "sell")
+            position_total, first_position_fill_ms, position_fill_count = validated_fills(
+                position_client_order_id, str(position["exchange_order_id"]), "buy")
+            if first_sell_fill_ms < first_position_fill_ms:
+                raise ValueError("Legacy sell predates the candidate owning position")
+            other_position_rows = db.execute(
+                "SELECT i.client_order_id,f.fill_time FROM intents i"
+                " JOIN fills f ON f.instrument=i.instrument"
+                " AND f.client_order_id=i.client_order_id"
+                " AND f.exchange_order_id=i.exchange_order_id AND f.side='buy'"
+                " WHERE i.instrument=? AND i.side='buy' AND i.client_order_id<>?",
                 (sell["instrument"], position_client_order_id),
             ).fetchall()
-            if not position_fills or any(not row["fill_time"] for row in position_fills):
-                raise ValueError("Legacy sell ownership cannot be proven without timed position fills")
-            if str(sell_fills[0]["fill_time"]) < str(position_fills[0]["fill_time"]):
-                raise ValueError("Legacy sell predates the candidate owning position")
-            sell_total = sum((Decimal(str(row["fill_size"])) for row in sell_fills), Decimal("0"))
-            position_total = sum(
-                (Decimal(str(row["fill_size"])) for row in position_fills), Decimal("0"))
+            other_first_fills: dict[str, int] = {}
+            for row in other_position_rows:
+                other_id = str(row["client_order_id"])
+                fill_ms = parse_fill_time_ms(row["fill_time"])
+                other_first_fills[other_id] = min(fill_ms, other_first_fills.get(other_id, fill_ms))
+            if any(first_position_fill_ms <= other_ms <= first_sell_fill_ms
+                   for other_ms in other_first_fills.values()):
+                raise ValueError(
+                    "Legacy sell ownership is ambiguous because another buy position intervenes"
+                )
             if sell_total > position_total:
                 raise ValueError("Legacy sell exceeds the candidate owning position fills")
             db.execute(
@@ -1586,7 +1645,12 @@ class StateStore:
                 ("legacy_sell_reconciled", sell_client_order_id,
                  json.dumps({"position_client_order_id": position_client_order_id,
                              "instrument": sell["instrument"],
-                             "evidence": evidence.strip()}, sort_keys=True)),
+                             "evidence": evidence,
+                             "sell_fill_count": sell_fill_count,
+                             "position_fill_count": position_fill_count,
+                             "first_sell_fill_time_ms": first_sell_fill_ms,
+                             "first_position_fill_time_ms": first_position_fill_ms},
+                            sort_keys=True)),
             )
             row = db.execute("SELECT * FROM intents WHERE client_order_id=?",
                              (sell_client_order_id,)).fetchone()
