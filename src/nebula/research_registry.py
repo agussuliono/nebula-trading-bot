@@ -412,13 +412,28 @@ class ResearchRegistry:
     def __init__(self, db_path: str) -> None:
         self._conn = sqlite3.connect(db_path, isolation_level=None)
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA recursive_triggers = ON")
         self._create_schema()
 
     def close(self) -> None:
         self._conn.close()
 
+    _PRIMARY_KEYS = {
+        "research_events": "event_id",
+        "import_rejections": "id",
+        "experiments": "experiment_id",
+        "experiment_trials": "trial_id",
+        "experiment_status_events": "id",
+        "validation_runs": "run_id",
+        "holdout_access_events": "id",
+        "research_checkpoints": "checkpoint_id",
+        "import_files": "file_id",
+        "cycle_completeness": "id",
+    }
+
     def _create_schema(self) -> None:
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         for table in EVIDENCE_TABLES:
             self._conn.execute(
                 f"CREATE TRIGGER IF NOT EXISTS {table}_no_update "
@@ -429,6 +444,34 @@ class ResearchRegistry:
                 f"CREATE TRIGGER IF NOT EXISTS {table}_no_delete "
                 f"BEFORE DELETE ON {table} BEGIN "
                 f"SELECT RAISE(ABORT, 'evidence table is append-only'); END"
+            )
+            pk = self._PRIMARY_KEYS[table]
+            self._conn.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {table}_no_replace "
+                f"BEFORE INSERT ON {table} "
+                f"WHEN NEW.{pk} IS NOT NULL AND EXISTS "
+                f"(SELECT 1 FROM {table} WHERE {pk} = NEW.{pk}) "
+                f"BEGIN SELECT RAISE(ABORT, 'evidence table is append-only'); END"
+            )
+
+    def _migrate(self) -> None:
+        trial_cols = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(experiment_trials)")
+        }
+        if "origin" not in trial_cols:
+            self._conn.execute(
+                "ALTER TABLE experiment_trials ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
+            )
+        checkpoint_cols = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(research_checkpoints)")
+        }
+        if "evidence_digest" not in checkpoint_cols:
+            self._conn.execute(
+                "ALTER TABLE research_checkpoints ADD COLUMN evidence_digest TEXT NOT NULL DEFAULT ''"
+            )
+        if "signature" not in checkpoint_cols:
+            self._conn.execute(
+                "ALTER TABLE research_checkpoints ADD COLUMN signature TEXT NOT NULL DEFAULT ''"
             )
         self._conn.execute(
             "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
@@ -511,14 +554,37 @@ class ResearchRegistry:
 
     # -- checkpoints ------------------------------------------------------
 
-    def create_checkpoint(self, signature_reference: str) -> dict[str, Any]:
+    def _evidence_digest(self) -> str:
+        """Digest over every evidence table so checkpoints cover the registry."""
+        digest = hashlib.sha256()
+        for table in EVIDENCE_TABLES:
+            if table == "research_checkpoints":
+                continue
+            digest.update(table.encode("utf-8"))
+            for row in self._conn.execute(f"SELECT * FROM {table} ORDER BY rowid"):
+                digest.update(canonical_json({"row": [str(v) for v in row]}).encode("utf-8"))
+        return digest.hexdigest()
+
+    def create_checkpoint(
+        self, signature_reference: str, signature: str = ""
+    ) -> dict[str, Any]:
         head, count = self._chain_head()
-        checkpoint_id = sha256_hex(f"{head}:{count}:{_utc_now()}")
+        evidence_digest = self._evidence_digest()
+        checkpoint_id = sha256_hex(f"{head}:{count}:{evidence_digest}:{_utc_now()}")
         self._conn.execute(
             "INSERT INTO research_checkpoints "
-            "(checkpoint_id, chain_head, event_count, schema_version, signature_reference, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (checkpoint_id, head, count, self.SCHEMA_VERSION, signature_reference, _utc_now()),
+            "(checkpoint_id, chain_head, event_count, schema_version, signature_reference, "
+            "evidence_digest, signature, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                checkpoint_id,
+                head,
+                count,
+                self.SCHEMA_VERSION,
+                signature_reference,
+                evidence_digest,
+                signature,
+                _utc_now(),
+            ),
         )
         return {
             "checkpoint_id": checkpoint_id,
@@ -526,15 +592,43 @@ class ResearchRegistry:
             "event_count": count,
             "schema_version": self.SCHEMA_VERSION,
             "signature_reference": signature_reference,
+            "evidence_digest": evidence_digest,
+            "signature": signature,
         }
 
-    def verify_checkpoint(self, checkpoint: Mapping[str, Any]) -> bool:
+    def verify_checkpoint(
+        self,
+        checkpoint: Mapping[str, Any],
+        signature_verifier: Optional[Any] = None,
+    ) -> bool:
+        stored = self._conn.execute(
+            "SELECT chain_head, event_count, schema_version, signature_reference, "
+            "evidence_digest, signature FROM research_checkpoints WHERE checkpoint_id = ?",
+            (checkpoint.get("checkpoint_id"),),
+        ).fetchone()
+        if stored is None:
+            return False
+        expected = {
+            "chain_head": stored[0],
+            "event_count": stored[1],
+            "schema_version": stored[2],
+            "signature_reference": stored[3],
+            "evidence_digest": stored[4],
+            "signature": stored[5],
+        }
+        if any(checkpoint.get(key) != value for key, value in expected.items()):
+            return False
         head, count = self._chain_head()
-        return (
-            checkpoint.get("chain_head") == head
-            and checkpoint.get("event_count") == count
-            and self.verify_chain()
-        )
+        if head != expected["chain_head"] or count != expected["event_count"]:
+            return False
+        if self._evidence_digest() != expected["evidence_digest"]:
+            return False
+        if expected["signature"]:
+            if signature_verifier is None:
+                return False
+            if not signature_verifier(checkpoint, expected["signature"]):
+                return False
+        return self.verify_chain()
 
     # -- experiments and trials ------------------------------------------
 
@@ -562,6 +656,8 @@ class ResearchRegistry:
             ),
         )
 
+    TRIAL_ORIGINS = ("manual", "ai", "automated")
+
     def record_trial(
         self,
         trial_id: str,
@@ -570,13 +666,16 @@ class ResearchRegistry:
         status: str,
         parameters: Mapping[str, Any],
         metrics: Mapping[str, Any],
+        origin: str = "manual",
     ) -> None:
         if status not in TRIAL_STATUSES:
             raise RegistryError(f"unknown trial status: {status}")
+        if origin not in self.TRIAL_ORIGINS:
+            raise RegistryError(f"unknown trial origin: {origin}")
         self._conn.execute(
             "INSERT INTO experiment_trials "
-            "(trial_id, experiment_id, trial_group, status, parameters_json, metrics_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(trial_id, experiment_id, trial_group, status, parameters_json, metrics_json, "
+            "origin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 trial_id,
                 experiment_id,
@@ -584,6 +683,7 @@ class ResearchRegistry:
                 status,
                 canonical_json(parameters),
                 canonical_json(metrics),
+                origin,
                 _utc_now(),
             ),
         )
@@ -625,7 +725,19 @@ class ResearchRegistry:
         status = "ok"
         if method in ("pbo", "dsr"):
             missing = [f for f in STAT_ARTIFACT_FIELDS if artifacts.get(f) in (None, "")]
-            if missing:
+            hash_fields = [f for f in STAT_ARTIFACT_FIELDS if f.endswith("_sha256")]
+            bad_hash = [
+                f
+                for f in hash_fields
+                if not (
+                    isinstance(artifacts.get(f), str)
+                    and len(artifacts[f]) == 64
+                    and all(c in "0123456789abcdef" for c in artifacts[f])
+                )
+            ]
+            sample_count = artifacts.get("sample_count")
+            bad_count = not (isinstance(sample_count, int) and sample_count > 0)
+            if missing or bad_hash or bad_count:
                 status = "inconclusive"
         self._conn.execute(
             "INSERT INTO validation_runs "
@@ -644,6 +756,28 @@ class ResearchRegistry:
         return status
 
     # -- holdout -----------------------------------------------------------
+
+    def request_holdout_access(
+        self,
+        dataset_id: str,
+        experiment_id: str,
+        protocol_sha256: str,
+        protocol_frozen: bool,
+    ) -> bool:
+        """Access gate: holdout reads require a frozen protocol."""
+        granted = bool(protocol_frozen)
+        self.record_holdout_access(dataset_id, experiment_id, granted, protocol_sha256)
+        return granted
+
+    def holdout_read_allowed(
+        self, dataset_id: str, experiment_id: str, protocol_sha256: str
+    ) -> bool:
+        row = self._conn.execute(
+            "SELECT result FROM holdout_access_events WHERE dataset_id = ? "
+            "AND experiment_id = ? AND protocol_sha256 = ? ORDER BY id DESC LIMIT 1",
+            (dataset_id, experiment_id, protocol_sha256),
+        ).fetchone()
+        return row is not None and row[0] in ("granted", "contaminated")
 
     def record_holdout_access(
         self,
