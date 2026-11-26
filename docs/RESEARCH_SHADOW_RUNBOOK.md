@@ -78,7 +78,14 @@ A shadow run is complete only when all of the following hold:
   report; two consecutive missing cycles stop the shadow run.
 - Exporter failures are counted and reported; they must never change trading
   behaviour. Any evidence that export failure altered a decision stops the
-  run immediately.
+  run immediately. A single exporter failure marks the run incomplete: the
+  affected sequence range is recorded as a gap, and the run must not be
+  reported as complete. Two consecutive exporter failures, or any exporter
+  failure whose cause cannot be identified, stop the run and are recorded
+  as an integrity incident. The run may resume only after the exporter is
+  verified healthy, the gap range is recorded, and the recovery decision is
+  noted in the shadow report; results from an incomplete run must not be
+  promoted as complete evidence.
 - Importer rejections above zero are listed individually; a rejection caused
   by payload conflict is treated as an integrity incident, not noise.
 - Registry checkpoint mismatch stops the run and blocks further imports
@@ -95,7 +102,11 @@ A shadow run is complete only when all of the following hold:
   repair by rewriting history; recovery uses the last verified checkpoint
   and re-import of archived exports.
 - **Config or attestation mismatch:** stop the run; do not promote any
-  result produced under a mismatched effective config.
+  result produced under a mismatched effective config. Preserve the
+  mismatched config and attestation evidence unchanged, escalate the
+  mismatch to Gan as an integrity incident, and record the recovery
+  decision before any further run. No shadow run may continue or restart
+  until the effective config is re-verified against the attestation.
 
 ## Shadow report template
 
@@ -122,8 +133,9 @@ Conclusion: shadow only — no trading impact, no Demo data
 
 Stop the shadow run and escalate to Gan on any of: checkpoint mismatch,
 payload-conflict rejection, evidence of trading-behaviour change, discovery
-of private data in research outputs, or two consecutive missing heartbeat
-cycles.
+of private data in research outputs, two consecutive missing heartbeat
+cycles, two consecutive exporter failures or an exporter failure with an
+unidentified cause, or a config/attestation mismatch.
 
 Starting a shadow run with the exporter enabled, opening per-trade outcomes
 beyond aggregates, and any use of Demo data each require Gan's explicit
