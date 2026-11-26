@@ -3,6 +3,7 @@
 ## v0.16.16 patch note
 
 - Fixed the forward-test workflow install block indentation so both hash-locked `pip install` commands sit inside the YAML `run: |` block, and added a repo-hygiene regression test for VM workflow install indentation. Preflight public output now drops the whole risk `candidate` object and any `size` field, with regression tests proving the position-size value is absent from serialized output.
+- Added the Fase 0A research event foundation (`nebula.research_events`): canonical JSON, allowlist event schemas, Ed25519 scheduler heartbeat signing, atomic anti-replay sequence store, best-effort bounded exporter (flag off by default), and sealed-config loading/merging. Research-only; no trading path changes.
 
 ## v0.16.15 patch note
 
@@ -196,7 +197,7 @@ The ranking score is a deterministic implementation choice, not a proven predict
 
 ## Test status for v0.16.16
 
-- 636 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
+- 648 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
 - Tests cover fee/slippage impact, next-open execution, same-bar stop priority, risk sizing, daily-loss/drawdown halts, chronological single-asset and portfolio walk-forward splits, multi-asset deterministic selection, global one-position enforcement, synchronized timestamps, portfolio cost-stress scenarios, CSV validation and public history-candle request construction.
 - Tests use local synthetic data and mocked HTTP; they do not establish OKX connectivity or exchange execution behavior.
 - No API credentials were used and no Demo or live orders were sent.
@@ -322,6 +323,3 @@ nebula diagnose-portfolio \
 
 See `docs/STRATEGY_DIAGNOSTICS.md` for metric definitions, regime labeling, benchmark assumptions, and the untouched-holdout safeguard. This command is offline/read-only and submits no orders.
 
-## Fase 0A research event foundation
-
-- Added the Fase 0A research event foundation (`nebula.research_events`): canonical JSON, allowlist event schemas, Ed25519 scheduler heartbeat signing, atomic anti-replay sequence store, best-effort bounded exporter (flag off by default), and sealed-config loading/merging. Research-only; no trading path changes.
