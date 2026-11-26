@@ -1663,10 +1663,12 @@ class StateStore:
                     sell_orders.append(
                         (str(row["client_order_id"]), str(row["exchange_order_id"])))
                 for row in db.execute(
-                    "SELECT exchange_order_id FROM exit_child_orders"
+                    "SELECT exchange_order_id,instrument FROM exit_child_orders"
                     " WHERE entry_client_order_id=?",
                     (other_id,),
                 ).fetchall():
+                    if row["instrument"] != sell["instrument"]:
+                        return False
                     sell_orders.append(("", str(row["exchange_order_id"])))
                 for sell_client, sell_exchange in sell_orders:
                     for row in db.execute(

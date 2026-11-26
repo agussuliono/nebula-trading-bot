@@ -1109,6 +1109,79 @@ def test_manual_reconciliation_rejects_child_closure_after_candidate(tmp_path):
     _assert_legacy_sell_unlinked(state)
 
 
+def test_manual_reconciliation_rejects_child_with_wrong_instrument(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _earlier_position_with_child(state)
+    with state._connect() as db:
+        db.execute("UPDATE exit_child_orders SET instrument='ETH-USDT'")
+    with pytest.raises(ValueError, match="not proven closed|ambiguous|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_rejects_unregistered_child_closure(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry_named(state, "NBentryB", "222", "0.6", fill_time="500")
+    state.save_fill({"instId": "BTC-USDT", "ordId": "555", "tradeId": "9555",
+                     "side": "sell", "fillSz": "0.6", "fillPx": "110",
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "",
+                     "fillTime": "700"})
+    with state._connect() as db:
+        db.execute("DELETE FROM position_lock")
+    _legacy_sell_with_fill(state, entry_fill_time="1000", fill_time="2000")
+    with pytest.raises(ValueError, match="not proven closed|ambiguous|ownership|legacy sell"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_rejects_same_buy_sell_timestamp_closure(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry_named(state, "NBentryB", "222", "0.6", fill_time="700")
+    assert state.reserve_exit_intent("NBexitB", "BTC-USDT", 5, "sell", "NBentryB", size="0.6")
+    state.update_intent("NBexitB", "submitting", "444")
+    state.update_intent("NBexitB", "acknowledged", "444")
+    state.update_intent("NBexitB", "filled", "444")
+    state.save_fill({"instId": "BTC-USDT", "ordId": "444", "tradeId": "9444",
+                     "side": "sell", "fillSz": "0.6", "fillPx": "110",
+                     "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBexitB",
+                     "fillTime": "700"})
+    with state._connect() as db:
+        db.execute("DELETE FROM position_lock")
+    _legacy_sell_with_fill(state, entry_fill_time="1000", fill_time="2000")
+    with pytest.raises(ValueError, match="not proven closed|ambiguous|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
+def test_manual_reconciliation_accepts_staged_partial_sell_closure(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry_named(state, "NBentryB", "222", "0.6", fill_time="500")
+    assert state.reserve_exit_intent("NBexitB", "BTC-USDT", 5, "sell", "NBentryB", size="0.6")
+    state.update_intent("NBexitB", "submitting", "444")
+    state.update_intent("NBexitB", "acknowledged", "444")
+    state.update_intent("NBexitB", "filled", "444")
+    for trade_id, fill_time in (("9444", "600"), ("9445", "700")):
+        state.save_fill({"instId": "BTC-USDT", "ordId": "444", "tradeId": trade_id,
+                         "side": "sell", "fillSz": "0.3", "fillPx": "110",
+                         "fee": "-0.1", "feeCcy": "USDT", "clOrdId": "NBexitB",
+                         "fillTime": fill_time})
+    with state._connect() as db:
+        db.execute("DELETE FROM position_lock")
+    _legacy_sell_with_fill(state, entry_fill_time="1000", fill_time="2000")
+    state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+
+
+def test_manual_reconciliation_rejects_naive_buy_timestamp_closure(tmp_path):
+    state = StateStore(str(tmp_path / "state.db"))
+    _filled_entry_named(state, "NBentryB", "222", "0.6", fill_time="2026-11-26T00:00:00")
+    with state._connect() as db:
+        db.execute("DELETE FROM position_lock")
+    _legacy_sell_with_fill(state, entry_fill_time="1000", fill_time="2000")
+    with pytest.raises(ValueError, match="timestamp|ambiguous|ownership"):
+        state.reconcile_legacy_sell("NBlegacy", "NBentryA", "333")
+    _assert_legacy_sell_unlinked(state)
+
+
 def test_rebate_rebuild_preserves_proven_values_and_integrity(tmp_path):
     import sqlite3
     path = tmp_path / "premigrated-data.db"
