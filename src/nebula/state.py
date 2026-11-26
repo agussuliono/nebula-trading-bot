@@ -162,8 +162,8 @@ class StateStore:
                 average_fill_price TEXT NOT NULL,
                 fee TEXT NOT NULL,
                 fee_currency TEXT NOT NULL,
-                rebate TEXT NOT NULL DEFAULT '0',
-                rebate_currency TEXT NOT NULL DEFAULT '',
+                rebate TEXT,
+                rebate_currency TEXT,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )""")
             db.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -295,8 +295,8 @@ class StateStore:
                         )""")
                         db.execute("INSERT OR IGNORE INTO nebula_schema_meta(key,value) VALUES('initialized','1')")
             for table, column, ddl in (
-                ("order_snapshots", "rebate", "ALTER TABLE order_snapshots ADD COLUMN rebate TEXT NOT NULL DEFAULT '0'"),
-                ("order_snapshots", "rebate_currency", "ALTER TABLE order_snapshots ADD COLUMN rebate_currency TEXT NOT NULL DEFAULT ''"),
+                ("order_snapshots", "rebate", "ALTER TABLE order_snapshots ADD COLUMN rebate TEXT"),
+                ("order_snapshots", "rebate_currency", "ALTER TABLE order_snapshots ADD COLUMN rebate_currency TEXT"),
                 ("fills", "rebate", "ALTER TABLE fills ADD COLUMN rebate TEXT NOT NULL DEFAULT '0'"),
                 ("fills", "rebate_currency", "ALTER TABLE fills ADD COLUMN rebate_currency TEXT NOT NULL DEFAULT ''"),
                 ("exit_child_orders", "fee", "ALTER TABLE exit_child_orders ADD COLUMN fee TEXT"),
@@ -463,7 +463,9 @@ class StateStore:
             return Decimal(str(fee)) if fee_currency == base_ccy else Decimal("0")
 
         def base_rebate(rebate, rebate_currency):
-            return Decimal(str(rebate)) if rebate_currency == base_ccy else Decimal("0")
+            if rebate is None or rebate_currency != base_ccy:
+                return Decimal("0")
+            return Decimal(str(rebate))
 
         orders = []  # (side, client_order_id or None, exchange_order_id or None, child_cumulative or None)
         entry = db.execute(
@@ -479,8 +481,9 @@ class StateStore:
         orders.append(("buy", position_client_order_id, entry["exchange_order_id"], None, entry_status))
         for row in db.execute(
             "SELECT client_order_id,exchange_order_id,status FROM intents"
-            " WHERE position_client_order_id=? AND side='sell'",
-            (position_client_order_id,),
+            " WHERE side='sell' AND (position_client_order_id=?"
+            " OR (position_client_order_id IS NULL AND instrument=?))",
+            (position_client_order_id, instrument),
         ).fetchall():
             orders.append(("sell", row["client_order_id"], row["exchange_order_id"], None, row["status"]))
         for row in db.execute(
@@ -512,6 +515,7 @@ class StateStore:
             )
             snapshot_cumulative = None
             snapshot_fee = Decimal("0")
+            snapshot_fee_complete = True
             if client_order_id is not None:
                 snapshot = db.execute(
                     "SELECT cumulative_fill_size,fee,fee_currency,rebate,rebate_currency"
@@ -520,6 +524,8 @@ class StateStore:
                 ).fetchone()
                 if snapshot is not None:
                     snapshot_cumulative = Decimal(str(snapshot["cumulative_fill_size"]))
+                    if snapshot["rebate"] is None:
+                        snapshot_fee_complete = False
                     snapshot_fee = (
                         signed_base_fee(snapshot["fee"], snapshot["fee_currency"])
                         + base_rebate(snapshot["rebate"], snapshot["rebate_currency"])
@@ -531,21 +537,31 @@ class StateStore:
                         " child order state is unknown"
                     )
                 snapshot_cumulative = Decimal(str(child_row["cumulative_fill_size"]))
-                if snapshot_cumulative > 0 and child_row["fee"] is None and fills_gross < snapshot_cumulative:
-                    raise ValueError(
-                        "Position inventory reconciliation is incomplete: an OCO"
-                        " child order fee is unknown"
-                    )
+                if child_row["fee"] is None or child_row["rebate"] is None:
+                    snapshot_fee_complete = False
                 if child_row["fee"] is not None:
                     snapshot_fee = (
                         signed_base_fee(child_row["fee"], child_row["fee_currency"])
                         + base_rebate(child_row["rebate"], child_row["rebate_currency"])
                     )
 
-            if snapshot_cumulative is not None and snapshot_cumulative >= fills_gross:
+            if snapshot_cumulative is not None and snapshot_cumulative > fills_gross:
+                if not snapshot_fee_complete:
+                    raise ValueError(
+                        "Position inventory reconciliation is incomplete: snapshot"
+                        " fee evidence is incomplete"
+                    )
+                gross, fee = snapshot_cumulative, snapshot_fee
+            elif (
+                snapshot_cumulative is not None
+                and snapshot_cumulative == fills_gross
+                and snapshot_fee_complete
+            ):
                 gross, fee = snapshot_cumulative, snapshot_fee
             elif fills:
                 gross, fee = fills_gross, fills_fee
+            elif snapshot_cumulative is not None:
+                gross, fee = snapshot_cumulative, snapshot_fee
             elif exchange_order_id or status not in ("reserved", "rejected"):
                 raise ValueError(
                     "Position inventory reconciliation is incomplete: a submitted"
@@ -1222,11 +1238,13 @@ class StateStore:
                     raise ValueError("Protection intent already exists with different parameters; reconcile before changing")
                 return dict(existing)
             unresolved_sell = db.execute(
-                "SELECT client_order_id FROM intents WHERE position_client_order_id=?"
-                " AND side='sell' AND status IN"
+                "SELECT client_order_id FROM intents WHERE side='sell'"
+                " AND (position_client_order_id=?"
+                " OR (position_client_order_id IS NULL AND instrument=?))"
+                " AND status IN"
                 " ('reserved','submitting','submission_unknown','acknowledged','live','partially_filled')"
                 " LIMIT 1",
-                (entry_client_order_id,),
+                (entry_client_order_id, instrument),
             ).fetchone()
             if unresolved_sell:
                 raise ValueError(
