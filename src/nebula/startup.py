@@ -3,9 +3,13 @@
 This module reconciles durable local intents against authenticated Demo reads.
 It never submits, cancels, replaces, or releases an exchange order/position lock.
 """
+import re
 import sqlite3
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+
+_CCY_PATTERN = re.compile(r"^[A-Z0-9]{2,15}$")
 
 
 class StartupRecoveryError(RuntimeError):
@@ -249,8 +253,10 @@ class StartupRecovery:
         holdings = []
         seen_currencies = set()
         for row in balances[0]["details"]:
-            if not isinstance(row, dict) or not row.get("ccy"):
+            if not isinstance(row, dict):
                 raise StartupRecoveryError("Account balance row is malformed")
+            if not isinstance(row.get("ccy"), str) or not _CCY_PATTERN.fullmatch(row["ccy"]):
+                raise StartupRecoveryError("Account balance row has a non-canonical currency")
             if row["ccy"] in seen_currencies:
                 raise StartupRecoveryError("Account balance response has duplicate currencies")
             seen_currencies.add(row["ccy"])
@@ -278,8 +284,10 @@ class StartupRecovery:
             raise StartupRecoveryError("Account balance snapshot is malformed")
         seen_currencies = set()
         for row in balances[0]["details"]:
-            if not isinstance(row, dict) or not row.get("ccy"):
+            if not isinstance(row, dict):
                 raise StartupRecoveryError("Account balance row is malformed")
+            if not isinstance(row.get("ccy"), str) or not _CCY_PATTERN.fullmatch(row["ccy"]):
+                raise StartupRecoveryError("Account balance row has a non-canonical currency")
             if row["ccy"] in seen_currencies:
                 raise StartupRecoveryError("Account balance response has duplicate currencies")
             seen_currencies.add(row["ccy"])
