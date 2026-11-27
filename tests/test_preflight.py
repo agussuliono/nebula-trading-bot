@@ -64,7 +64,7 @@ class ReadOnlySnapshotClient:
         self.calls.append("account_bills")
         from nebula.bill_reconciliation import _create_complete_account_bills_snapshot
         return _create_complete_account_bills_snapshot(
-            [], begin_ms=int(begin), end_ms=int(end),
+            [], begin_ms=int(begin) if begin is not None else int(end) - 7 * 86_400_000, end_ms=int(end),
             page_count=1, terminal_page_seen=True,
         )
 

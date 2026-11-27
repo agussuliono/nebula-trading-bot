@@ -1,5 +1,9 @@
 # NEBULA Trading Bot V1 — Demo-only foundation
 
+## v0.16.22 patch note
+
+- Daily-baseline bootstrap now requests the supported 7-day bills window without an explicit begin timestamp, so the client's own window floor no longer rejects the request before any bill is read. The clean-7-days requirement is unchanged. Forward test remains dormant; no orders were sent.
+
 ## v0.16.21 patch note
 
 - Portfolio snapshot freshness: balance and ticker timestamps stamped up to the fixed 5,000 ms future-skew tolerance are accepted as fresh; snapshots older than 30,000 ms remain rejected, and `max_snapshot_age_ms` can no longer be widened past 30,000 ms. Forward test remains dormant; no orders were sent.
@@ -70,7 +74,7 @@
 - Added regression tests for credential isolation/redaction, 403 non-JSON diagnostics, bounded retries, circuit-breaker recovery, and no retries for private reads/writes.
 - This patch does not resolve the previously observed HTTP 403 from the user's network. The rejecting layer is still unknown because the original response headers/body were not retained. No live or Demo account was accessed.
 
-**Version:** 0.16.21  
+**Version:** 0.16.22  
 **Status:** Public API diagnostics and bounded read resilience included. Strategy validation failed on the supplied historical sample; not ready for forward testing or autonomous trading.
 
 ## v0.16.5 patch note
@@ -216,9 +220,9 @@ nebula portfolio-backtest --asset BTC-USDT=btc.csv --asset ETH-USDT=eth.csv --st
 
 The ranking score is a deterministic implementation choice, not a proven predictive edge. All symbols must have the same timeframe, timestamps and timezone convention. This version still does not model cross-asset correlation, exchange lot/tick rounding, minimum notional, partial fills, market impact, or order-book depth.
 
-## Test status for v0.16.21
+## Test status for v0.16.22
 
-- 772 automated tests passed in the local build environment (2026-11-27, pytest 8.4.2, Python 3.12).
+- 773 automated tests passed in the local build environment (2026-11-27, pytest 8.4.2, Python 3.12).
 - Tests cover fee/slippage impact, next-open execution, same-bar stop priority, risk sizing, daily-loss/drawdown halts, chronological single-asset and portfolio walk-forward splits, multi-asset deterministic selection, global one-position enforcement, synchronized timestamps, portfolio cost-stress scenarios, CSV validation and public history-candle request construction.
 - Tests use local synthetic data and mocked HTTP; they do not establish OKX connectivity or exchange execution behavior.
 - No API credentials were used and no Demo or live orders were sent.
