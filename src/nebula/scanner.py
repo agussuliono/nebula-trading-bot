@@ -12,6 +12,10 @@ SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}-USDT$")
 # cannot be widened through environment or caller input.
 MAX_TICKER_FUTURE_SKEW_MS = 5_000
 
+# Hard ceiling for ticker age. Callers may request a stricter (smaller)
+# window but can never widen freshness beyond this bound.
+MAX_TICKER_AGE_MS = 30_000
+
 
 @dataclass(frozen=True)
 class MarketCandidate:
@@ -70,8 +74,8 @@ def build_candidates(instruments: list[dict], tickers: list[dict], *, now_ms: in
     if isinstance(now_ms, bool) or not isinstance(now_ms, int) or now_ms <= 0:
         raise ValueError("now_ms must be a positive integer")
     if (isinstance(max_ticker_age_ms, bool) or not isinstance(max_ticker_age_ms, int)
-            or max_ticker_age_ms <= 0):
-        raise ValueError("max_ticker_age_ms must be a positive integer")
+            or max_ticker_age_ms <= 0 or max_ticker_age_ms > MAX_TICKER_AGE_MS):
+        raise ValueError("max_ticker_age_ms must be a positive integer no greater than MAX_TICKER_AGE_MS")
     if not isinstance(instruments, list) or not isinstance(tickers, list):
         raise ValueError("instruments and tickers must be lists")
 

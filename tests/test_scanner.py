@@ -97,6 +97,17 @@ def test_build_candidates_future_skew_tolerance_is_bounded():
     assert build_candidates([instrument], [edge_stale], now_ms=now) == []
 
 
+def test_build_candidates_rejects_widened_ticker_age_window():
+    import pytest
+    now = 10_000_000_000
+    instrument = {"instId":"BTC-USDT", "instType":"SPOT", "state":"live",
+                  "quoteCcy":"USDT", "listTime":str(now - 90 * 86_400_000)}
+    ticker = {"instId":"BTC-USDT", "bidPx":"99", "askPx":"100",
+              "bidSz":"5", "askSz":"5", "volCcy24h":"1000000", "ts":str(now - 30_001)}
+    with pytest.raises(ValueError):
+        build_candidates([instrument], [ticker], now_ms=now, max_ticker_age_ms=31_000)
+
+
 def test_build_candidates_rejects_future_listing_and_nonfinite_market_fields():
     now = 10_000_000_000
     future_listing = {"instId":"BTC-USDT", "instType":"SPOT", "state":"live",
