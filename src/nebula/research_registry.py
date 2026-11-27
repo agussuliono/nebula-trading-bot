@@ -67,6 +67,8 @@ class StatResult:
 def sharpe_ratio(returns: Sequence[float]) -> StatResult:
     """Sharpe ratio with sample standard deviation (ddof=1)."""
     n = len(returns)
+    if any(not math.isfinite(r) for r in returns):
+        return StatResult.inconclusive("non-finite return")
     if n < 2:
         return StatResult.inconclusive("sharpe needs at least 2 returns")
     mean = sum(returns) / n
@@ -103,6 +105,8 @@ def pbo_from_ranks(ranks: Sequence[float], n_candidates: int) -> StatResult:
         return StatResult.inconclusive("PBO needs at least 1 combination")
     lambdas = []
     for rank in ranks:
+        if not math.isfinite(rank):
+            return StatResult.inconclusive("non-finite rank")
         if rank < 1 or rank > n_candidates:
             return StatResult.inconclusive("rank outside 1..N")
         omega = rank / (n_candidates + 1)
@@ -688,6 +692,133 @@ class ResearchRegistry:
                 _utc_now(),
             ),
         )
+
+    def protocol_frozen(self, experiment_id: str, protocol_sha256: str) -> bool:
+        """Public check: registry holds this exact protocol as frozen."""
+        return self._protocol_is_frozen(experiment_id, protocol_sha256)
+
+    def trial_ids(self, experiment_id: str) -> tuple[str, ...]:
+        rows = self._conn.execute(
+            "SELECT trial_id FROM experiment_trials WHERE experiment_id = ? "
+            "ORDER BY trial_id",
+            (experiment_id,),
+        ).fetchall()
+        return tuple(row[0] for row in rows)
+
+    def record_performance_seen(
+        self, experiment_id: str, candidate_id: str, actor: str
+    ) -> None:
+        """Append a timestamped event marking candidate performance as seen."""
+        payload = canonical_json({"candidate_id": candidate_id})
+        self._append_experiment_status(
+            experiment_id, "performance_seen", payload, actor
+        )
+
+    def record_candidate_exclusion(
+        self,
+        experiment_id: str,
+        candidate_id: str,
+        reason: str,
+        actor: str,
+    ) -> None:
+        """Append a timestamped exclusion event (chronology from event order)."""
+        payload = canonical_json(
+            {"candidate_id": candidate_id, "reason": reason}
+        )
+        self._append_experiment_status(
+            experiment_id, "candidate_excluded", payload, actor
+        )
+
+    def post_performance_exclusions(self, experiment_id: str) -> frozenset:
+        """Candidates excluded after their performance_seen event (row order)."""
+        rows = self._conn.execute(
+            "SELECT rowid, new_status, reason FROM experiment_status_events "
+            "WHERE experiment_id = ? AND new_status IN "
+            "('performance_seen', 'candidate_excluded') ORDER BY rowid",
+            (experiment_id,),
+        ).fetchall()
+        seen_at: dict[str, int] = {}
+        excluded: set[str] = set()
+        for rowid, status, reason in rows:
+            payload = json.loads(reason)
+            index = payload.get("candidate_id")
+            if not isinstance(index, str):
+                continue
+            if status == "performance_seen":
+                seen_at.setdefault(index, rowid)
+            elif index in seen_at and seen_at[index] < rowid:
+                excluded.add(index)
+        return frozenset(excluded)
+
+    def all_exclusions(self, experiment_id: str) -> frozenset:
+        """All candidate indexes with an exclusion event."""
+        rows = self._conn.execute(
+            "SELECT reason FROM experiment_status_events WHERE experiment_id = ? "
+            "AND new_status = 'candidate_excluded'",
+            (experiment_id,),
+        ).fetchall()
+        excluded = set()
+        for (reason,) in rows:
+            index = json.loads(reason).get("candidate_id")
+            if isinstance(index, str):
+                excluded.add(index)
+        return frozenset(excluded)
+
+    def exclusion_reasons(self, experiment_id: str) -> dict:
+        """Candidate index -> recorded exclusion reason."""
+        rows = self._conn.execute(
+            "SELECT reason FROM experiment_status_events WHERE experiment_id = ? "
+            "AND new_status = 'candidate_excluded' ORDER BY rowid",
+            (experiment_id,),
+        ).fetchall()
+        reasons = {}
+        for (reason,) in rows:
+            payload = json.loads(reason)
+            index = payload.get("candidate_id")
+            if isinstance(index, str):
+                reasons.setdefault(index, set()).add(payload.get("reason"))
+        return reasons
+
+    def trial_params(self, experiment_id: str, trial_group: str = "") -> dict:
+        """Stored parameters per completed trial_id in the trial group."""
+        rows = self._conn.execute(
+            "SELECT trial_id, parameters_json FROM experiment_trials "
+            "WHERE experiment_id = ? AND status = 'completed' AND trial_group = ?",
+            (experiment_id, trial_group),
+        ).fetchall()
+        return {trial_id: json.loads(params) for trial_id, params in rows}
+
+    def trial_returns(self, experiment_id: str) -> tuple[tuple[str, tuple[float, ...]], ...]:
+        """Stored per-trial returns; reading them records performance exposure."""
+        rows = self._conn.execute(
+            "SELECT trial_id, metrics_json FROM experiment_trials "
+            "WHERE experiment_id = ? ORDER BY trial_id",
+            (experiment_id,),
+        ).fetchall()
+        for trial_id, _ in rows:
+            self.record_performance_seen(experiment_id, trial_id, "registry-read")
+        result = []
+        for trial_id, metrics_json in rows:
+            returns = json.loads(metrics_json).get("returns")
+            if not isinstance(returns, list) or not returns:
+                raise RegistryError(f"trial {trial_id} has no stored returns")
+            result.append((trial_id, tuple(float(v) for v in returns)))
+        return tuple(result)
+
+    def latest_validation(self, experiment_id: str, method: str):
+        """Latest stored validation run for a method, or None."""
+        row = self._conn.execute(
+            "SELECT status, artifacts_json, result_json FROM validation_runs "
+            "WHERE experiment_id = ? AND method = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (experiment_id, method),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "status": row[0],
+            "artifacts": json.loads(row[1]),
+            "result": json.loads(row[2]),
+        }
 
     def trial_count(self, experiment_id: str) -> int:
         """Every recorded trial counts, including failed/aborted/invalid."""
