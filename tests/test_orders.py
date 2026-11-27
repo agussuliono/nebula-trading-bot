@@ -41,7 +41,7 @@ class FakeClient:
     def get_account_bills(self, *, begin=None, end=None, limit=100):
         from nebula.bill_reconciliation import _create_complete_account_bills_snapshot
         return _create_complete_account_bills_snapshot(
-            [], begin_ms=int(begin), end_ms=int(end),
+            [], begin_ms=int(begin) if begin is not None else int(end) - 7 * 86_400_000, end_ms=int(end),
             page_count=1, terminal_page_seen=True,
         )
 
@@ -425,7 +425,7 @@ def test_portfolio_authorizer_approves_only_closed_signal_and_risk_safe_plan(tmp
         def get_account_bills(self, *, begin=None, end=None, limit=100):
             from nebula.bill_reconciliation import _create_complete_account_bills_snapshot
             return _create_complete_account_bills_snapshot(
-                [], begin_ms=int(begin), end_ms=int(end),
+                [], begin_ms=int(begin) if begin is not None else int(end) - 7 * 86_400_000, end_ms=int(end),
                 page_count=1, terminal_page_seen=True,
             )
     authorizer = PortfolioRiskAuthorizer(

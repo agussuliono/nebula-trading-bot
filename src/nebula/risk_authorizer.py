@@ -180,9 +180,11 @@ class PortfolioRiskAuthorizer:
             # Bootstrap requires a clean account across the full 7-day bill
             # window, so a replaced state DB cannot silently reset history
             # while recent account activity exists.
-            opening_bills = self.client.get_account_bills(
-                begin=str(now_ms - 7 * 86_400_000), end=str(now_ms)
-            )
+            # Omit begin: the client derives the oldest supported timestamp
+            # from its own clock, which runs after this now_ms was captured.
+            # An explicit begin of now_ms - 7 days would always fall before
+            # that floor and fail closed before any bill is read.
+            opening_bills = self.client.get_account_bills(end=str(now_ms))
             ledger.save_bills(opening_bills)
             if opening_bills:
                 raise RiskAuthorizationError(

@@ -89,8 +89,10 @@ class SnapshotClient:
     def get_account_bills(self, *, begin=None, end=None, limit=100):
         self.read_calls.append("account_bills")
         from nebula.bill_reconciliation import _create_complete_account_bills_snapshot
+        end_ms = int(end)
+        begin_ms = int(begin) if begin is not None else end_ms - 7 * 86_400_000
         return _create_complete_account_bills_snapshot(
-            self.bills, begin_ms=int(begin), end_ms=int(end),
+            self.bills, begin_ms=begin_ms, end_ms=end_ms,
             page_count=1, terminal_page_seen=True,
         )
 
@@ -340,6 +342,29 @@ def test_daily_baseline_refuses_to_start_after_account_activity(tmp_path):
     assert result["status"] == "rejected"
     assert "baseline missing after account activity" in result["reason"].lower()
     assert client.read_calls.count("account_bills") == 1
+
+
+def test_daily_baseline_bootstrap_uses_supported_bills_window(tmp_path):
+    class WindowStrictClient(SnapshotClient):
+        def get_account_bills(self, *, begin=None, end=None, limit=100):
+            # Mirror the real client: its own clock runs after the
+            # authorizer captured now_ms, so an explicit begin of
+            # now_ms - 7 days is always older than the supported floor.
+            if begin is not None and int(begin) < NOW_MS - 7 * 86_400_000 + 1:
+                raise ValueError("Account bills window must be fully inside the last 7 days")
+            return super().get_account_bills(begin=begin, end=end, limit=limit)
+
+    client = WindowStrictClient(bills=[])
+    state = StateStore(str(tmp_path / "bootstrap-window.sqlite3"))
+    authorizer = PortfolioRiskAuthorizer(
+        client, state, read_only_settings(),
+        plan_provider=lambda **kwargs: pytest.fail("candidate plan should not be reached"),
+        clock_ms=lambda: NOW_MS,
+    )
+    result = CandidateRiskPreflight(authorizer, state).evaluate(candidate())
+    assert "failed closed" not in str(result).lower()
+    from nebula.account_ledger import AccountLedger
+    assert AccountLedger(state).get_daily_baseline(NOW_MS) is not None
 
 
 def test_non_spot_or_transfer_bill_blocks_authorization(tmp_path):
