@@ -1,5 +1,9 @@
 # NEBULA Trading Bot V1 — Demo-only foundation
 
+## v0.16.20 patch note
+
+- Scanner ticker freshness: `build_candidates` now accepts exchange timestamps stamped up to a fixed 5,000 ms ahead of the runtime clock (bounded clock-skew tolerance, not configurable); tickers older than 30,000 ms or further in the future remain rejected fail-closed. Forward test remains dormant; no orders were sent.
+
 ## v0.16.19 patch note
 
 - Phase 1 fixture harness: deterministic offline validation with registry-bound statistics and frozen-grid parameter plateau.
@@ -62,7 +66,7 @@
 - Added regression tests for credential isolation/redaction, 403 non-JSON diagnostics, bounded retries, circuit-breaker recovery, and no retries for private reads/writes.
 - This patch does not resolve the previously observed HTTP 403 from the user's network. The rejecting layer is still unknown because the original response headers/body were not retained. No live or Demo account was accessed.
 
-**Version:** 0.16.19  
+**Version:** 0.16.20  
 **Status:** Public API diagnostics and bounded read resilience included. Strategy validation failed on the supplied historical sample; not ready for forward testing or autonomous trading.
 
 ## v0.16.5 patch note
@@ -208,9 +212,9 @@ nebula portfolio-backtest --asset BTC-USDT=btc.csv --asset ETH-USDT=eth.csv --st
 
 The ranking score is a deterministic implementation choice, not a proven predictive edge. All symbols must have the same timeframe, timestamps and timezone convention. This version still does not model cross-asset correlation, exchange lot/tick rounding, minimum notional, partial fills, market impact, or order-book depth.
 
-## Test status for v0.16.19
+## Test status for v0.16.20
 
-- 766 automated tests passed in the local build environment (2026-11-26, pytest 8.4.2, Python 3.12).
+- 767 automated tests passed in the local build environment (2026-11-27, pytest 8.4.2, Python 3.12).
 - Tests cover fee/slippage impact, next-open execution, same-bar stop priority, risk sizing, daily-loss/drawdown halts, chronological single-asset and portfolio walk-forward splits, multi-asset deterministic selection, global one-position enforcement, synchronized timestamps, portfolio cost-stress scenarios, CSV validation and public history-candle request construction.
 - Tests use local synthetic data and mocked HTTP; they do not establish OKX connectivity or exchange execution behavior.
 - No API credentials were used and no Demo or live orders were sent.

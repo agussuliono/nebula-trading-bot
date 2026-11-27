@@ -7,6 +7,11 @@ import re
 
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}-USDT$")
 
+# Bounded tolerance for exchange timestamps stamped slightly ahead of the
+# runtime clock. Fixed by design: not configurable, so the freshness window
+# cannot be widened through environment or caller input.
+MAX_TICKER_FUTURE_SKEW_MS = 5_000
+
 
 @dataclass(frozen=True)
 class MarketCandidate:
@@ -109,7 +114,7 @@ def build_candidates(instruments: list[dict], tickers: list[dict], *, now_ms: in
                 continue
             if (min(bid, ask, quote_volume, bid_size, ask_size) <= 0 or ask < bid
                     or list_time <= 0 or list_time > now_ms
-                    or ticker_ts <= 0 or ticker_ts > now_ms
+                    or ticker_ts <= 0 or ticker_ts > now_ms + MAX_TICKER_FUTURE_SKEW_MS
                     or now_ms - ticker_ts > max_ticker_age_ms):
                 continue
             spread_pct = ((ask - bid) / ((ask + bid) / 2)) * 100.0
