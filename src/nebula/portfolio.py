@@ -2,6 +2,18 @@
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
+from .scanner import MAX_TICKER_AGE_MS, MAX_TICKER_FUTURE_SKEW_MS
+
+
+def _snapshot_fresh(now_ms: int, ts: int, max_age_ms: int) -> bool:
+    """Freshness window shared by every snapshot check.
+
+    Exchange timestamps may be stamped slightly ahead of the runtime clock;
+    the bounded future tolerance mirrors the scanner window. Anything older
+    than the age ceiling or further in the future is stale.
+    """
+    return ts <= now_ms + MAX_TICKER_FUTURE_SKEW_MS and now_ms - ts <= max_age_ms
+
 
 class PortfolioError(ValueError):
     pass
@@ -39,8 +51,8 @@ class PortfolioPolicy:
     balance_tolerance: Decimal = Decimal("0.00000001")
 
     def __post_init__(self):
-        if isinstance(self.max_snapshot_age_ms, bool) or not isinstance(self.max_snapshot_age_ms, int) or self.max_snapshot_age_ms <= 0:
-            raise ValueError("max_snapshot_age_ms must be a positive integer")
+        if isinstance(self.max_snapshot_age_ms, bool) or not isinstance(self.max_snapshot_age_ms, int) or self.max_snapshot_age_ms <= 0 or self.max_snapshot_age_ms > MAX_TICKER_AGE_MS:
+            raise ValueError("max_snapshot_age_ms must be a positive integer no greater than MAX_TICKER_AGE_MS")
         for name in ("fee_bps", "slippage_bps", "max_daily_loss_quote", "max_position_risk_quote", "max_position_notional_quote", "max_spread_pct", "balance_tolerance"):
             object.__setattr__(self, name, _d(getattr(self, name), name))
         if self.max_spread_pct <= 0:
@@ -184,7 +196,7 @@ class PortfolioRiskEngine:
             raise PortfolioError("Balance snapshot is missing or ambiguous")
         account = balance[0]
         balance_ts = _d(account.get("uTime"), "balance timestamp", allow_zero=False)
-        if now_ms < int(balance_ts) or now_ms - int(balance_ts) > self.policy.max_snapshot_age_ms:
+        if not _snapshot_fresh(now_ms, int(balance_ts), self.policy.max_snapshot_age_ms):
             blockers.append("stale_balance_snapshot")
         details = account.get("details")
         if not isinstance(details, list):
@@ -237,7 +249,7 @@ class PortfolioRiskEngine:
                 ask = _d(ticker.get("askPx"), f"{ccy} ask", allow_zero=False)
                 bid_size = _d(ticker.get("bidSz"), f"{ccy} bid size", allow_zero=False)
                 ts = int(_d(ticker.get("ts"), f"{ccy} ticker timestamp", allow_zero=False))
-                if ask < bid or now_ms < ts or now_ms - ts > self.policy.max_snapshot_age_ms:
+                if ask < bid or not _snapshot_fresh(now_ms, ts, self.policy.max_snapshot_age_ms):
                     blockers.append(f"invalid_or_stale_ticker:{ccy}")
                     continue
                 if bid_size < amount:
@@ -325,7 +337,7 @@ class PortfolioRiskEngine:
                 ask = _d(ticker.get("askPx"), "position ask", allow_zero=False)
                 bid_size = _d(ticker.get("bidSz"), "position bid size", allow_zero=False)
                 ts = int(_d(ticker.get("ts"), "position ticker timestamp", allow_zero=False))
-                if ask < bid or now_ms < ts or now_ms - ts > self.policy.max_snapshot_age_ms:
+                if ask < bid or not _snapshot_fresh(now_ms, ts, self.policy.max_snapshot_age_ms):
                     blockers.append("position_ticker_stale_or_invalid")
                 elif bid_size < basis["quantity"]:
                     blockers.append("insufficient_position_bid_depth")
@@ -391,7 +403,7 @@ class PortfolioRiskEngine:
                 bid_px = _d(planned_ticker.get("bidPx"), "planned entry bid", allow_zero=False)
                 ask_size = _d(planned_ticker.get("askSz"), "planned entry ask size", allow_zero=False)
                 ticker_ts = int(_d(planned_ticker.get("ts"), "planned entry ticker timestamp", allow_zero=False))
-                if ask_px < bid_px or now_ms < ticker_ts or now_ms - ticker_ts > self.policy.max_snapshot_age_ms:
+                if ask_px < bid_px or not _snapshot_fresh(now_ms, ticker_ts, self.policy.max_snapshot_age_ms):
                     raise PortfolioError("Planned entry ticker is stale or invalid")
                 spread_pct = (ask_px - bid_px) / bid_px * Decimal("100")
                 if spread_pct > self.policy.max_spread_pct:

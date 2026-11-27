@@ -84,6 +84,26 @@ def test_stale_ticker_blocks_entry():
     assert report["entry_allowed"] is False
 
 
+def test_future_skew_within_tolerance_is_fresh():
+    data = _snapshot(balance_ts=NOW + 5_000, ticker_ts=NOW + 5_000)
+    report = _engine().evaluate(**data, now_ms=NOW)
+    assert "stale_balance_snapshot" not in report["blockers"]
+    assert "position_ticker_stale_or_invalid" not in report["blockers"]
+    assert "invalid_or_stale_ticker:AAA" not in report["blockers"]
+
+
+def test_future_skew_beyond_tolerance_is_stale():
+    data = _snapshot(balance_ts=NOW + 5_001, ticker_ts=NOW + 5_001)
+    report = _engine().evaluate(**data, now_ms=NOW)
+    assert "stale_balance_snapshot" in report["blockers"]
+    assert report["entry_allowed"] is False
+
+
+def test_policy_rejects_widened_snapshot_age_window():
+    with pytest.raises(ValueError):
+        PortfolioPolicy(max_snapshot_age_ms=30_001)
+
+
 def test_balance_ledger_mismatch_blocks_entry():
     data = _snapshot(balance_qty="0.9")
     report = _engine().evaluate(**data, now_ms=NOW)
