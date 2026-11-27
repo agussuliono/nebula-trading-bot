@@ -77,10 +77,35 @@ def test_build_candidates_rejects_stale_future_and_duplicate_tickers():
             "bidSz":"5", "askSz":"5", "volCcy24h":"1000000", "ts":str(now - 1000)}
     assert len(build_candidates([instrument], [base], now_ms=now)) == 1
     stale = {**base, "ts":str(now - 31_000)}
-    future = {**base, "ts":str(now + 1)}
     assert build_candidates([instrument], [stale], now_ms=now) == []
-    assert build_candidates([instrument], [future], now_ms=now) == []
     assert build_candidates([instrument], [base, base], now_ms=now) == []
+
+
+def test_build_candidates_future_skew_tolerance_is_bounded():
+    now = 10_000_000_000
+    instrument = {"instId":"BTC-USDT", "instType":"SPOT", "state":"live",
+                  "quoteCcy":"USDT", "listTime":str(now - 90 * 86_400_000)}
+    base = {"instId":"BTC-USDT", "bidPx":"99", "askPx":"100",
+            "bidSz":"5", "askSz":"5", "volCcy24h":"1000000", "ts":str(now)}
+    # Exchange clocks may stamp tickers slightly ahead of the runtime clock.
+    for delta in (1, 5_000):
+        ticker = {**base, "ts":str(now + delta)}
+        assert len(build_candidates([instrument], [ticker], now_ms=now)) == 1
+    too_far = {**base, "ts":str(now + 5_001)}
+    assert build_candidates([instrument], [too_far], now_ms=now) == []
+    edge_stale = {**base, "ts":str(now - 30_001)}
+    assert build_candidates([instrument], [edge_stale], now_ms=now) == []
+
+
+def test_build_candidates_rejects_widened_ticker_age_window():
+    import pytest
+    now = 10_000_000_000
+    instrument = {"instId":"BTC-USDT", "instType":"SPOT", "state":"live",
+                  "quoteCcy":"USDT", "listTime":str(now - 90 * 86_400_000)}
+    ticker = {"instId":"BTC-USDT", "bidPx":"99", "askPx":"100",
+              "bidSz":"5", "askSz":"5", "volCcy24h":"1000000", "ts":str(now - 30_001)}
+    with pytest.raises(ValueError):
+        build_candidates([instrument], [ticker], now_ms=now, max_ticker_age_ms=31_000)
 
 
 def test_build_candidates_rejects_future_listing_and_nonfinite_market_fields():

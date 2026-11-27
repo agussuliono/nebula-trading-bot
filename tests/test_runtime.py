@@ -96,6 +96,11 @@ def test_policy_rejects_unsupported_bar():
         RuntimePolicy(bar="5m")
 
 
+def test_policy_rejects_widened_ticker_age_window():
+    with pytest.raises(ValueError):
+        RuntimePolicy(max_ticker_age_ms=30_001)
+
+
 def test_runtime_excludes_stale_candles(tmp_path):
     runtime, _ = _runtime(tmp_path, FakePublicClient(stale=True))
     result = runtime.run_once()

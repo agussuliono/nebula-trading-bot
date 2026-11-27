@@ -12,8 +12,8 @@ import math
 from .entry_plan import EntryPlanPolicy, build_entry_plan
 from .instruments import SpotInstrument
 from .scanner import (
-    build_candidates, candle_range_volatility, rank_candidates,
-    valid_traded_candle_count,
+    MAX_TICKER_AGE_MS, build_candidates, candle_range_volatility,
+    rank_candidates, valid_traded_candle_count,
 )
 from .strategy import trend_signal, closed_candles
 
@@ -58,8 +58,9 @@ class RuntimePolicy:
                 or self.max_candle_age_intervals < 1
                 or isinstance(self.max_ticker_age_ms, bool)
                 or not isinstance(self.max_ticker_age_ms, int)
-                or self.max_ticker_age_ms <= 0):
-            raise ValueError("candle age intervals and ticker age must be positive")
+                or self.max_ticker_age_ms <= 0
+                or self.max_ticker_age_ms > MAX_TICKER_AGE_MS):
+            raise ValueError("candle age intervals and ticker age must be positive, with ticker age no greater than MAX_TICKER_AGE_MS")
         if self.entry_plan_policy is not None and not isinstance(self.entry_plan_policy, EntryPlanPolicy):
             raise ValueError("entry_plan_policy must be an EntryPlanPolicy or None")
 
